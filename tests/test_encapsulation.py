@@ -100,16 +100,18 @@ def test_rechunker_splits_mixed_content(mocker):
     """
     from markdown_consolidator.encapsulation import Rechunker
 
-    # Mock Ollama response
-    mock_response = mocker.Mock()
-    mock_response.json.return_value = {
-        'response': '''[
+    # Mock Claude response
+    mock_content = mocker.Mock()
+    mock_content.text = '''[
             {"header": "Database Requirements", "content": "PostgreSQL 14 required."},
             {"header": "Memory Configuration", "content": "Set memory limits to 4GB."}
         ]'''
-    }
-    mock_response.raise_for_status = mocker.Mock()
-    mocker.patch('httpx.post', return_value=mock_response)
+    mock_message = mocker.Mock()
+    mock_message.content = [mock_content]
+
+    mock_client = mocker.Mock()
+    mock_client.messages.create.return_value = mock_message
+    mocker.patch('anthropic.Anthropic', return_value=mock_client)
 
     section = {
         'section_id': 'doc/Notes',
@@ -119,7 +121,7 @@ def test_rechunker_splits_mixed_content(mocker):
         'encapsulation_score': 0.3,
     }
 
-    rechunker = Rechunker()
+    rechunker = Rechunker(api_key='test-key')
     result = rechunker.rechunk_section(section)
 
     assert len(result) >= 2

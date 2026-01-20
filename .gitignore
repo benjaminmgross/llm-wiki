@@ -54,6 +54,7 @@ thoughts/
 research/
 plans/
 handoffs/
+docs/reviews/
 .env
 
 # Claude Code - ALL files should be ignored
@@ -70,3 +71,4 @@ CLAUDE.md.new
 .cline/
 .taskmaster/
 .aide/
+.claude/config.yaml

@@ -1,22 +1,25 @@
 """
-Generate summaries for sections using Ollama.
+Generate summaries for sections using Claude.
 """
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-import httpx
+import anthropic
 
 
 class Summarizer:
-    """Generate summaries using local Ollama LLM."""
+    """Generate summaries using Claude LLM."""
 
     def __init__(
         self,
-        model: str = "llama3.2:3b",
-        base_url: str = "http://localhost:11434",
+        model: str = "claude-sonnet-4-5-20250929",
+        api_key: str | None = None,
         timeout: float = 30.0,
+        max_workers: int = 10,
     ):
         """
         Initialize summarizer.
@@ -24,41 +27,75 @@ class Summarizer:
         Parameters
         ----------
         model : str
-            Ollama model name.
-        base_url : str
-            Ollama API base URL.
+            Claude model name.
+        api_key : str | None
+            Anthropic API key. If None, uses ANTHROPIC_API_KEY env var.
         timeout : float
             Request timeout in seconds.
+        max_workers : int
+            Maximum parallel API calls (default: 10).
         """
         self.model = model
-        self.base_url = base_url
         self.timeout = timeout
+        self.max_workers = max_workers
+        self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        self._client: anthropic.Anthropic | None = None
 
-    def _generate(self, prompt: str) -> str | None:
-        """Generate text from Ollama."""
-        try:
-            response = httpx.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "stream": False,
-                },
+    @property
+    def client(self) -> anthropic.Anthropic:
+        """Lazy-initialize the Anthropic client."""
+        if self._client is None:
+            self._client = anthropic.Anthropic(
+                api_key=self._api_key,
                 timeout=self.timeout,
             )
-            response.raise_for_status()
-            return response.json().get('response', '').strip()
+        return self._client
+
+    def _generate(self, prompt: str) -> str | None:
+        """Generate text from Claude."""
+        try:
+            message = self.client.messages.create(
+                model=self.model,
+                max_tokens=256,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+            )
+            return message.content[0].text.strip()
         except Exception:
             return None
 
-    def summarize_sections(self, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _summarize_one(self, section: dict[str, Any]) -> tuple[int, str | None]:
+        """Summarize a single section. Returns (index, summary)."""
+        heading = section.get('heading', '')
+        content = section.get('content', '')[:1000]  # Limit context
+
+        prompt = f"""Summarize this documentation section in one sentence (max 100 characters).
+
+Section: {heading}
+
+Content:
+{content}
+
+Summary:"""
+
+        return self._generate(prompt)
+
+    def summarize_sections(
+        self,
+        sections: list[dict[str, Any]],
+        *,
+        verbose: bool = True,
+    ) -> list[dict[str, Any]]:
         """
-        Add summaries to sections.
+        Add summaries to sections using parallel processing.
 
         Parameters
         ----------
         sections : list[dict]
             List of section dicts with 'content' and 'heading' keys.
+        verbose : bool
+            Print progress updates.
 
         Returns
         -------
@@ -68,20 +105,36 @@ class Summarizer:
         if not sections:
             return sections
 
-        for section in sections:
-            heading = section.get('heading', '')
-            content = section.get('content', '')[:1000]  # Limit context
+        if verbose:
+            print(f"    Summarizing {len(sections)} sections...")
 
-            prompt = f"""Summarize this documentation section in one sentence (max 100 characters).
+        completed = 0
+        results = {}
 
-Section: {heading}
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all tasks
+            future_to_idx = {
+                executor.submit(self._summarize_one, section): idx
+                for idx, section in enumerate(sections)
+            }
 
-Content:
-{content}
+            # Collect results as they complete
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception:
+                    results[idx] = None
 
-Summary:"""
+                completed += 1
+                if verbose and completed % 20 == 0:
+                    print(f"    Summarized {completed}/{len(sections)} sections...")
 
-            summary = self._generate(prompt)
-            section['summary'] = summary
+        if verbose:
+            print(f"    Summarized {completed}/{len(sections)} sections... done")
+
+        # Apply results to sections
+        for idx, section in enumerate(sections):
+            section['summary'] = results.get(idx)
 
         return sections

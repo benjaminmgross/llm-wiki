@@ -5,43 +5,48 @@ import pytest
 def test_summarizer_generates_summaries(mocker):
     """
     Given: Sections with content
-    When: Summarizing with Ollama
+    When: Summarizing with Claude
     Then: Each section gets a summary
     """
     from markdown_consolidator.summarizer import Summarizer
 
-    # Mock httpx to avoid actual Ollama calls in tests
-    mock_response = mocker.Mock()
-    mock_response.json.return_value = {'response': 'This section explains OAuth setup.'}
-    mock_response.raise_for_status = mocker.Mock()
+    # Mock Claude response
+    mock_content = mocker.Mock()
+    mock_content.text = 'This section explains OAuth setup.'
+    mock_message = mocker.Mock()
+    mock_message.content = [mock_content]
 
-    mocker.patch('httpx.post', return_value=mock_response)
+    mock_client = mocker.Mock()
+    mock_client.messages.create.return_value = mock_message
+    mocker.patch('anthropic.Anthropic', return_value=mock_client)
 
     sections = [
         {'section_id': 'a', 'heading': 'OAuth', 'content': 'OAuth requires client credentials...'},
     ]
 
-    summarizer = Summarizer(model="llama3.2:3b")
+    summarizer = Summarizer(api_key='test-key')
     result = summarizer.summarize_sections(sections)
 
     assert result[0]['summary'] == 'This section explains OAuth setup.'
 
 
-def test_summarizer_handles_ollama_unavailable(mocker):
+def test_summarizer_handles_claude_unavailable(mocker):
     """
-    Given: Ollama is not running
+    Given: Claude API is unavailable
     When: Attempting to summarize
     Then: Sections get summary=None without crashing
     """
-    import httpx
+    import anthropic
 
     from markdown_consolidator.summarizer import Summarizer
 
-    mocker.patch('httpx.post', side_effect=httpx.ConnectError("Connection refused"))
+    mock_client = mocker.Mock()
+    mock_client.messages.create.side_effect = anthropic.APIConnectionError(request=mocker.Mock())
+    mocker.patch('anthropic.Anthropic', return_value=mock_client)
 
     sections = [{'section_id': 'a', 'heading': 'Test', 'content': 'Some content'}]
 
-    summarizer = Summarizer()
+    summarizer = Summarizer(api_key='test-key')
     result = summarizer.summarize_sections(sections)
 
     assert result[0]['summary'] is None

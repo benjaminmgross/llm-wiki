@@ -366,8 +366,8 @@ def analyze_sections_cmd() -> int:
         help='Output manifest file'
     )
     parser.add_argument('--threshold', '-t', type=float, default=0.5, help='Clustering threshold (0-1)')
-    parser.add_argument('--summarize', action='store_true', help='Generate LLM summaries via Ollama')
-    parser.add_argument('--model', default='llama3.2:3b', help='Ollama model for summaries')
+    parser.add_argument('--summarize', action='store_true', help='Generate LLM summaries via Claude')
+    parser.add_argument('--model', default='claude-sonnet-4-5-20250929', help='Claude model for summaries and rechunking')
     parser.add_argument(
         '--encapsulate',
         action='store_true',
@@ -438,6 +438,21 @@ def analyze_sections_cmd() -> int:
         original_count = len(sections)
         sections = rechunker.rechunk_sections(sections)
         print(f"  Now have {len(sections)} sections (was {original_count})")
+
+        # Re-embed and re-extract keywords for rechunked sections
+        rechunked_sections = [s for s in sections if s.get('rechunked_from')]
+        if rechunked_sections:
+            print(f"  Re-embedding {len(rechunked_sections)} rechunked sections...")
+            rechunked_sections = embedder.embed_sections(rechunked_sections)
+            print(f"  Re-extracting keywords for rechunked sections...")
+            rechunked_sections = extractor.extract_keywords(rechunked_sections)
+
+            # Merge back: replace rechunked sections in the main list
+            rechunked_by_id = {s['section_id']: s for s in rechunked_sections}
+            sections = [
+                rechunked_by_id.get(s['section_id'], s)
+                for s in sections
+            ]
 
     # Step 4: Summarize (optional)
     if args.summarize:
