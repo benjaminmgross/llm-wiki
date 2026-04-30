@@ -20,6 +20,7 @@ from mdwiki.doctor import format_report, run_doctor
 from mdwiki.ingest import IngestError, ingest_many, ingest_source
 from mdwiki.init import NestedWikiError, init_wiki
 from mdwiki.lint import lint_wiki
+from mdwiki.lint_fix import lint_fix
 from mdwiki.llm import UnknownProviderError
 from mdwiki.llm.anthropic import MissingAPIKeyError
 from mdwiki.query import QueryError, query_wiki
@@ -124,6 +125,16 @@ def _build_parser() -> argparse.ArgumentParser:
     query_p.set_defaults(_handler=_cmd_query)
 
     lint_p = subparsers.add_parser("lint", help="Health-check the wiki: broken refs, orphans, stale pages, coverage gaps.")
+    lint_p.add_argument(
+        "--fix",
+        nargs="?",
+        const="default",
+        choices=("default", "full"),
+        default=None,
+        help="Interactively remediate findings. `--fix` (=default) handles broken-refs only; "
+        "`--fix=full` also re-ingests stale and coverage-gap sources (LLM round-trips).",
+    )
+    lint_p.add_argument("--yes", "-y", action="store_true", help="Skip per-finding prompts; apply every applicable fix.")
     lint_p.set_defaults(_handler=_cmd_lint)
 
     undo_p = subparsers.add_parser("undo", help="Roll back the last N applied transactions (file writes + DB rows).")
@@ -348,13 +359,22 @@ def _cmd_query(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_lint(_args: argparse.Namespace) -> int:
-    """Handler for ``mdwiki lint``."""
+def _cmd_lint(args: argparse.Namespace) -> int:
+    """Handler for ``mdwiki lint [--fix [=full]]``."""
     try:
         wiki_root = find_wiki()
     except WikiNotFound as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+    if getattr(args, "fix", None) is not None:
+        result = lint_fix(wiki_root, mode=args.fix, yes=args.yes)
+        print(
+            f"Lint --fix={args.fix}: applied {result.fixed_count}, "
+            f"skipped {result.skipped_count}, failed {result.failed_count}."
+        )
+        return 0 if result.failed_count == 0 else 1
+
     report = lint_wiki(wiki_root)
     if not report.findings:
         print("Lint: clean — no findings.")
