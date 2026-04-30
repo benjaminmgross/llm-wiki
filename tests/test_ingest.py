@@ -251,6 +251,42 @@ def test_ingest_records_backref_for_each_claim(wiki_with_one_source: Path, mocke
 
 
 @pytest.mark.unit
+def test_ingest_update_replaces_entire_page_content(wiki_with_one_source: Path, mocker: MockerFixture) -> None:
+    """An update to an existing page must replace its content, not append."""
+    page = wiki_with_one_source / "wiki" / "concepts" / "attention.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("# Old\n\nold body that must be removed")
+
+    update_plan = json.dumps(
+        {
+            "verdict": "ingest",
+            "rationale": "Update the existing page",
+            "updates": [
+                {
+                    "page": "wiki/concepts/attention.md",
+                    "content": "# Attention\n\nfully revised page body",
+                    "claims": [
+                        {
+                            "source_section_id": "ai.md/Intro",
+                            "quote": "this paper introduces attention sinks for long contexts",
+                        }
+                    ],
+                }
+            ],
+            "new_pages": [],
+            "cross_refs": [],
+        }
+    )
+    _mock_provider(mocker, update_plan)
+
+    ingest_source(wiki_with_one_source, "ai.md", yes=True)
+
+    body = page.read_text()
+    assert body == "# Attention\n\nfully revised page body"
+    assert "old body that must be removed" not in body
+
+
+@pytest.mark.unit
 def test_ingest_low_quality_verdict_marks_ingested_without_writes(
     wiki_with_one_source: Path, mocker: MockerFixture
 ) -> None:

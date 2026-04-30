@@ -1,11 +1,13 @@
 ---
 title: mdwiki — v1.0.0 Design
 created: 2025-04-29
-updated: 2026-04-29
-version: 1.0.4
+updated: 2026-04-30
+version: 1.0.5
 status: locked
 tags: [mdwiki, design, llm-wiki, karpathy-pattern]
 supersedes: v0 design
+changelog:
+  - 1.0.5 (2026-04-30) — round-1 review fixes. UPDATE schema: drop `section`; `content` is the COMPLETE revised page body (no section splicing in v1.0.0). Document `mdwiki rebuild` as sources-only restoration; backrefs/events/pages are not replayable from log.md alone (re-ingest sources to recover). Document `mdwiki ingest --pending` as the bulk-run resume mechanism (no checkpoint file in v1.0.0). Add path-traversal defense in plan parser. Atomic file writes via tmp+os.replace. WAL journaling + 30s busy_timeout for concurrent invocation safety. HTTP timeout + max_retries=2 on the Anthropic client.
 ---
 
 # mdwiki — v1.0.0 Design
@@ -226,10 +228,12 @@ Output schema:
 {
   "verdict": "ingest" | "duplicate-of:<page_path>" | "low-quality" | "out-of-scope",
   "rationale": "<one sentence>",
-  "updates":     [{ "page": "...", "section": "...", "content": "...", "claims": [{ "source_section_id": "...", "quote": "..." }] }],
+  "updates":     [{ "page": "...", "content": "<COMPLETE revised page body>", "claims": [{ "source_section_id": "...", "quote": "..." }] }],
   "new_pages":   [{ "path": "...", "kind": "entity|concept|synthesis", "content": "...", "claims": [...] }],
   "cross_refs":  [{ "from_page": "...", "to_page": "...", "anchor_text": "..." }]
 }
+
+For an UPDATE, ``content`` is the COMPLETE revised page body — mdwiki replaces the entire file with this text. The LLM is responsible for preserving everything it doesn't intend to change. v1.0.0 deliberately skips section-aware splicing (simpler, more reliable, avoids markdown-AST work).
 
 If verdict is anything other than "ingest", updates/new_pages/cross_refs MUST be empty.
 ```

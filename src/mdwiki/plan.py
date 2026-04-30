@@ -35,10 +35,16 @@ class Claim:
 
 @dataclass(frozen=True)
 class Update:
-    """An edit to an existing wiki page section."""
+    """A full-page rewrite of an existing wiki page.
+
+    ``content`` is the COMPLETE revised page body — the apply step writes it
+    verbatim to ``page`` (no section splicing). The LLM is responsible for
+    preserving any text it doesn't intend to change. v1.0.0 deliberately
+    skips section-aware splicing (see C10 in the v1.0.0 review): full-page
+    rewrites are simpler, more reliable, and avoid markdown-AST parsing.
+    """
 
     page: str
-    section: str
     content: str
     claims: tuple[Claim, ...]
 
@@ -185,7 +191,6 @@ def _parse_update(raw: Any) -> Update:
         raise PlanValidationError(f"Expected update object, got {type(raw).__name__}.")
     return Update(
         page=_require(raw, "page", str),
-        section=_require(raw, "section", str),
         content=_require(raw, "content", str),
         claims=tuple(_parse_claim(c) for c in _require(raw, "claims", list)),
     )

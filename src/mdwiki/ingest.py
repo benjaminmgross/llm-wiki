@@ -160,11 +160,13 @@ def ingest_source(
             tx.write_file(wiki_root / new_page.path, new_page.content)
             page_embeddings[new_page.path] = serialize(embedder.embed_text(new_page.content))
         for update in plan.updates:
+            # update.content is the COMPLETE revised page (per the prompt
+            # contract) — write it verbatim. Previous releases concatenated
+            # update.content onto the existing file, which silently violated
+            # the spec and made wiki pages grow without bound.
             full_target = wiki_root / update.page
-            existing = full_target.read_text() if full_target.is_file() else ""
-            new_content = existing + "\n\n" + update.content if existing else update.content
-            tx.write_file(full_target, new_content)
-            page_embeddings[update.page] = serialize(embedder.embed_text(new_content))
+            tx.write_file(full_target, update.content)
+            page_embeddings[update.page] = serialize(embedder.embed_text(update.content))
         _apply_pages_and_backrefs(tx=tx, plan=plan, embeddings=page_embeddings, source_id=source_row["id"])
         tx.write_file(wiki_root / "wiki" / "index.md", build_index(wiki_root))
 

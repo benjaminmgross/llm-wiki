@@ -30,13 +30,18 @@ Every claim in your plan MUST include:
   mdwiki greps the source for this exact quote (whitespace-normalized, case-folded).
   If a quote is missing or fabricated, the entire plan is REJECTED.
 
+For an UPDATE, ``content`` is the COMPLETE revised page content — the entire
+page body as you want it stored. mdwiki replaces the whole file with this
+text. Preserve everything you don't intend to change. Do NOT send a
+diff or section fragment.
+
 Output ONLY a valid JSON object matching this schema (no preamble, no commentary,
 no markdown fencing):
 
 {
   "verdict": "ingest" | "duplicate-of:<page_path>" | "low-quality" | "out-of-scope",
   "rationale": "<one sentence explaining the verdict>",
-  "updates":     [{"page": "...", "section": "...", "content": "...", "claims": [{"source_section_id": "...", "quote": "..."}]}],
+  "updates":     [{"page": "...", "content": "<COMPLETE revised page content>", "claims": [{"source_section_id": "...", "quote": "..."}]}],
   "new_pages":   [{"path": "...", "kind": "entity"|"concept"|"synthesis", "content": "...", "claims": [...]}],
   "cross_refs":  [{"from_page": "...", "to_page": "...", "anchor_text": "..."}]
 }

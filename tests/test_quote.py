@@ -13,7 +13,7 @@ def _plan(*, updates: tuple[Update, ...] = (), new_pages: tuple[NewPage, ...] = 
 
 
 def _update(*claims: Claim) -> Update:
-    return Update(page="wiki/foo.md", section="x", content="x", claims=claims)
+    return Update(page="wiki/foo.md", content="x", claims=claims)
 
 
 @pytest.mark.unit

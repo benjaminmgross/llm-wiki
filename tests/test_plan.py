@@ -23,8 +23,7 @@ def _valid_payload(verdict: str = "ingest") -> dict:
         "updates": [
             {
                 "page": "wiki/concepts/attention-sinks.md",
-                "section": "Recent findings",
-                "content": "Attention sinks reduce drift in long contexts.",
+                "content": "# Attention Sinks\n\nAttention sinks reduce drift in long contexts.",
                 "claims": [{"source_section_id": "sec-1", "quote": "attention sinks reduce drift"}],
             }
         ],
