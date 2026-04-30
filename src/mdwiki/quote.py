@@ -64,8 +64,42 @@ def verify_plan(plan: Plan, *, source_text: str, section_ids: set[str]) -> Quote
 
 
 _WHITESPACE_RE = re.compile(r"\s+")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_MD_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+_MD_EMPHASIS_RE = re.compile(r"(\*{1,3}|_{1,3})(\S(?:.*?\S)?)\1")
+_NON_ALNUM_RE = re.compile(r"[^\w\s]")
+_UNICODE_PUNCT_FOLDS = str.maketrans(
+    {
+        "‘": "'",  # ‘
+        "’": "'",  # ’
+        "‚": "'",  # ‚
+        "‛": "'",  # ‛
+        "“": '"',  # “
+        "”": '"',  # ”
+        "„": '"',  # „
+        "‟": '"',  # ‟
+        "–": "-",  # – (en dash)
+        "—": "-",  # — (em dash)
+        "―": "-",  # ― (horizontal bar)
+        "…": "...",  # …
+        " ": " ",  # non-breaking space
+    }
+)
 
 
 def _normalize(text: str) -> str:
-    """Collapse whitespace to single spaces and lowercase. Idempotent."""
-    return _WHITESPACE_RE.sub(" ", text).strip().lower()
+    """Bring source and quote into a comparable shape: prose, lowercased, words only.
+
+    The order is load-bearing. Markdown link extraction first (so we keep the
+    visible text and drop the URL); inline-code and emphasis next (so we strip
+    the delimiters but keep the inner content); Unicode punctuation fold next
+    (curly quotes → straight, em/en-dashes → hyphen) so the LLM's plain-ASCII
+    extract still matches the original's typography; finally collapse all
+    remaining punctuation to spaces and squeeze whitespace.
+    """
+    out = _MD_LINK_RE.sub(r"\1", text)
+    out = _MD_INLINE_CODE_RE.sub(r"\1", out)
+    out = _MD_EMPHASIS_RE.sub(r"\2", out)
+    out = out.translate(_UNICODE_PUNCT_FOLDS)
+    out = _NON_ALNUM_RE.sub(" ", out)
+    return _WHITESPACE_RE.sub(" ", out).strip().lower()
