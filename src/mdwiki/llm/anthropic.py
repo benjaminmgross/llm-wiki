@@ -12,6 +12,7 @@ import os
 import time
 
 import anthropic
+import httpx
 
 from mdwiki.llm.base import CompleteResult, Message, PingResult, Provider
 
@@ -62,7 +63,13 @@ class AnthropicProvider(Provider):
                 "ANTHROPIC_API_KEY is not set. Export it in your shell "
                 "(`export ANTHROPIC_API_KEY=sk-...`) or pass api_key= explicitly."
             )
-        self._client = anthropic.Anthropic(api_key=resolved_key)
+        # Bounded timeouts prevent a stalled socket from hanging --all forever;
+        # max_retries=2 gives us SDK-level exponential backoff on 5xx/429 for free.
+        self._client = anthropic.Anthropic(
+            api_key=resolved_key,
+            timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0),
+            max_retries=2,
+        )
 
     def ping(self) -> PingResult:
         """Issue a 1-token call to confirm auth, model, and reachability."""

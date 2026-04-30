@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import anthropic
+
 from mdwiki.chunker import MarkdownChunker
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.embedder import Embedder
@@ -182,10 +184,13 @@ def ingest_many(
     """Ingest every source in the chosen ``scope`` sequentially.
 
     Resilient: a failure on one source (quote verification, LLM truncation,
-    transient network) is collected as a returned ``IngestResult`` with
-    ``applied=False`` and processing continues with the next source. Each
-    source is its own ``IngestTransaction`` — interrupting between sources
-    is safe.
+    transient network/API error) is collected as a returned ``IngestResult``
+    with ``applied=False`` and processing continues with the next source.
+    Each source is its own ``IngestTransaction`` — interrupting between
+    sources is safe, and the recovery path is to re-run with ``scope="pending"``
+    (sources whose tx never committed are still ``pending``). v1.0.0 does
+    NOT carry a checkpoint file: on partial bulk runs, ``--pending`` is the
+    resume mechanism.
 
     Parameters
     ----------
@@ -223,7 +228,12 @@ def ingest_many(
                 embedder=embedder,
             )
             results.append(result)
-        except IngestError as exc:
+        except (IngestError, anthropic.APIError) as exc:
+            # IngestError covers logical failures (bad quotes, parse errors).
+            # anthropic.APIError covers SDK-level transient/permanent failures
+            # (rate limit, overloaded, server error) that the SDK's max_retries
+            # already exhausted — surface and continue rather than aborting
+            # the whole bulk run on one bad source.
             if on_failure is not None:
                 on_failure(original_path, exc)
             results.append(
