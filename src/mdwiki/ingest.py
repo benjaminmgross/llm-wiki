@@ -15,6 +15,7 @@ from typing import Any
 from mdwiki.chunker import MarkdownChunker
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.llm import build_provider_from_config
+from mdwiki.llm.anthropic import OutputTruncatedError
 from mdwiki.llm.base import Message, Provider
 from mdwiki.plan import Plan, PlanValidationError, parse_plan
 from mdwiki.prompts import INGEST_SYSTEM_PROMPT, build_ingest_user_prompt
@@ -44,7 +45,7 @@ def ingest_source(
     yes: bool = False,
     provider: Provider | None = None,
     confirm: Callable[[Plan], bool] | None = None,
-    max_tokens: int = 4096,
+    max_tokens: int = 16000,
 ) -> IngestResult:
     """Run the full ingest pipeline for one source.
 
@@ -95,11 +96,14 @@ def ingest_source(
         recent_log_entries=recent_log,
     )
 
-    response = provider.complete(
-        system=INGEST_SYSTEM_PROMPT,
-        messages=[Message(role="user", content=user_prompt)],
-        max_tokens=max_tokens,
-    )
+    try:
+        response = provider.complete(
+            system=INGEST_SYSTEM_PROMPT,
+            messages=[Message(role="user", content=user_prompt)],
+            max_tokens=max_tokens,
+        )
+    except OutputTruncatedError as exc:
+        raise IngestError(str(exc)) from exc
 
     try:
         plan = parse_plan(response.text)

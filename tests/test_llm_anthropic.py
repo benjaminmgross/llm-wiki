@@ -153,6 +153,27 @@ def test_complete_passes_system_with_cache_control(mocker: MockerFixture) -> Non
 
 
 @pytest.mark.unit
+def test_complete_raises_clear_error_on_max_tokens_truncation(mocker: MockerFixture) -> None:
+    fake_client = MagicMock()
+    fake_response = MagicMock()
+    fake_response.content = [MagicMock(type="text", text='{"verdict": "ingest", "rationale": "trun')]
+    fake_response.stop_reason = "max_tokens"
+    fake_response.usage = MagicMock(
+        input_tokens=100, output_tokens=4096, cache_read_input_tokens=0, cache_creation_input_tokens=0
+    )
+    fake_client.messages.create.return_value = fake_response
+
+    provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="sk-x", client=fake_client)
+    from mdwiki.llm.anthropic import OutputTruncatedError
+
+    with pytest.raises(OutputTruncatedError) as excinfo:
+        provider.complete(system="sys", messages=[Message(role="user", content="x")], max_tokens=4096)
+    msg = str(excinfo.value)
+    assert "truncat" in msg.lower() or "max_tokens" in msg
+    assert "4096" in msg
+
+
+@pytest.mark.unit
 def test_complete_reports_cache_read_tokens(mocker: MockerFixture) -> None:
     fake_client = MagicMock()
     fake_response = MagicMock()

@@ -20,6 +20,10 @@ class MissingAPIKeyError(RuntimeError):
     """Raised when ``ANTHROPIC_API_KEY`` is unset and no explicit ``api_key`` was passed."""
 
 
+class OutputTruncatedError(RuntimeError):
+    """Raised when the model hit ``max_tokens`` mid-response (truncated output)."""
+
+
 class AnthropicProvider(Provider):
     """Concrete provider backed by Anthropic's Messages API."""
 
@@ -116,13 +120,25 @@ class AnthropicProvider(Provider):
         messages: list[Message],
         max_tokens: int = 1024,
     ) -> CompleteResult:
-        """Issue a single completion request with prompt caching on the system prompt."""
+        """Issue a single completion request with prompt caching on the system prompt.
+
+        Raises
+        ------
+        OutputTruncatedError
+            If ``stop_reason`` is ``"max_tokens"`` — the response is truncated and
+            cannot be safely parsed as JSON. Caller should retry with a higher cap.
+        """
         response = self._client.messages.create(
             model=self.model,
             max_tokens=max_tokens,
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": m.role, "content": m.content} for m in messages],
         )
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            raise OutputTruncatedError(
+                f"Model hit max_tokens={max_tokens} mid-response. The output is truncated and likely invalid JSON. "
+                f"Re-run with a higher --max-tokens (or trim the source if it's enormous)."
+            )
         text = next((block.text for block in response.content if getattr(block, "type", None) == "text"), "")
         usage = response.usage
         return CompleteResult(
