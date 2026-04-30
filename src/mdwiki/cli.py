@@ -23,6 +23,7 @@ from mdwiki.query import QueryError, query_wiki
 from mdwiki.rebuild import RebuildError, rebuild_wiki
 from mdwiki.source import find_matching_sources, format_disambiguation, format_source_info, get_source_info
 from mdwiki.status import format_status, get_status
+from mdwiki.synthesize import SynthesisError, synthesize_auto, synthesize_topic
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -93,6 +94,16 @@ def _build_parser() -> argparse.ArgumentParser:
     query_p.add_argument("--file", action="store_true", help="File the answer as a synthesis page (wiki/syntheses/<slug>.md).")
     query_p.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation prompt when --file is set.")
     query_p.set_defaults(_handler=_cmd_query)
+
+    syn_p = subparsers.add_parser(
+        "synthesize",
+        help="Produce a synthesis page from a topic, or auto-discover cluster opportunities.",
+    )
+    syn_group = syn_p.add_mutually_exclusive_group(required=True)
+    syn_group.add_argument("topic", nargs="?", help="Explicit topic for the synthesis page.")
+    syn_group.add_argument("--auto", action="store_true", help="Walk the cross-ref graph and propose syntheses for each cluster.")
+    syn_p.add_argument("--yes", "-y", action="store_true", help="Apply (or apply-all in --auto) without prompting.")
+    syn_p.set_defaults(_handler=_cmd_synthesize)
 
     return parser
 
@@ -201,6 +212,44 @@ def _cmd_query(args: argparse.Namespace) -> int:
     if result.filed_path:
         print(f"\nFiled as synthesis page: {result.filed_path}")
     return 0
+
+
+def _cmd_synthesize(args: argparse.Namespace) -> int:
+    """Handler for ``mdwiki synthesize <topic>`` and ``mdwiki synthesize --auto``."""
+    try:
+        wiki_root = find_wiki()
+    except WikiNotFound as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        if args.auto:
+            results = synthesize_auto(wiki_root, yes=args.yes)
+            if not results:
+                print("No qualifying cross-ref clusters found (need ≥3 mutually-linked pages).")
+                return 0
+            applied = sum(1 for r in results if r.applied)
+            print(f"Auto synthesis: {len(results)} cluster(s) evaluated, {applied} applied.")
+            for r in results:
+                print(f"  - {r.topic_or_title}: {r.message}")
+                if r.filed_path:
+                    print(f"      filed: {r.filed_path}")
+            return 0
+
+        result = synthesize_topic(wiki_root, args.topic, yes=args.yes)
+        print(result.message)
+        if result.filed_path:
+            print(f"Filed: {result.filed_path}")
+        return 0
+    except SynthesisError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except MissingAPIKeyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except UnknownProviderError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:

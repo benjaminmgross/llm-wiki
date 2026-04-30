@@ -179,3 +179,101 @@ def build_query_user_prompt(
     parts.append("Answer the question now, drawing on the cited pages and citing them as you go.")
 
     return "\n".join(parts)
+
+
+SYNTHESIZE_TOPIC_SYSTEM_PROMPT: str = """\
+You are writing a synthesis page for a wiki — a cross-cutting writeup that
+braids together what the wiki already knows about a topic.
+
+A good synthesis page:
+- Compares, contrasts, or weaves together multiple existing pages — it is NOT
+  a transcription of one page nor a duplicate of an existing concept page
+- Cites the pages it draws from with relative markdown links:
+  [page title](../concepts/some-concept.md)
+- Adds genuine value-over-the-parts: a decision framework, a comparison table,
+  an architectural summary, or a tension/trade-off the individual pages don't
+  surface on their own
+- Is 300–800 words; longer if the topic genuinely warrants it
+- Has a clear H1 title (the topic) and 2–4 H2 sections
+
+Be skeptical:
+- If the wiki doesn't cover the topic in enough depth to synthesize, say so
+  honestly. Output the single line "INSUFFICIENT_COVERAGE: <why>" and stop.
+- If the topic would just duplicate an existing concept page, say so:
+  "DUPLICATE_OF: <page-path>" and stop.
+- An empty/refused synthesis is a valid output.
+
+Output ONLY the synthesis page body in markdown, OR one of the two refusal
+prefixes above. No preamble, no JSON, no fences.
+"""
+
+
+def build_synthesize_topic_user_prompt(
+    *,
+    topic: str,
+    candidate_pages: list[dict[str, str]],
+    schema_text: str,
+    index_text: str,
+) -> str:
+    """Assemble the user prompt for ``mdwiki synthesize <topic>``."""
+    parts: list[str] = []
+
+    parts.append("# Wiki schema (citation + naming conventions to follow)")
+    parts.append(schema_text.strip())
+    parts.append("")
+
+    parts.append("# Wiki index (full catalog of pages)")
+    if index_text.strip():
+        parts.append(index_text.strip())
+    else:
+        parts.append("(this wiki has no pages yet)")
+    parts.append("")
+
+    parts.append("# Candidate pages most relevant to the topic")
+    if candidate_pages:
+        for page in candidate_pages:
+            parts.append(f"## {page['path']}")
+            parts.append(page["content"].strip())
+            parts.append("")
+    else:
+        parts.append("(no candidate pages — output INSUFFICIENT_COVERAGE)")
+    parts.append("")
+
+    parts.append(f"# Topic for synthesis\n\n{topic}")
+    parts.append("")
+    parts.append("Write the synthesis page now, or refuse if the wiki doesn't substantively cover the topic.")
+
+    return "\n".join(parts)
+
+
+SYNTHESIZE_CLUSTER_SYSTEM_PROMPT: str = """\
+You are evaluating whether a cluster of cross-referencing wiki pages would
+benefit from a synthesis page that braids them together.
+
+Be skeptical:
+- Most clusters do NOT need a synthesis. Cross-references are usually enough.
+- Only propose a synthesis when the cluster shares a non-obvious through-line
+  that's worth its own page (a comparison, a decision framework, a unifying
+  pattern, an inheritance/composition relationship).
+
+Output STRICT JSON only, no preamble or fences:
+
+{
+  "propose": true | false,
+  "title": "<short noun phrase, kebab-case-friendly>" | null,
+  "rationale": "<one sentence explaining why this cluster does or does not warrant a synthesis>"
+}
+
+If propose is false, title must be null.
+"""
+
+
+def build_cluster_user_prompt(*, cluster_pages: list[dict[str, str]]) -> str:
+    """Assemble the user prompt for one cluster-evaluation call in auto mode."""
+    parts: list[str] = ["# Cluster of cross-referencing pages"]
+    for page in cluster_pages:
+        parts.append(f"## {page['path']}")
+        parts.append(page["content"].strip())
+        parts.append("")
+    parts.append("Decide whether this cluster warrants a synthesis page.")
+    return "\n".join(parts)
