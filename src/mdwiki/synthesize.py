@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mdwiki.discover import WIKI_DIR_NAME
-from mdwiki.embedder import Embedder
+from mdwiki.embedder import Embedder, get_default_embedder
 from mdwiki.embeddings import deserialize, find_top_k, serialize
 from mdwiki.index import build_index
 from mdwiki.llm import build_provider_from_config
@@ -77,7 +77,7 @@ def synthesize_topic(
     index_path = wiki_root / "wiki" / "index.md"
     index_text = index_path.read_text() if index_path.is_file() else ""
 
-    embedder = embedder or _get_default_embedder()
+    embedder = embedder or get_default_embedder()
     topic_vec = embedder.embed_text(topic)
     candidate_pages = _find_candidate_pages(wiki_root=wiki_root, query_vec=topic_vec)
 
@@ -144,7 +144,7 @@ def synthesize_auto(
         return []
 
     provider = provider or build_provider_from_config(wiki_root)
-    embedder = embedder or _get_default_embedder()
+    embedder = embedder or get_default_embedder()
     results: list[SynthesisResult] = []
 
     for cluster in clusters:
@@ -348,18 +348,3 @@ def _now_ts() -> float:
     return time.time()
 
 
-class _LazyEmbedder:
-    def __init__(self) -> None:
-        self._instance: Embedder | None = None
-
-    def get(self) -> Embedder:
-        if self._instance is None:
-            self._instance = Embedder()
-        return self._instance
-
-
-_DEFAULT = _LazyEmbedder()
-
-
-def _get_default_embedder() -> Embedder:
-    return _DEFAULT.get()

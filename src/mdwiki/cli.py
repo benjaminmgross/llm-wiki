@@ -45,7 +45,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
-        return exc.code if isinstance(exc.code, int) else 0
+        # argparse uses SystemExit("...") with a string code for parse errors;
+        # 2 is the canonical argparse exit code for usage failure.
+        return exc.code if isinstance(exc.code, int) else 2
 
     handler = getattr(args, "_handler", None)
     if handler is None:

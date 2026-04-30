@@ -12,8 +12,6 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from mdwiki.quote import _normalize  # reuse the same prose normalizer for summaries
-
 PAGE_KIND_FOLDERS: list[tuple[str, str]] = [
     ("Entities", "entities"),
     ("Concepts", "concepts"),
@@ -100,7 +98,3 @@ def summarize_first_paragraph(page_text: str, *, max_chars: int = 200) -> str:
             return cleaned[:max_chars] + "..."
         return cleaned
     return ""
-
-
-# Touch _normalize so the import isn't flagged unused; we may use it in build_index later.
-_ = _normalize

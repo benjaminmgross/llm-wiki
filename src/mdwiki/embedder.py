@@ -4,6 +4,7 @@ Generate embeddings for sections using sentence-transformers.
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from sentence_transformers import SentenceTransformer
@@ -71,3 +72,32 @@ class Embedder:
         """
         embedding = self.model.encode(text, convert_to_numpy=True)
         return embedding.tolist()
+
+
+class _LazyEmbedder:
+    """Process-wide lazy singleton for the default ``Embedder``.
+
+    Loading the sentence-transformers model is the slowest non-network op
+    in the CLI; sharing one instance across ``ingest`` / ``query`` /
+    ``synthesize`` saves both startup time and RSS. Threadsafe init via a
+    ``Lock`` keeps the singleton future-proof for embedded/server contexts.
+    """
+
+    def __init__(self) -> None:
+        self._instance: Embedder | None = None
+        self._lock = threading.Lock()
+
+    def get(self) -> Embedder:
+        if self._instance is None:
+            with self._lock:
+                if self._instance is None:
+                    self._instance = Embedder()
+        return self._instance
+
+
+_DEFAULT_EMBEDDER = _LazyEmbedder()
+
+
+def get_default_embedder() -> Embedder:
+    """Return the shared lazy ``Embedder``. Loads the model on first call."""
+    return _DEFAULT_EMBEDDER.get()

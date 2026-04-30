@@ -16,7 +16,7 @@ import anthropic
 
 from mdwiki.chunker import MarkdownChunker
 from mdwiki.discover import WIKI_DIR_NAME
-from mdwiki.embedder import Embedder
+from mdwiki.embedder import Embedder, get_default_embedder
 from mdwiki.embeddings import deserialize, find_top_k, serialize
 from mdwiki.index import build_index
 from mdwiki.llm import build_provider_from_config
@@ -98,7 +98,7 @@ def ingest_source(
     recent_log = _recent_log_entries(wiki_root, limit=10)
 
     provider = provider or build_provider_from_config(wiki_root)
-    embedder = embedder or _DEFAULT_EMBEDDER.get()
+    embedder = embedder or get_default_embedder()
     section_vectors = [embedder.embed_text(s["content"]) for s in sections] if sections else []
     candidate_pages = _find_candidate_pages(wiki_root=wiki_root, section_vectors=section_vectors)
 
@@ -215,7 +215,7 @@ def ingest_many(
     if provider is None:
         provider = build_provider_from_config(wiki_root)
     if embedder is None:
-        embedder = _DEFAULT_EMBEDDER.get()
+        embedder = get_default_embedder()
 
     results: list[IngestResult] = []
     for index, (source_id, original_path) in enumerate(targets, start=1):
@@ -405,21 +405,6 @@ def _find_candidate_pages(*, wiki_root: Path, section_vectors: list[list[float]]
         if full.is_file():
             candidates.append({"path": path, "content": full.read_text()})
     return candidates
-
-
-class _LazyEmbedder:
-    """Module-singleton for the embedder; loads the model on first access only."""
-
-    def __init__(self) -> None:
-        self._instance: Embedder | None = None
-
-    def get(self) -> Embedder:
-        if self._instance is None:
-            self._instance = Embedder()
-        return self._instance
-
-
-_DEFAULT_EMBEDDER = _LazyEmbedder()
 
 
 def _infer_kind(page_path: str) -> str:
