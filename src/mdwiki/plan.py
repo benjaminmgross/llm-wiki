@@ -15,6 +15,11 @@ from typing import Any
 VALID_KINDS: frozenset[str] = frozenset({"entity", "concept", "synthesis"})
 VALID_BARE_VERDICTS: frozenset[str] = frozenset({"ingest", "low-quality", "out-of-scope"})
 
+# Page paths the LLM proposes must be confined to wiki/. Anything else
+# (.mdwiki/config.toml, raw/<hash>.md, /etc/passwd) is rejected at parse time
+# so we fail fast — before opening a transaction or touching disk.
+_REQUIRED_PAGE_PREFIX: str = "wiki/"
+
 
 class PlanValidationError(ValueError):
     """Raised when the LLM's JSON response does not conform to the expected plan schema."""
@@ -117,7 +122,32 @@ def parse_plan(raw_json: str) -> Plan:
             f"verdict {verdict!r} must be paired with empty updates/new_pages/cross_refs; got non-empty."
         )
 
+    for update in updates:
+        _validate_page_path(update.page, field="updates[].page")
+    for new_page in new_pages:
+        _validate_page_path(new_page.path, field="new_pages[].path")
+
     return Plan(verdict=verdict, rationale=rationale, updates=updates, new_pages=new_pages, cross_refs=cross_refs)
+
+
+def _validate_page_path(path: str, *, field: str) -> None:
+    """Reject any LLM-proposed page path that escapes ``wiki/``.
+
+    Defense in depth: ``transaction.write_file`` will also block writes outside
+    ``wiki_root``, but doing the check here means a malicious or confused LLM
+    response is rejected BEFORE we open a transaction or touch disk. Without
+    this, an LLM-supplied ``.mdwiki/config.toml`` could overwrite the user's
+    config, or ``../../../etc/passwd`` could trigger an uncaught ValueError
+    deep inside the apply loop and abort the whole bulk run.
+    """
+    if not path.startswith(_REQUIRED_PAGE_PREFIX):
+        raise PlanValidationError(
+            f"{field}={path!r} must start with {_REQUIRED_PAGE_PREFIX!r}; LLM-supplied page paths are confined to wiki/."
+        )
+    if ".." in path.split("/"):
+        raise PlanValidationError(
+            f"{field}={path!r} contains a '..' segment; path traversal is not allowed."
+        )
 
 
 def _extract_json_object(raw: str) -> str:

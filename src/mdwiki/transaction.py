@@ -3,11 +3,17 @@
 Every wiki write goes through this context manager. It guarantees three things:
 
 1. **Atomicity** — either every write commits together or none of them stick.
+   File writes use the standard ``write-temp + os.replace`` pattern so a
+   crash mid-write leaves the original file intact (atomic on POSIX +
+   Windows).
 2. **Undo** — pre-modification copies of touched files land under
    ``.mdwiki/undo/<tx_id>/``, with a sibling ``__delete_on_undo__/`` directory
    marking files that were created (so undo deletes them rather than restores).
 3. **Audit** — a row in ``transactions``, an ``events`` row, and a line in
-   ``wiki/log.md`` arrive together with the file changes.
+   ``wiki/log.md`` arrive together with the file changes. The DB is the
+   source of truth: ``log.md`` is appended AFTER ``conn.commit()``; if the
+   log append fails post-commit, the DB row stays intact and a stderr
+   warning is printed (the events table can be re-rendered to log.md).
 
 If the ``with`` block raises (or calls ``abort()``), the snapshot is replayed:
 modified files are restored, created files are removed, and the database tx is
@@ -19,6 +25,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -90,7 +97,16 @@ class IngestTransaction:
         return False
 
     def write_file(self, path: Path, content: str) -> None:
-        """Write ``content`` to ``path``. Snapshots the previous file (or marks for deletion if new)."""
+        """Atomically write ``content`` to ``path``.
+
+        Writes to ``<path>.tmp-<tx_id>`` first, then ``os.replace`` swaps it
+        into place. Atomic on POSIX (rename within a filesystem) and Windows
+        (``os.replace`` semantics). A SIGKILL/power-loss between the temp
+        write and the rename leaves the original file untouched.
+
+        Snapshots the previous file (or marks the path for deletion if new)
+        so rollback can undo the change.
+        """
         path = path.resolve()
         rel = path.relative_to(self._wiki_root.resolve())
 
@@ -104,7 +120,20 @@ class IngestTransaction:
             marker.write_text("")
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
+        tmp_path = path.with_name(f"{path.name}.tmp-{self._tx_id}")
+        try:
+            tmp_path.write_text(content)
+            import os
+
+            os.replace(tmp_path, path)
+        except Exception:
+            # Best-effort cleanup of the partial temp file before re-raising.
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+            raise
         self._touched_files.append(path)
 
     def add_inverse(self, sql: str, params: tuple) -> None:
@@ -126,7 +155,8 @@ class IngestTransaction:
 
     def upsert_page(self, *, path: str, kind: str, embedding: bytes | None, last_touched_at: float) -> None:
         """Insert or update one ``pages`` row, recording the inverse for undo."""
-        assert self._conn is not None
+        if self._conn is None:
+            raise RuntimeError("IngestTransaction must be entered as a context manager before calling upsert_page().")
         prev = self._conn.execute(
             "SELECT kind, embedding, last_touched_at FROM pages WHERE path = ?", (path,)
         ).fetchone()
@@ -148,7 +178,8 @@ class IngestTransaction:
 
     def insert_backref(self, *, page_path: str, source_id: str, section_anchor: str | None, quote: str) -> None:
         """Insert a ``backrefs`` row, recording the deletion-by-rowid inverse."""
-        assert self._conn is not None
+        if self._conn is None:
+            raise RuntimeError("IngestTransaction must be entered as a context manager before calling insert_backref().")
         cursor = self._conn.execute(
             "INSERT INTO backrefs (page_path, source_id, section_anchor, quote) VALUES (?, ?, ?, ?)",
             (page_path, source_id, section_anchor, quote),
@@ -160,7 +191,8 @@ class IngestTransaction:
         raise TransactionAborted(reason)
 
     def _commit(self) -> None:
-        assert self._conn is not None
+        if self._conn is None:
+            raise RuntimeError("IngestTransaction must be entered as a context manager before calling _commit().")
         now = time.time()
 
         self._conn.execute(
@@ -193,13 +225,25 @@ class IngestTransaction:
                 (self._tx_id, sql, json.dumps(list(params))),
             )
 
-        log_path = self._wiki_root / "wiki" / "log.md"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a") as fh:
-            fh.write(f"- {_iso_utc(now)} [{self._tx_id}] {self._summary}\n")
-
+        # The DB is the source of truth — commit it BEFORE touching log.md so a
+        # disk-full or permission failure on the log append can't leave a
+        # half-line in the file with no DB row to match. If the post-commit
+        # log write fails we warn loudly but leave the DB intact (the events
+        # table can be replayed to log.md later).
         self._conn.commit()
         self._committed = True
+
+        log_path = self._wiki_root / "wiki" / "log.md"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a") as fh:
+                fh.write(f"- {_iso_utc(now)} [{self._tx_id}] {self._summary}\n")
+        except OSError as exc:
+            print(
+                f"warning: event committed to DB but log.md append failed: {exc} "
+                f"(tx_id={self._tx_id}; events table is the source of truth)",
+                file=sys.stderr,
+            )
 
     def _rollback(self) -> None:
         for touched in self._touched_files:

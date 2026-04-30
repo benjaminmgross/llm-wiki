@@ -10,7 +10,6 @@ from mdwiki.plan import (
     Claim,
     CrossRef,
     NewPage,
-    Plan,
     PlanValidationError,
     Update,
     parse_plan,
@@ -218,3 +217,39 @@ def test_parse_handles_fences_plus_preamble_plus_whitespace() -> None:
     raw = "Here you go:\n\n```json\n" + json.dumps(_valid_payload()) + "\n```\n\nDone!"
     plan = parse_plan(raw)
     assert plan.verdict == "ingest"
+
+
+@pytest.mark.unit
+def test_new_page_path_outside_wiki_is_rejected() -> None:
+    """Path traversal defense: new_pages[].path must start with wiki/."""
+    payload = _valid_payload()
+    payload["new_pages"][0]["path"] = ".mdwiki/config.toml"
+    with pytest.raises(PlanValidationError) as excinfo:
+        parse_plan(json.dumps(payload))
+    assert "wiki/" in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_update_page_outside_wiki_is_rejected() -> None:
+    """Path traversal defense: updates[].page must start with wiki/."""
+    payload = _valid_payload()
+    payload["updates"][0]["page"] = "../../../etc/passwd"
+    with pytest.raises(PlanValidationError):
+        parse_plan(json.dumps(payload))
+
+
+@pytest.mark.unit
+def test_dot_dot_segment_in_path_is_rejected() -> None:
+    payload = _valid_payload()
+    payload["new_pages"][0]["path"] = "wiki/../.mdwiki/state.db"
+    with pytest.raises(PlanValidationError) as excinfo:
+        parse_plan(json.dumps(payload))
+    assert ".." in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_absolute_path_is_rejected() -> None:
+    payload = _valid_payload()
+    payload["new_pages"][0]["path"] = "/etc/passwd"
+    with pytest.raises(PlanValidationError):
+        parse_plan(json.dumps(payload))
