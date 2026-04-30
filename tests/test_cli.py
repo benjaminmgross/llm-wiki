@@ -197,6 +197,73 @@ def test_source_subcommand_disambiguates_on_multiple_matches(
 
 
 @pytest.mark.unit
+def test_doctor_subcommand_green(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from pytest_mock import MockerFixture  # noqa: F401 — for type readers
+
+    _seed_wiki(tmp_path)
+    capsys.readouterr()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    from mdwiki.llm.base import PingResult
+    from unittest.mock import patch
+
+    fake = PingResult(provider="anthropic", model="claude-sonnet-4-6", latency_ms=12.3, ok=True, message="pong")
+    with patch("mdwiki.llm.anthropic.AnthropicProvider.ping", return_value=fake):
+        exit_code = main(["doctor"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "anthropic" in out
+    assert "claude-sonnet-4-6" in out
+
+
+@pytest.mark.unit
+def test_doctor_subcommand_red_returns_nonzero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _seed_wiki(tmp_path)
+    capsys.readouterr()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-bad")
+
+    from mdwiki.llm.base import PingResult
+    from unittest.mock import patch
+
+    fake = PingResult(provider="anthropic", model="claude-sonnet-4-6", latency_ms=8.0, ok=False, message="auth failed")
+    with patch("mdwiki.llm.anthropic.AnthropicProvider.ping", return_value=fake):
+        exit_code = main(["doctor"])
+
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "fail" in out.lower() or "auth" in out.lower()
+
+
+@pytest.mark.unit
+def test_doctor_without_api_key_returns_nonzero_with_clear_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _seed_wiki(tmp_path)
+    capsys.readouterr()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    exit_code = main(["doctor"])
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "ANTHROPIC_API_KEY" in err
+
+
+@pytest.mark.unit
 def test_rebuild_subcommand_succeeds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -14,7 +14,10 @@ from pathlib import Path
 
 from mdwiki import __version__
 from mdwiki.discover import WikiNotFound, find_wiki
+from mdwiki.doctor import format_report, run_doctor
 from mdwiki.init import NestedWikiError, init_wiki
+from mdwiki.llm import UnknownProviderError
+from mdwiki.llm.anthropic import MissingAPIKeyError
 from mdwiki.rebuild import RebuildError, rebuild_wiki
 from mdwiki.source import find_matching_sources, format_disambiguation, format_source_info, get_source_info
 from mdwiki.status import format_status, get_status
@@ -75,6 +78,9 @@ def _build_parser() -> argparse.ArgumentParser:
     rebuild_p = subparsers.add_parser("rebuild", help="Reconstruct .mdwiki/state.db from raw/.sources.json + wiki/log.md.")
     rebuild_p.set_defaults(_handler=_cmd_rebuild)
 
+    doctor_p = subparsers.add_parser("doctor", help="Check provider config and ping the LLM API.")
+    doctor_p.set_defaults(_handler=_cmd_doctor)
+
     return parser
 
 
@@ -131,3 +137,22 @@ def _cmd_rebuild(_args: argparse.Namespace) -> int:
         return 1
     print(result.message)
     return 0
+
+
+def _cmd_doctor(_args: argparse.Namespace) -> int:
+    """Handler for ``mdwiki doctor``."""
+    try:
+        wiki_root = find_wiki()
+    except WikiNotFound as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        report = run_doctor(wiki_root)
+    except MissingAPIKeyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except UnknownProviderError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(format_report(report))
+    return 0 if report.api_ok else 1
