@@ -133,6 +133,10 @@ def test_init_gitignore_protects_state_db_and_undo(fresh_target: Path) -> None:
     gi = (fresh_target / ".mdwiki" / ".gitignore").read_text()
     assert "state.db" in gi
     assert "undo/" in gi
+    # Round-2 S3: WAL mode produces -wal and -shm sidecars next to state.db.
+    # They're per-process journal files and must not be committed.
+    assert "state.db-wal" in gi
+    assert "state.db-shm" in gi
 
 
 @pytest.mark.unit
@@ -184,6 +188,25 @@ def test_init_skips_duplicate_content_without_crashing(tmp_path: Path) -> None:
     with connect(tmp_path / ".mdwiki" / "state.db") as conn:
         count = conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
     assert count == 2
+
+
+@pytest.mark.unit
+def test_init_no_orphan_raw_files_for_same_content_different_stems(tmp_path: Path) -> None:
+    """Round-2 S2: two files with identical content but different stems used to
+    leave the second file on disk with no DB row.
+
+    Pre-check by primary key now skips the copyfile entirely on a duplicate.
+    Exactly one ``raw/<hash>-<slug>.md`` should exist after init.
+    """
+    (tmp_path / "alpha.md").write_text("# Same\n\nbody")
+    (tmp_path / "beta.md").write_text("# Same\n\nbody")
+
+    result = init_wiki(tmp_path)
+
+    raw_files = [p for p in (tmp_path / "raw").glob("*.md") if not p.name.startswith(".")]
+    assert len(raw_files) == 1, f"expected exactly one raw file, got {[p.name for p in raw_files]}"
+    assert result.files_registered == 1
+    assert result.dedup_skipped == 1
 
 
 @pytest.mark.unit

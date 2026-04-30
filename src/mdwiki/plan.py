@@ -146,6 +146,14 @@ def _validate_page_path(path: str, *, field: str) -> None:
     config, or ``../../../etc/passwd`` could trigger an uncaught ValueError
     deep inside the apply loop and abort the whole bulk run.
     """
+    # Control characters (including \x00) can be used to slip a "..\\" segment
+    # past the split-on-/ check below ("wiki/\x00../etc/passwd" splits to
+    # ["wiki", "\x00..", "etc", "passwd"] — no ".." segment). Reject any
+    # control byte up front; legitimate page paths never contain them.
+    if any(ch < " " for ch in path):
+        raise PlanValidationError(
+            f"{field}={path!r} contains a control character; page paths must be plain ASCII/UTF-8 text."
+        )
     if not path.startswith(_REQUIRED_PAGE_PREFIX):
         raise PlanValidationError(
             f"{field}={path!r} must start with {_REQUIRED_PAGE_PREFIX!r}; LLM-supplied page paths are confined to wiki/."

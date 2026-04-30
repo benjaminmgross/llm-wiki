@@ -104,6 +104,8 @@ GITIGNORE_CONTENT: str = """\
 # mdwiki local cache (rebuildable from raw/ + wiki/ + log.md)
 state.db
 state.db-journal
+state.db-wal
+state.db-shm
 undo/
 """
 
@@ -257,6 +259,21 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
                 content_bytes = md_path.read_bytes()
                 content_hash = hashlib.sha256(content_bytes).hexdigest()
                 short_hash = content_hash[:12]
+
+                # Pre-check by primary key: if another file with identical
+                # content has already been registered this run, skip BOTH the
+                # INSERT and the copyfile. Without this pre-check, two files
+                # sharing content but differing in stem produce two different
+                # raw/<hash>-<slug>.md filenames; the second copy lands on
+                # disk before INSERT OR IGNORE drops the row, leaving an
+                # orphan file with no DB row and no sidecar entry.
+                already_registered = conn.execute(
+                    "SELECT 1 FROM sources WHERE id = ?", (short_hash,)
+                ).fetchone()
+                if already_registered is not None:
+                    dedup_skipped += 1
+                    continue
+
                 slug = _slugify(md_path.stem)
                 raw_filename = f"{short_hash}-{slug}.md"
                 raw_path_abs = raw_dir / raw_filename
@@ -266,14 +283,10 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
                     shutil.copyfile(md_path, raw_path_abs)
                 mtime = md_path.stat().st_mtime
 
-                cursor = conn.execute(
-                    "INSERT OR IGNORE INTO sources (id, original_path, raw_path, content_hash, mtime, status) VALUES (?, ?, ?, ?, ?, ?)",
+                conn.execute(
+                    "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) VALUES (?, ?, ?, ?, ?, ?)",
                     (short_hash, rel_posix, f"raw/{raw_filename}", content_hash, mtime, "pending"),
                 )
-                if cursor.rowcount == 0:
-                    # Duplicate primary key — another file already registered this content.
-                    dedup_skipped += 1
-                    continue
                 sidecar[short_hash] = {
                     "original_path": rel_posix,
                     "raw_path": f"raw/{raw_filename}",

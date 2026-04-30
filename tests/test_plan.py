@@ -252,3 +252,27 @@ def test_absolute_path_is_rejected() -> None:
     payload["new_pages"][0]["path"] = "/etc/passwd"
     with pytest.raises(PlanValidationError):
         parse_plan(json.dumps(payload))
+
+
+@pytest.mark.unit
+def test_null_byte_in_path_is_rejected() -> None:
+    """Round-2 S1: null byte hides a '..' segment from the split-based check.
+
+    ``"wiki/\\x00../etc/passwd".split("/") == ["wiki", "\\x00..", "etc", "passwd"]``
+    has no literal ``".."`` element, so the prior check passed even though the
+    OS-level path contains a traversal sequence.
+    """
+    payload = _valid_payload()
+    payload["new_pages"][0]["path"] = "wiki/\x00../etc/passwd"
+    with pytest.raises(PlanValidationError) as excinfo:
+        parse_plan(json.dumps(payload))
+    assert "control character" in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_other_control_chars_in_path_are_rejected() -> None:
+    """Round-2 S1: defense-in-depth — reject any control byte < 0x20."""
+    payload = _valid_payload()
+    payload["new_pages"][0]["path"] = "wiki/concepts/foo\nbar.md"
+    with pytest.raises(PlanValidationError):
+        parse_plan(json.dumps(payload))

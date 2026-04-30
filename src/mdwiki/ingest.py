@@ -56,6 +56,7 @@ def ingest_source(
     confirm: Callable[[Plan], bool] | None = None,
     max_tokens: int = 16000,
     embedder: Embedder | None = None,
+    force: bool = False,
 ) -> IngestResult:
     """Run the full ingest pipeline for one source.
 
@@ -74,6 +75,10 @@ def ingest_source(
         Used by tests; ignored if ``yes`` is True. Defaults to a terminal y/N prompt.
     max_tokens : int, optional
         Cap on LLM output tokens (default 4096).
+    force : bool, optional
+        Re-run ingest even if the source is already marked ``ingested``. Used
+        by ``ingest_many(scope="all")`` to give ``--all`` true re-process
+        semantics. Default ``False`` — already-ingested sources short-circuit.
 
     Raises
     ------
@@ -81,7 +86,7 @@ def ingest_source(
         If the source is unknown, the LLM response is unparseable, or quote verification fails.
     """
     source_row = _resolve_source(wiki_root, source_id_or_path)
-    if source_row["status"] == "ingested":
+    if source_row["status"] == "ingested" and not force:
         return IngestResult(
             source_id=source_row["id"],
             applied=False,
@@ -198,7 +203,9 @@ def ingest_many(
     ----------
     scope : "all" | "pending"
         ``"pending"`` skips sources already marked ingested; ``"all"`` re-ingests
-        everything (intended for forcing fresh analysis after a schema bump).
+        every source — including those already marked ingested. Internally,
+        ``scope="all"`` passes ``force=True`` to ``ingest_source`` so the
+        per-source short-circuit on ``status == "ingested"`` is bypassed.
     yes : bool, optional
         Default ``True`` — bulk mode shouldn't prompt per source.
     on_progress : callable, optional
@@ -228,6 +235,7 @@ def ingest_many(
                 yes=yes,
                 provider=provider,
                 embedder=embedder,
+                force=(scope == "all"),
             )
             results.append(result)
         except (

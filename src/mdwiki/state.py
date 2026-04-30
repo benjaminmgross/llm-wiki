@@ -111,13 +111,25 @@ def _apply_inline_migrations(conn) -> None:
     Idempotent and cheap (PRAGMA + occasional ALTER). Skips silently if the
     target table doesn't yet exist (e.g. when called on a brand-new DB before
     schema creation).
+
+    Concurrent-safe: two processes can both observe the column missing and
+    both attempt the ALTER. The second one fails with
+    ``OperationalError: duplicate column name`` — we swallow exactly that
+    case, since it means another connection already applied the migration.
     """
     inverse_cols_rows = conn.execute("PRAGMA table_info(transaction_inverses)").fetchall()
     if not inverse_cols_rows:
         return  # table doesn't exist yet; init_db will create it with the right schema
     inverse_cols = {row[1] for row in inverse_cols_rows}
     if "params_json" not in inverse_cols:
-        conn.execute("ALTER TABLE transaction_inverses ADD COLUMN params_json TEXT NOT NULL DEFAULT '[]'")
+        try:
+            conn.execute("ALTER TABLE transaction_inverses ADD COLUMN params_json TEXT NOT NULL DEFAULT '[]'")
+        except sqlite3.OperationalError as exc:
+            # Another connection won the race and added the column first.
+            # Any other OperationalError (locked DB, permission, malformed
+            # SQL) must still surface.
+            if "duplicate column" not in str(exc).lower():
+                raise
 
 
 def connect(db_path: Path) -> sqlite3.Connection:

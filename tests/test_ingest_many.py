@@ -182,16 +182,26 @@ def test_ingest_many_propagates_authentication_error(
 
 @pytest.mark.unit
 def test_ingest_many_all_includes_already_ingested(wiki_with_three_pending: Path, mocker: MockerFixture) -> None:
-    """scope='all' should re-process even sources marked ingested."""
+    """scope='all' should re-process even sources marked ingested.
+
+    Round-2 Q2: previously the loop iterated N times but ``ingest_source``
+    short-circuited every already-ingested source with the "already ingested"
+    message. ``ingest_many(scope="all")`` now passes ``force=True`` so the
+    LLM is actually called for every source.
+    """
     db_path = wiki_with_three_pending / ".mdwiki" / "state.db"
     with connect(db_path) as conn:
         conn.execute("UPDATE sources SET status='ingested', ingested_at=1.0")
         conn.commit()
 
     plans = iter([_plan_for(page_path=f"wiki/concepts/{n}.md", section_id=f"{n}.md/Intro") for n in "abc"])
-    mocker.patch(
+    complete_mock = mocker.patch(
         "mdwiki.llm.anthropic.AnthropicProvider.complete",
         side_effect=lambda **_kw: CompleteResult(text=next(plans), input_tokens=10, output_tokens=10),
     )
     results = ingest_many(wiki_with_three_pending, scope="all", yes=True)
     assert len(results) == 3
+    # The LLM must actually be called once per source (no short-circuit on
+    # already-ingested status when scope="all").
+    assert complete_mock.call_count == 3
+    assert all(r.applied for r in results)
