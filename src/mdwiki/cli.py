@@ -15,7 +15,7 @@ from pathlib import Path
 from mdwiki import __version__
 from mdwiki.discover import WikiNotFound, find_wiki
 from mdwiki.doctor import format_report, run_doctor
-from mdwiki.ingest import IngestError, ingest_source
+from mdwiki.ingest import IngestError, ingest_many, ingest_source
 from mdwiki.init import NestedWikiError, init_wiki
 from mdwiki.llm import UnknownProviderError
 from mdwiki.llm.anthropic import MissingAPIKeyError
@@ -85,9 +85,12 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor_p = subparsers.add_parser("doctor", help="Check provider config and ping the LLM API.")
     doctor_p.set_defaults(_handler=_cmd_doctor)
 
-    ingest_p = subparsers.add_parser("ingest", help="Ingest one source through the LLM into the wiki.")
-    ingest_p.add_argument("source", help="Source id (12-char hash or unique prefix) or original_path of a registered source.")
-    ingest_p.add_argument("--yes", "-y", action="store_true", help="Apply the LLM plan without confirmation (verifies quotes regardless).")
+    ingest_p = subparsers.add_parser("ingest", help="Ingest one source — or every pending / every source — through the LLM into the wiki.")
+    ingest_p.add_argument("source", nargs="?", help="Source id (12-char hash or unique prefix) or original_path. Omit when using --all or --pending.")
+    bulk = ingest_p.add_mutually_exclusive_group()
+    bulk.add_argument("--all", action="store_true", dest="all_sources", help="Re-ingest every registered source (re-processes already-ingested sources too).")
+    bulk.add_argument("--pending", action="store_true", help="Ingest every source whose status is still 'pending'.")
+    ingest_p.add_argument("--yes", "-y", action="store_true", help="Apply LLM plans without confirmation (default ON for --all/--pending).")
     ingest_p.set_defaults(_handler=_cmd_ingest)
 
     query_p = subparsers.add_parser("query", help="Ask a question; get a cited answer drawn from existing wiki pages.")
@@ -169,12 +172,37 @@ def _cmd_rebuild(_args: argparse.Namespace) -> int:
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
-    """Handler for ``mdwiki ingest <source> [--yes]``."""
+    """Handler for ``mdwiki ingest <source> | --all | --pending``."""
     try:
         wiki_root = find_wiki()
     except WikiNotFound as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+    if args.all_sources or args.pending:
+        if args.source is not None:
+            print("error: <source> cannot be combined with --all/--pending.", file=sys.stderr)
+            return 2
+        scope = "all" if args.all_sources else "pending"
+        try:
+            results = ingest_many(
+                wiki_root,
+                scope=scope,
+                yes=True,
+                on_progress=lambda i, total, path: print(f"[{i}/{total}] {path}"),
+                on_failure=lambda path, exc: print(f"  ! failed: {path}: {exc}", file=sys.stderr),
+            )
+        except (MissingAPIKeyError, UnknownProviderError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        applied = sum(1 for r in results if r.applied)
+        print(f"\nDone: {applied} of {len(results)} applied.")
+        return 0
+
+    if args.source is None:
+        print("error: provide a <source> or use --all / --pending.", file=sys.stderr)
+        return 2
+
     try:
         result = ingest_source(wiki_root, args.source, yes=args.yes)
     except IngestError as exc:
@@ -187,7 +215,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(result.message)
-    return 0 if result.applied else 0  # rejection is not an error
+    return 0  # rejection is not an error
 
 
 def _cmd_query(args: argparse.Namespace) -> int:

@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from mdwiki.chunker import MarkdownChunker
 from mdwiki.discover import WIKI_DIR_NAME
@@ -167,6 +167,69 @@ def ingest_source(
         tx.write_file(wiki_root / "wiki" / "index.md", build_index(wiki_root))
 
     return IngestResult(source_id=source_row["id"], applied=True, message=summary, plan=plan)
+
+
+def ingest_many(
+    wiki_root: Path,
+    scope: Literal["all", "pending"] = "pending",
+    *,
+    yes: bool = True,
+    provider: Provider | None = None,
+    embedder: Embedder | None = None,
+    on_progress: Callable[[int, int, str], None] | None = None,
+    on_failure: Callable[[str, Exception], None] | None = None,
+) -> list[IngestResult]:
+    """Ingest every source in the chosen ``scope`` sequentially.
+
+    Resilient: a failure on one source (quote verification, LLM truncation,
+    transient network) is collected as a returned ``IngestResult`` with
+    ``applied=False`` and processing continues with the next source. Each
+    source is its own ``IngestTransaction`` — interrupting between sources
+    is safe.
+
+    Parameters
+    ----------
+    scope : "all" | "pending"
+        ``"pending"`` skips sources already marked ingested; ``"all"`` re-ingests
+        everything (intended for forcing fresh analysis after a schema bump).
+    yes : bool, optional
+        Default ``True`` — bulk mode shouldn't prompt per source.
+    on_progress : callable, optional
+        Called as ``(index, total, original_path)`` before each source.
+    on_failure : callable, optional
+        Called as ``(original_path, exception)`` when a single ingest raises.
+    """
+    db_path = wiki_root / WIKI_DIR_NAME / "state.db"
+    where = "" if scope == "all" else "WHERE status = 'pending'"
+    with connect(db_path) as conn:
+        rows = conn.execute(f"SELECT id, original_path FROM sources {where} ORDER BY original_path").fetchall()
+    targets = [(row["id"], row["original_path"]) for row in rows]
+
+    if provider is None:
+        provider = build_provider_from_config(wiki_root)
+    if embedder is None:
+        embedder = _DEFAULT_EMBEDDER.get()
+
+    results: list[IngestResult] = []
+    for index, (source_id, original_path) in enumerate(targets, start=1):
+        if on_progress is not None:
+            on_progress(index, len(targets), original_path)
+        try:
+            result = ingest_source(
+                wiki_root,
+                source_id,
+                yes=yes,
+                provider=provider,
+                embedder=embedder,
+            )
+            results.append(result)
+        except IngestError as exc:
+            if on_failure is not None:
+                on_failure(original_path, exc)
+            results.append(
+                IngestResult(source_id=source_id, applied=False, message=f"failed: {exc}", plan=None)
+            )
+    return results
 
 
 def _resolve_source(wiki_root: Path, source_id_or_path: str) -> dict[str, Any]:
