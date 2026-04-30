@@ -153,6 +153,40 @@ def test_init_skips_filetypes_no_loader_claims(fresh_target: Path) -> None:
 
 
 @pytest.mark.unit
+def test_init_skips_empty_loader_output(tmp_path: Path) -> None:
+    """A loader that returns "" (e.g. PdfLoader on a scanned PDF) is counted as empty_load_skipped.
+
+    No raw/ file is written, no sources row is inserted, and InitResult tracks the count
+    so the CLI can surface it in the post-init summary.
+    """
+    import io
+
+    from pypdf import PdfWriter
+
+    # Real markdown source — should register normally
+    (tmp_path / "good.md").write_text("# Good\n\nbody")
+
+    # Scanned-style PDF (1 blank page → no extractable text)
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    buf = io.BytesIO()
+    writer.write(buf)
+    (tmp_path / "scanned.pdf").write_bytes(buf.getvalue())
+
+    result = init_wiki(tmp_path)
+
+    assert result.files_registered == 1, "only the .md should register; scanned PDF skipped"
+    assert result.empty_load_skipped == 1
+    # No raw/ file for the empty-extracted PDF
+    raw_files = list((tmp_path / "raw").glob("*-scanned.md"))
+    assert raw_files == [], f"empty-extracted PDF should not write raw/: {raw_files}"
+    # No sources row for the empty-extracted PDF
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        rows = conn.execute("SELECT original_path FROM sources").fetchall()
+    assert {r["original_path"] for r in rows} == {"good.md"}
+
+
+@pytest.mark.unit
 def test_init_writes_sources_sidecar(fresh_target: Path) -> None:
     """init writes raw/.sources.json so rebuild can recover original_path even with no state.db."""
     import json

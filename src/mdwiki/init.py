@@ -123,13 +123,18 @@ class InitResult:
     created : bool
         True if this call scaffolded a new wiki; False if one already existed.
     files_registered : int
-        Number of markdown sources copied to ``raw/`` and inserted into ``sources``.
+        Number of sources copied to ``raw/`` and inserted into ``sources``.
     files_skipped : int
-        Number of markdown files that were skipped (e.g. matched a ``.gitignore``).
+        Number of files that were skipped (e.g. matched a ``.gitignore``).
     dedup_skipped : int
-        Number of markdown files whose content matched an already-registered
-        source (same SHA-256). The first occurrence wins; subsequent copies
-        are skipped without overwriting the existing ``raw/`` file.
+        Number of files whose content matched an already-registered source
+        (same SHA-256). The first occurrence wins; subsequent copies are
+        skipped without overwriting the existing ``raw/`` file.
+    empty_load_skipped : int
+        Number of files for which the matched loader returned an empty string
+        (e.g. ``PdfLoader`` on a scanned/image-only PDF). No raw file is
+        written and no DB row is inserted; the loader logs a warning naming
+        the path before the skip.
     wiki_root : Path
         The directory containing the new (or pre-existing) ``.mdwiki/``.
     message : str
@@ -140,6 +145,7 @@ class InitResult:
     files_registered: int
     files_skipped: int
     dedup_skipped: int
+    empty_load_skipped: int
     wiki_root: Path
     message: str
 
@@ -172,6 +178,7 @@ def init_wiki(target: Path) -> InitResult:
             files_registered=0,
             files_skipped=0,
             dedup_skipped=0,
+            empty_load_skipped=0,
             wiki_root=target,
             message=f"Already initialized at {target}/{WIKI_DIR_NAME}/. No changes.",
         )
@@ -187,7 +194,7 @@ def init_wiki(target: Path) -> InitResult:
     (wiki_dir / "schema.md").write_text(DEFAULT_SCHEMA)
     (wiki_dir / ".gitignore").write_text(GITIGNORE_CONTENT)
 
-    registered, skipped, dedup_skipped = _register_sources(
+    registered, skipped, dedup_skipped, empty_load_skipped = _register_sources(
         target=target, raw_dir=raw_dir, db_path=wiki_dir / "state.db"
     )
 
@@ -196,6 +203,8 @@ def init_wiki(target: Path) -> InitResult:
         suffix_parts.append(f"skipped {skipped} via .gitignore")
     if dedup_skipped:
         suffix_parts.append(f"skipped {dedup_skipped} duplicate-content")
+    if empty_load_skipped:
+        suffix_parts.append(f"skipped {empty_load_skipped} with empty loader output")
     suffix = f" ({'; '.join(suffix_parts)})." if suffix_parts else "."
 
     return InitResult(
@@ -203,10 +212,11 @@ def init_wiki(target: Path) -> InitResult:
         files_registered=registered,
         files_skipped=skipped,
         dedup_skipped=dedup_skipped,
+        empty_load_skipped=empty_load_skipped,
         wiki_root=target,
         message=(
             f"Initialized wiki at {target}/{WIKI_DIR_NAME}/. "
-            f"Registered {registered} markdown source(s) as pending" + suffix
+            f"Registered {registered} source(s) as pending" + suffix
         ),
     )
 
@@ -225,19 +235,21 @@ def _refuse_if_nested(target: Path) -> None:
     )
 
 
-def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[int, int, int]:
-    """Walk ``target``, register every ``.md`` file as a pending source.
+def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[int, int, int, int]:
+    """Walk ``target``, register every loadable file as a pending source.
 
     Returns
     -------
-    tuple[int, int, int]
-        ``(registered, gitignore_skipped, dedup_skipped)``.
+    tuple[int, int, int, int]
+        ``(registered, gitignore_skipped, dedup_skipped, empty_load_skipped)``.
 
     Duplicate-content files (same SHA-256 prefix → same primary key) are
     skipped via ``INSERT OR IGNORE``; the first occurrence wins, the existing
-    ``raw/<hash>-<slug>.md`` is left untouched, and a counter is bumped. Any
-    other per-row failure is logged to stderr and skipped, so one bad file
-    can't abort the whole walk.
+    ``raw/<hash>-<slug>.md`` is left untouched, and a counter is bumped. Files
+    whose loader returns an empty string (scanned PDFs, empty CSVs, etc.) are
+    counted in ``empty_load_skipped`` — no raw write, no DB row. Any other
+    per-row failure is logged to stderr and skipped, so one bad file can't
+    abort the whole walk.
     """
     import sys
 
@@ -246,6 +258,7 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
     registered = 0
     skipped = 0
     dedup_skipped = 0
+    empty_load_skipped = 0
     sidecar: dict[str, dict[str, str | float]] = {}
 
     with connect(db_path) as conn:
@@ -279,6 +292,13 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
 
                 loader = get_loader_for(source_path)
                 markdown_text = loader.load_to_markdown(source_path)
+                if not markdown_text.strip():
+                    # Loader returned empty (e.g. PdfLoader on a scanned PDF,
+                    # CsvLoader on an empty CSV). The loader has already logged
+                    # a warning naming the path; surface the count via
+                    # InitResult.empty_load_skipped so the CLI summary shows it.
+                    empty_load_skipped += 1
+                    continue
 
                 slug = _slugify(source_path.stem)
                 raw_filename = f"{short_hash}-{slug}.md"
@@ -310,7 +330,7 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
     if sidecar:
         (raw_dir / SOURCES_SIDECAR_NAME).write_text(json.dumps(sidecar, indent=2, sort_keys=True))
 
-    return registered, skipped, dedup_skipped
+    return registered, skipped, dedup_skipped, empty_load_skipped
 
 
 # Folders we never recurse into when discovering source markdown.

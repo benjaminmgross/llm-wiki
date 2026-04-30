@@ -16,14 +16,18 @@ from pathlib import Path
 from mdwiki.loaders.base import Loader
 from mdwiki.loaders.code import CodeLoader
 from mdwiki.loaders.csv_loader import CsvLoader
+from mdwiki.loaders.docx import DocxLoader
 from mdwiki.loaders.markdown import MarkdownLoader
+from mdwiki.loaders.pdf import PdfLoader
 from mdwiki.loaders.text import TextLoader
 
 __all__ = [
     "CodeLoader",
     "CsvLoader",
+    "DocxLoader",
     "Loader",
     "MarkdownLoader",
+    "PdfLoader",
     "TextLoader",
     "UnsupportedFiletypeError",
     "get_loader_for",
@@ -35,13 +39,16 @@ class UnsupportedFiletypeError(Exception):
 
 
 # Registry order: markdown first (most specific use case), then code (specific
-# extensions), then csv (specific extensions), then text (generic fallback for
-# remaining text-like files). Each loader's can_handle is extension-bounded, so
-# order only matters if two loaders ever claim the same extension — they don't.
+# extensions), then csv (specific extensions), then docx/pdf (specific binary
+# formats), then text (generic fallback for remaining text-like files). Each
+# loader's can_handle is extension-bounded, so order only matters if two loaders
+# ever claim the same extension — they don't.
 _REGISTRY: tuple[Loader, ...] = (
     MarkdownLoader(),
     CodeLoader(),
     CsvLoader(),
+    DocxLoader(),
+    PdfLoader(),
     TextLoader(),
 )
 
