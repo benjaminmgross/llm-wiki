@@ -1,10 +1,15 @@
-"""PDF loader — extracts text via ``pypdf`` with optional vision fallback for scanned PDFs.
+"""PDF loader — extracts text via ``pypdfium2`` with optional vision fallback for scanned PDFs.
 
 Default behavior: per-page text extraction joined with a horizontal rule. If extraction
 returns empty text (image-only / scanned PDFs), logs a warning and returns empty
 unless ``vision_fallback=True`` was passed; with vision fallback enabled, the loader
 renders each page to PNG via ``pypdfium2`` and forwards each rendered page to the
 provider's ``describe_image`` method.
+
+Why pypdfium2 over pypdf for text extraction: pypdfium2 wraps libpdfium (Chrome's
+PDF engine), which preserves layout fidelity better — the text it returns is closer
+to what a human reader would copy-paste from the rendered page, so verbatim quotes
+the LLM produces actually survive ``mdwiki.quote.verify_plan``'s substring check.
 """
 
 from __future__ import annotations
@@ -13,7 +18,7 @@ import logging
 import tempfile
 from pathlib import Path
 
-from pypdf import PdfReader
+import pypdfium2 as pdfium
 
 from mdwiki.llm.base import Provider
 from mdwiki.loaders.base import Loader
@@ -47,9 +52,21 @@ class PdfLoader(Loader):
         return path.suffix.lower() == ".pdf"
 
     def load_to_markdown(self, path: Path) -> str:
-        reader = PdfReader(str(path))
-        pages = [page.extract_text() or "" for page in reader.pages]
-        joined = _PAGE_SEPARATOR.join(p.strip() for p in pages if p.strip())
+        document = pdfium.PdfDocument(str(path))
+        try:
+            pages = []
+            for page in document:
+                textpage = page.get_textpage()
+                try:
+                    text = textpage.get_text_range()
+                finally:
+                    textpage.close()
+                if text and text.strip():
+                    pages.append(text.strip())
+        finally:
+            document.close()
+
+        joined = _PAGE_SEPARATOR.join(pages)
         if joined:
             return joined + "\n"
 
@@ -65,9 +82,6 @@ class PdfLoader(Loader):
 
     def _vision_extract(self, path: Path) -> str:
         """Render each PDF page to PNG and forward each to ``provider.describe_image``."""
-        # Lazy import — pypdfium2 is a hot import (~80ms) and not always needed.
-        import pypdfium2 as pdfium
-
         if self._provider is None:
             raise RuntimeError("PdfLoader vision fallback requires a provider")
 

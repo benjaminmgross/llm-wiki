@@ -75,14 +75,33 @@ The LLM appends a footnote-style citation block at the bottom of each page secti
 [^src1]: <quote>... (raw/<hash>-<slug>.md, original: <original_path>)
 ```
 
-## When to update vs. create — STRONG PREFERENCE FOR UPDATE
+## When to update, create entity pages, or refuse
 
-**Default to UPDATING an existing candidate page over creating a new one.** A wiki that grows by accretion of new pages is just a folder of notes. The compounding value comes from refining and extending existing pages.
+**Touch breadth target: 5–15 wiki pages per source ingest** — typically a few updates, 1–3 new pages (most often entities), and 3–8 cross-refs. If your plan touches ≤2 pages, you are almost certainly under-creating; re-read the source and ask which named subjects deserve their own pages.
 
-Decision rule:
-- **Update** if any candidate page covers ≥40% of the source's topic OR if your prospective new page would link primarily to one existing page
-- **Create new page** ONLY when the source introduces a topic with no existing home, AND the topic warrants more than a paragraph anywhere
-- **A single source ingest should typically touch 5–15 wiki pages** (mostly updates, plus 1–3 new pages and 3–8 cross-refs). If you propose only 1–2 new pages and zero updates, ask yourself whether you missed a candidate.
+Three actions you must consider for every source — they are NOT mutually exclusive:
+
+1. **Update existing concept / synthesis pages** when the source extends or refines a concept the wiki already covers. Don't duplicate concepts (don't create both `concepts/first-principles.md` and `concepts/first-principles-thinking.md` — pick one).
+
+2. **Create entity pages — REQUIRED for named subjects.** When a source has 2+ substantive factual claims about a SPECIFIC named person, project, paper, system, or organization, create or update an entity page for them. This is how the wiki avoids becoming a handful of bloated concept pages. Examples:
+   - Source mentions Aristotle in passing → no entity page; cite him in the concept page.
+   - Source describes Aristotle's archai, Metaphysics, lineage from Plato → CREATE `wiki/entities/aristotle.md`.
+   - Source describes SpaceX's vertical integration, Falcon 1 timeline, Merlin engine → CREATE `wiki/entities/spacex.md`.
+   - Heuristic: if you can write 3+ sentences about a named subject from the source, that subject earns an entity page.
+
+3. **Create concept pages** ONLY when the source introduces a NEW concept with no existing home. New concept pages are the rarest of the three — most overlap is handled by updates + new entity pages, not new concepts.
+
+## When to refuse — RARELY
+
+The `low-quality` and `out-of-scope` verdicts are reserved for sources that genuinely contain no load-bearing content for THIS wiki. Topical overlap with an existing concept page is NOT grounds for refusal — it is the common case for related sources, and it warrants UPDATES + NEW ENTITY PAGES, not rejection.
+
+Refuse only when:
+- The source has zero factual claims a wiki page could cite (e.g. a utility script with no novel logic).
+- The source's subject matter is wholly outside the wiki's domain.
+
+Do NOT refuse when:
+- A primary text (e.g. Aristotle's *Metaphysics*) overlaps with existing summaries — the entity page for that thinker should still be enriched, and direct quotes from the primary should replace paraphrased citations where possible.
+- An academic paper's core thesis is mentioned in passing on another page — create an entity page for the paper, update the related concepts.
 
 ## Cross-references — REQUIRED ON CREATION
 
