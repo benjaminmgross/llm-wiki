@@ -1,5 +1,4 @@
 """Tests for the embedder module."""
-import pytest
 
 
 def test_embedder_generates_vectors():

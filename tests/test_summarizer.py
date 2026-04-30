@@ -1,5 +1,4 @@
 """Tests for the summarizer module."""
-import pytest
 
 
 def test_summarizer_generates_summaries(mocker):

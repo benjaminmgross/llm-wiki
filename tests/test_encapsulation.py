@@ -2,7 +2,6 @@
 Tests for encapsulation scoring module.
 """
 
-import pytest
 
 
 def test_encapsulation_scorer_high_coherence():
