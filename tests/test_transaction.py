@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -132,6 +133,53 @@ def test_explicit_abort_rolls_back(wiki: Path) -> None:
             tx.abort("user rejected the plan")
 
     assert target.read_text() == "ORIGINAL"
+
+
+@pytest.mark.unit
+def test_upsert_page_update_branch_does_not_crash_on_commit(wiki: Path) -> None:
+    """Regression: round-2 C1.
+
+    Round-1 refactor recorded ``prev["embedding"]`` (bytes) into the inverse
+    for the UPDATE branch. ``_commit`` then ``json.dumps``-es those params,
+    which raises ``TypeError: Object of type bytes is not JSON serializable``.
+    The fix is to drop the bytes from the inverse — embeddings are derived
+    from content and cheap to re-compute on the next read.
+
+    This test exercises the full insert-then-update-then-commit path that
+    triggered the production crash.
+    """
+    embedding_bytes = b"\x01\x02\x03\x04" * 96  # arbitrary blob, simulates a real embedding
+    page_path = "wiki/concepts/foo.md"
+
+    # First tx: INSERT branch. Should commit cleanly.
+    with IngestTransaction(wiki_root=wiki, source_id=None, summary="insert page") as tx:
+        tx.write_file(wiki / page_path, "# Foo\n\nv1")
+        tx.upsert_page(path=page_path, kind="concept", embedding=embedding_bytes, last_touched_at=1.0)
+
+    # Second tx: UPDATE branch. Pre-fix, this raised TypeError during _commit.
+    new_embedding = b"\xa0\xa1\xa2\xa3" * 96
+    with IngestTransaction(wiki_root=wiki, source_id=None, summary="update page") as tx:
+        tx.write_file(wiki / page_path, "# Foo\n\nv2")
+        tx.upsert_page(path=page_path, kind="concept", embedding=new_embedding, last_touched_at=2.0)
+
+    # Verify both txs committed and the second update stuck.
+    db_path = wiki / ".mdwiki" / "state.db"
+    with connect(db_path) as conn:
+        page_row = conn.execute(
+            "SELECT kind, embedding, last_touched_at FROM pages WHERE path = ?", (page_path,)
+        ).fetchone()
+        inverses = conn.execute(
+            "SELECT sql, params_json FROM transaction_inverses ORDER BY id"
+        ).fetchall()
+    assert page_row["embedding"] == new_embedding
+    assert page_row["last_touched_at"] == 2.0
+    # Inverse for the UPDATE must NOT carry the prior bytes (so its params_json
+    # round-trips cleanly through json.dumps/json.loads).
+    update_inverses = [inv for inv in inverses if "UPDATE pages" in inv["sql"]]
+    assert update_inverses, "expected at least one UPDATE inverse from the second tx"
+    # Round-trip every params_json — pre-fix this would have crashed at write time.
+    for inv in inverses:
+        json.loads(inv["params_json"])  # must not raise
 
 
 @pytest.mark.unit

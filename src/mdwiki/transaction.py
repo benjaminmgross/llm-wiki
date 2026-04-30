@@ -154,7 +154,21 @@ class IngestTransaction:
         self._inverses.append((sql, params))
 
     def upsert_page(self, *, path: str, kind: str, embedding: bytes | None, last_touched_at: float) -> None:
-        """Insert or update one ``pages`` row, recording the inverse for undo."""
+        """Insert or update one ``pages`` row, recording the inverse for undo.
+
+        On UPDATE, the inverse intentionally NULLs the ``embedding`` column
+        rather than restoring the previous bytes. Two reasons:
+
+        1. ``transaction_inverses.params_json`` is JSON-serialized
+           (``json.dumps`` on the bound params) and ``json.dumps`` cannot
+           encode ``bytes``. Round-tripping the prior embedding through JSON
+           would require base64 hops on both write and undo paths.
+        2. Page embeddings are deterministic from page content, and on undo
+           the file content is restored from the on-disk snapshot anyway.
+           A subsequent reader (ANN search, query, next ingest) will simply
+           re-derive the embedding when needed — the prior bytes are a cache,
+           not state worth preserving.
+        """
         if self._conn is None:
             raise RuntimeError("IngestTransaction must be entered as a context manager before calling upsert_page().")
         prev = self._conn.execute(
@@ -171,9 +185,10 @@ class IngestTransaction:
                 "UPDATE pages SET kind = ?, embedding = ?, last_touched_at = ? WHERE path = ?",
                 (kind, embedding, last_touched_at, path),
             )
+            # Drop the prior embedding bytes from the inverse — see docstring.
             self.add_inverse(
-                "UPDATE pages SET kind = ?, embedding = ?, last_touched_at = ? WHERE path = ?",
-                (prev["kind"], prev["embedding"], prev["last_touched_at"], path),
+                "UPDATE pages SET kind = ?, embedding = NULL, last_touched_at = ? WHERE path = ?",
+                (prev["kind"], prev["last_touched_at"], path),
             )
 
     def insert_backref(self, *, page_path: str, source_id: str, section_anchor: str | None, quote: str) -> None:
