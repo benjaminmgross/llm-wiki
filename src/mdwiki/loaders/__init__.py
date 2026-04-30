@@ -17,6 +17,7 @@ from mdwiki.loaders.base import Loader
 from mdwiki.loaders.code import CodeLoader
 from mdwiki.loaders.csv_loader import CsvLoader
 from mdwiki.loaders.docx import DocxLoader
+from mdwiki.loaders.html import HtmlLoader
 from mdwiki.loaders.markdown import MarkdownLoader
 from mdwiki.loaders.pdf import PdfLoader
 from mdwiki.loaders.text import TextLoader
@@ -25,6 +26,7 @@ __all__ = [
     "CodeLoader",
     "CsvLoader",
     "DocxLoader",
+    "HtmlLoader",
     "Loader",
     "MarkdownLoader",
     "PdfLoader",
@@ -49,6 +51,7 @@ _REGISTRY: tuple[Loader, ...] = (
     CsvLoader(),
     DocxLoader(),
     PdfLoader(),
+    HtmlLoader(),
     TextLoader(),
 )
 
