@@ -17,6 +17,7 @@ from mdwiki.discover import WikiNotFound, find_wiki
 from mdwiki.doctor import format_report, run_doctor
 from mdwiki.ingest import IngestError, ingest_many, ingest_source
 from mdwiki.init import NestedWikiError, init_wiki
+from mdwiki.lint import lint_wiki
 from mdwiki.llm import UnknownProviderError
 from mdwiki.llm.anthropic import MissingAPIKeyError
 from mdwiki.query import QueryError, query_wiki
@@ -103,6 +104,9 @@ def _build_parser() -> argparse.ArgumentParser:
     query_p.add_argument("--file", action="store_true", help="File the answer as a synthesis page (wiki/syntheses/<slug>.md).")
     query_p.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation prompt when --file is set.")
     query_p.set_defaults(_handler=_cmd_query)
+
+    lint_p = subparsers.add_parser("lint", help="Health-check the wiki: broken refs, orphans, stale pages, coverage gaps.")
+    lint_p.set_defaults(_handler=_cmd_lint)
 
     undo_p = subparsers.add_parser("undo", help="Roll back the last N applied transactions (file writes + DB rows).")
     undo_p.add_argument("n", nargs="?", type=int, default=1, help="Number of transactions to undo (default 1).")
@@ -267,6 +271,28 @@ def _cmd_query(args: argparse.Namespace) -> int:
             print(f"  - {path}")
     if result.filed_path:
         print(f"\nFiled as synthesis page: {result.filed_path}")
+    return 0
+
+
+def _cmd_lint(_args: argparse.Namespace) -> int:
+    """Handler for ``mdwiki lint``."""
+    try:
+        wiki_root = find_wiki()
+    except WikiNotFound as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    report = lint_wiki(wiki_root)
+    if not report.findings:
+        print("Lint: clean — no findings.")
+        return 0
+    print(f"Lint: {len(report.findings)} finding(s) " + ", ".join(f"{kind}={count}" for kind, count in sorted(report.findings_by_kind.items())))
+    print()
+    for kind in sorted(report.findings_by_kind):
+        print(f"## {kind}")
+        for finding in report.findings:
+            if finding.kind == kind:
+                print(f"  - {finding.page_path}: {finding.message}")
+        print()
     return 0
 
 
