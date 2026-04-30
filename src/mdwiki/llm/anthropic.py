@@ -4,17 +4,39 @@ The system prompt is sent inside a list block with ``cache_control`` so subseque
 ingest calls share the schema/instructions cache. Errors from the SDK are caught
 and translated into ``PingResult`` for ``mdwiki doctor``; ``complete()`` lets them
 propagate so the caller (ingest, query) can decide how to surface them.
+
+v1.1.0 Phase 5 added ``describe_image`` for the vision-OCR path used by
+``ImageLoader`` and ``PdfLoader`` vision_fallback. Claude Sonnet 4.6 supports
+the ``image`` content block on the messages API.
 """
 
 from __future__ import annotations
 
+import base64
 import os
 import time
+from pathlib import Path
 
 import anthropic
 import httpx
 
 from mdwiki.llm.base import CompleteResult, Message, PingResult, Provider
+
+_IMAGE_MEDIA_TYPES: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+_DESCRIBE_IMAGE_PROMPT: str = (
+    "Describe this image as a wiki page would describe it. Include:\n"
+    "1. A short title-cased heading naming what the image shows.\n"
+    "2. A paragraph describing the visual content (what kind of image it is, structure, layout).\n"
+    "3. Any visible text from the image transcribed verbatim under a `### Text` subsection.\n"
+    "Use markdown. Be concise but complete — this output will be ingested into a knowledge base."
+)
 
 
 class MissingAPIKeyError(RuntimeError):
@@ -160,6 +182,45 @@ class AnthropicProvider(Provider):
             cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
             cache_creation_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
         )
+
+
+    def describe_image(self, image_path: Path) -> str:
+        """Send the image to Claude vision and return the model's markdown description.
+
+        Uses ``messages.create`` (one-shot, not streamed) since the response is
+        small (~200–600 tokens). The image is base64-encoded inline rather than
+        uploaded — Anthropic's API supports base64 image blocks up to ~5MB.
+
+        Raises
+        ------
+        ValueError
+            If the file extension isn't a recognized image format.
+        """
+        suffix = image_path.suffix.lower()
+        media_type = _IMAGE_MEDIA_TYPES.get(suffix)
+        if media_type is None:
+            raise ValueError(
+                f"describe_image: unsupported image extension {suffix!r}. "
+                f"Supported: {sorted(_IMAGE_MEDIA_TYPES)}"
+            )
+        b64 = base64.standard_b64encode(image_path.read_bytes()).decode("ascii")
+        response = self._client.messages.create(
+            model=self.model,
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": media_type, "data": b64},
+                        },
+                        {"type": "text", "text": _DESCRIBE_IMAGE_PROMPT},
+                    ],
+                }
+            ],
+        )
+        return next((block.text for block in response.content if getattr(block, "type", None) == "text"), "")
 
 
 def _elapsed_ms(start: float) -> float:

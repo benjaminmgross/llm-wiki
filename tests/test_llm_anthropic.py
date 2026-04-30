@@ -202,3 +202,65 @@ def test_complete_reports_cache_read_tokens(mocker: MockerFixture) -> None:
 
     assert result.cache_read_tokens == 500
     assert result.cache_creation_tokens == 0
+
+
+# ----- describe_image (Phase 5) -----
+
+
+@pytest.mark.unit
+def test_describe_image_sends_image_content_block(tmp_path, mocker: MockerFixture) -> None:
+    """``describe_image`` base64-encodes the image and sends it as an image content block."""
+    src = tmp_path / "diagram.png"
+    src.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)  # plausible PNG header + body bytes
+
+    fake_client = MagicMock()
+    fake_response = MagicMock()
+    fake_response.content = [MagicMock(type="text", text="A flowchart with three boxes connected by arrows.")]
+    fake_client.messages.create.return_value = fake_response
+
+    provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="sk-x", client=fake_client)
+    result = provider.describe_image(src)
+
+    assert "flowchart" in result.lower()
+    fake_client.messages.create.assert_called_once()
+    kwargs = fake_client.messages.create.call_args.kwargs
+    # Single user message with an image content block
+    assert kwargs["model"] == "claude-sonnet-4-6"
+    assert len(kwargs["messages"]) == 1
+    content = kwargs["messages"][0]["content"]
+    image_blocks = [b for b in content if b.get("type") == "image"]
+    assert len(image_blocks) == 1
+    assert image_blocks[0]["source"]["type"] == "base64"
+    assert image_blocks[0]["source"]["media_type"] == "image/png"
+    # Body must include text instructing the model to describe + OCR
+    text_blocks = [b for b in content if b.get("type") == "text"]
+    assert text_blocks, "describe_image must include a text instruction with the image"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("ext", "expected_media_type"),
+    [
+        (".png", "image/png"),
+        (".jpg", "image/jpeg"),
+        (".jpeg", "image/jpeg"),
+        (".webp", "image/webp"),
+        (".gif", "image/gif"),
+    ],
+)
+def test_describe_image_maps_extension_to_media_type(
+    tmp_path, mocker: MockerFixture, ext: str, expected_media_type: str
+) -> None:
+    """Each registered image extension maps to the right MIME type for the API."""
+    src = tmp_path / f"x{ext}"
+    src.write_bytes(b"binary")
+    fake_client = MagicMock()
+    fake_response = MagicMock()
+    fake_response.content = [MagicMock(type="text", text="ok")]
+    fake_client.messages.create.return_value = fake_response
+
+    provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="sk-x", client=fake_client)
+    provider.describe_image(src)
+    kwargs = fake_client.messages.create.call_args.kwargs
+    image_block = next(b for b in kwargs["messages"][0]["content"] if b.get("type") == "image")
+    assert image_block["source"]["media_type"] == expected_media_type

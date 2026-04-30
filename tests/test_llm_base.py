@@ -60,3 +60,29 @@ def test_ping_result_carries_required_fields() -> None:
     assert result.provider == "anthropic"
     assert result.ok is True
     assert result.latency_ms == 42.0
+
+
+@pytest.mark.unit
+def test_describe_image_default_raises_not_implemented(tmp_path) -> None:
+    """Phase 5: providers can opt out of vision; default raises NotImplementedError.
+
+    This keeps the door open for OpenAI-compatible / local providers to inherit
+    the ABC without being forced to implement describe_image — they raise
+    NotImplementedError until the user configures a vision-capable model.
+    """
+
+    class TextOnlyProvider(Provider):
+        name = "text-only"
+
+        def __init__(self) -> None:
+            self.model = "stub"
+
+        def ping(self) -> PingResult:
+            return PingResult(provider="text-only", model="stub", latency_ms=1.0, ok=True, message="pong")
+
+        def complete(self, *, system, messages, max_tokens=1024):  # type: ignore[no-untyped-def]
+            return CompleteResult(text="ok", input_tokens=1, output_tokens=1)
+
+    provider = TextOnlyProvider()
+    with pytest.raises(NotImplementedError, match="describe_image"):
+        provider.describe_image(tmp_path / "x.png")

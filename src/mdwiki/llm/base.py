@@ -2,14 +2,16 @@
 
 A ``Provider`` wraps a single LLM backend (Anthropic in v1.0.0; Qwen, Kimi, etc. in
 later releases). Every provider exposes the same surface: ``ping`` for health checks,
-``complete`` for one-shot inference. Batch and cost estimation arrive in Phase 7
-when ``init --bootstrap`` actually needs them.
+``complete`` for one-shot inference, and (since v1.1.0 Phase 5) ``describe_image`` for
+vision-based extraction. Vision is opt-in: the default implementation raises
+``NotImplementedError`` so providers without multimodal support can inherit cleanly.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 
@@ -90,3 +92,28 @@ class Provider(ABC):
         max_tokens : int, optional
             Cap on output tokens (default 1024).
         """
+
+    def describe_image(self, image_path: Path) -> str:
+        """Describe an image as markdown text via the provider's vision API.
+
+        Used by ``ImageLoader`` (Phase 5) and ``PdfLoader`` vision_fallback to extract
+        text and structural information from raster images. The default raises
+        ``NotImplementedError`` so providers without multimodal support can inherit
+        cleanly — concrete providers override only when their model handles vision.
+
+        Parameters
+        ----------
+        image_path : Path
+            Filesystem path to a raster image (png/jpg/jpeg/webp/gif).
+
+        Returns
+        -------
+        str
+            Markdown text describing the image (typically a heading + a paragraph
+            of description plus any extracted text via OCR).
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support describe_image. "
+            "Use a vision-capable provider (e.g. AnthropicProvider with claude-sonnet-4-6+) "
+            "or set [loaders.image].enabled = false in your wiki config."
+        )

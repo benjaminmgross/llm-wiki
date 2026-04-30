@@ -128,6 +128,44 @@ def test_pdf_loader_routed_via_registry(sample_pdf: Path) -> None:
     assert isinstance(get_loader_for(sample_pdf), PdfLoader)
 
 
+@pytest.mark.unit
+def test_pdf_loader_vision_fallback_calls_describe_image_when_extraction_empty(scanned_pdf: Path, mocker: object) -> None:
+    """vision_fallback=True + empty extraction → render pages, call provider.describe_image, return its output."""
+    fake_provider = mocker.Mock()
+    fake_provider.describe_image.return_value = "## Page 1\n\nA scanned page with diagram."
+
+    loader = PdfLoader(provider=fake_provider, vision_fallback=True)
+    md = loader.load_to_markdown(scanned_pdf)
+
+    assert "scanned page" in md.lower()
+    fake_provider.describe_image.assert_called()
+    # The first arg is a path to a rendered PNG
+    call_path = fake_provider.describe_image.call_args.args[0]
+    assert isinstance(call_path, Path)
+    assert call_path.suffix.lower() == ".png"
+
+
+@pytest.mark.unit
+def test_pdf_loader_vision_fallback_disabled_falls_back_to_warning(scanned_pdf: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """vision_fallback=False (default) keeps the v1.0 behavior: empty + warning, no provider call."""
+    import logging
+
+    fake_provider = type("X", (), {"describe_image": lambda self, p: (_ for _ in ()).throw(AssertionError("must not call"))})()
+    with caplog.at_level(logging.WARNING, logger="mdwiki.loaders.pdf"):
+        md = PdfLoader(provider=fake_provider, vision_fallback=False).load_to_markdown(scanned_pdf)
+    assert md == ""
+    assert any("no text" in r.message.lower() for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_pdf_loader_vision_fallback_skipped_when_extraction_succeeds(sample_pdf: Path, mocker: object) -> None:
+    """If pypdf extraction yields text, vision_fallback is not triggered (no provider call)."""
+    fake_provider = mocker.Mock()
+    md = PdfLoader(provider=fake_provider, vision_fallback=True).load_to_markdown(sample_pdf)
+    assert "expected sentence from sample.pdf" in md
+    fake_provider.describe_image.assert_not_called()
+
+
 # ----- DocxLoader -----
 
 

@@ -12,6 +12,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pathspec
 import tomli_w
@@ -22,7 +23,7 @@ from mdwiki.state import connect, init_db
 
 SOURCES_SIDECAR_NAME: str = ".sources.json"
 
-DEFAULT_CONFIG: dict[str, dict[str, str | int | float | list[str]]] = {
+DEFAULT_CONFIG: dict[str, Any] = {
     "llm": {
         "provider": "anthropic",
         "model": "claude-sonnet-4-6",
@@ -36,6 +37,12 @@ DEFAULT_CONFIG: dict[str, dict[str, str | int | float | list[str]]] = {
     },
     "exclude": {
         "globs": [],
+    },
+    # Loader-specific opt-ins (Phase 5). Both default to false because vision calls
+    # cost ~$0.10–0.50 each — users opt in explicitly per wiki by editing this file.
+    "loaders": {
+        "image": {"enabled": False},
+        "pdf": {"vision_fallback": False},
     },
 }
 
