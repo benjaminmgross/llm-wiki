@@ -72,3 +72,9 @@ CLAUDE.md.new
 .taskmaster/
 .aide/
 .claude/config.yaml
+
+# Symlinked review commands (machine-local)
+.claude/commands/review.md
+.claude/commands/review-pr.md
+.claude/commands/address-review.md
+.claude/commands/review-fix-pr-loop.md
