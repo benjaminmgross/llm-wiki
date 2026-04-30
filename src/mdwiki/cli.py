@@ -19,6 +19,7 @@ from mdwiki.ingest import IngestError, ingest_source
 from mdwiki.init import NestedWikiError, init_wiki
 from mdwiki.llm import UnknownProviderError
 from mdwiki.llm.anthropic import MissingAPIKeyError
+from mdwiki.query import QueryError, query_wiki
 from mdwiki.rebuild import RebuildError, rebuild_wiki
 from mdwiki.source import find_matching_sources, format_disambiguation, format_source_info, get_source_info
 from mdwiki.status import format_status, get_status
@@ -86,6 +87,12 @@ def _build_parser() -> argparse.ArgumentParser:
     ingest_p.add_argument("source", help="Source id (12-char hash or unique prefix) or original_path of a registered source.")
     ingest_p.add_argument("--yes", "-y", action="store_true", help="Apply the LLM plan without confirmation (verifies quotes regardless).")
     ingest_p.set_defaults(_handler=_cmd_ingest)
+
+    query_p = subparsers.add_parser("query", help="Ask a question; get a cited answer drawn from existing wiki pages.")
+    query_p.add_argument("question", help="The natural-language question to answer.")
+    query_p.add_argument("--file", action="store_true", help="File the answer as a synthesis page (wiki/syntheses/<slug>.md).")
+    query_p.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation prompt when --file is set.")
+    query_p.set_defaults(_handler=_cmd_query)
 
     return parser
 
@@ -165,6 +172,35 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         return 1
     print(result.message)
     return 0 if result.applied else 0  # rejection is not an error
+
+
+def _cmd_query(args: argparse.Namespace) -> int:
+    """Handler for ``mdwiki query <question> [--file] [--yes]``."""
+    try:
+        wiki_root = find_wiki()
+    except WikiNotFound as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        result = query_wiki(wiki_root, args.question, file=args.file, yes=args.yes)
+    except QueryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except MissingAPIKeyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except UnknownProviderError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(result.answer)
+    if result.cited_pages:
+        print("\nCited pages:")
+        for path in result.cited_pages:
+            print(f"  - {path}")
+    if result.filed_path:
+        print(f"\nFiled as synthesis page: {result.filed_path}")
+    return 0
 
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:

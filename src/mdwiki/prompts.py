@@ -105,3 +105,77 @@ def build_ingest_user_prompt(
     parts.append("Build the JSON plan now.")
 
     return "\n".join(parts)
+
+
+QUERY_SYSTEM_PROMPT: str = """\
+You are a wiki researcher. The user has asked a question that should be answered
+from the wiki's existing pages — never from your training data alone.
+
+Be skeptical and grounded:
+- Refuse to answer beyond what the wiki covers; say so explicitly when the wiki
+  is silent or weak on the question
+- Push back if the question is malformed or unanswerable from the available pages
+- Prefer concise, structured answers over expansive ones
+- An honest "the wiki doesn't substantively cover this" is a valid answer
+
+Format your answer as well-structured markdown:
+- Use level-2 headings to organize multi-part answers
+- For every factual claim, cite the source wiki page with a relative markdown link:
+  [page title](../entities/some-entity.md) or [page title](../concepts/some-concept.md)
+- Where applicable, draw connections / contrasts across the cited pages — that
+  weaving together is the value-add the user can't get from reading pages individually
+- 200-800 words is typical; longer if the question genuinely warrants it
+
+Output ONLY the answer body in markdown. No preamble, no JSON, no code fences
+around the whole answer.
+"""
+
+
+def build_query_user_prompt(
+    *,
+    question: str,
+    index_text: str,
+    candidate_pages: list[dict[str, str]],
+    schema_text: str,
+) -> str:
+    """Assemble the user prompt for one ``mdwiki query`` call.
+
+    Parameters
+    ----------
+    question : str
+        The user's question.
+    index_text : str
+        The contents of ``wiki/index.md`` — the LLM's entry-point view of the wiki.
+    candidate_pages : list of dict
+        Top-k ANN-matched pages (each ``{path, content}``) for the LLM to draw from.
+    schema_text : str
+        Contents of ``.mdwiki/schema.md`` so the LLM honors citation conventions.
+    """
+    parts: list[str] = []
+
+    parts.append("# Wiki schema (citation + naming conventions to follow)")
+    parts.append(schema_text.strip())
+    parts.append("")
+
+    parts.append("# Wiki index (the catalog of every page in this wiki)")
+    if index_text.strip():
+        parts.append(index_text.strip())
+    else:
+        parts.append("(this wiki has no pages yet)")
+    parts.append("")
+
+    parts.append("# Candidate pages (top-k by embedding similarity to the question)")
+    if candidate_pages:
+        for page in candidate_pages:
+            parts.append(f"## {page['path']}")
+            parts.append(page["content"].strip())
+            parts.append("")
+    else:
+        parts.append("(no pages were ANN-matched — the index above is your only signal)")
+    parts.append("")
+
+    parts.append(f"# Question\n\n{question}")
+    parts.append("")
+    parts.append("Answer the question now, drawing on the cited pages and citing them as you go.")
+
+    return "\n".join(parts)
