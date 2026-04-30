@@ -168,3 +168,37 @@ def test_init_raw_path_in_db_is_relative(fresh_target: Path) -> None:
         row = conn.execute("SELECT raw_path FROM sources WHERE original_path = 'top.md'").fetchone()
     assert row["raw_path"].startswith("raw/")
     assert (fresh_target / row["raw_path"]).is_file()
+
+
+@pytest.mark.unit
+def test_init_skips_duplicate_content_without_crashing(tmp_path: Path) -> None:
+    """Two files with identical content should result in one registered source, one dedup_skipped."""
+    (tmp_path / "a.md").write_text("# Same\n\nidentical body")
+    (tmp_path / "b.md").write_text("# Same\n\nidentical body")
+    (tmp_path / "c.md").write_text("# Different\n\nunique body")
+
+    result = init_wiki(tmp_path)
+
+    assert result.files_registered == 2
+    assert result.dedup_skipped == 1
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        count = conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
+    assert count == 2
+
+
+@pytest.mark.unit
+def test_init_skips_pre_existing_wiki_and_raw_dirs(tmp_path: Path) -> None:
+    """Pre-populated wiki/ or raw/ folders should not pollute the source table."""
+    (tmp_path / "real-source.md").write_text("# Real")
+    (tmp_path / "wiki").mkdir()
+    (tmp_path / "wiki" / "stale.md").write_text("# Stale page")
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "old.md").write_text("# Old raw")
+
+    result = init_wiki(tmp_path)
+
+    assert result.files_registered == 1
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        rows = conn.execute("SELECT original_path FROM sources").fetchall()
+    paths = [row["original_path"] for row in rows]
+    assert paths == ["real-source.md"]

@@ -124,6 +124,10 @@ class InitResult:
         Number of markdown sources copied to ``raw/`` and inserted into ``sources``.
     files_skipped : int
         Number of markdown files that were skipped (e.g. matched a ``.gitignore``).
+    dedup_skipped : int
+        Number of markdown files whose content matched an already-registered
+        source (same SHA-256). The first occurrence wins; subsequent copies
+        are skipped without overwriting the existing ``raw/`` file.
     wiki_root : Path
         The directory containing the new (or pre-existing) ``.mdwiki/``.
     message : str
@@ -133,6 +137,7 @@ class InitResult:
     created: bool
     files_registered: int
     files_skipped: int
+    dedup_skipped: int
     wiki_root: Path
     message: str
 
@@ -164,6 +169,7 @@ def init_wiki(target: Path) -> InitResult:
             created=False,
             files_registered=0,
             files_skipped=0,
+            dedup_skipped=0,
             wiki_root=target,
             message=f"Already initialized at {target}/{WIKI_DIR_NAME}/. No changes.",
         )
@@ -179,17 +185,26 @@ def init_wiki(target: Path) -> InitResult:
     (wiki_dir / "schema.md").write_text(DEFAULT_SCHEMA)
     (wiki_dir / ".gitignore").write_text(GITIGNORE_CONTENT)
 
-    registered, skipped = _register_sources(target=target, raw_dir=raw_dir, db_path=wiki_dir / "state.db")
+    registered, skipped, dedup_skipped = _register_sources(
+        target=target, raw_dir=raw_dir, db_path=wiki_dir / "state.db"
+    )
+
+    suffix_parts: list[str] = []
+    if skipped:
+        suffix_parts.append(f"skipped {skipped} via .gitignore")
+    if dedup_skipped:
+        suffix_parts.append(f"skipped {dedup_skipped} duplicate-content")
+    suffix = f" ({'; '.join(suffix_parts)})." if suffix_parts else "."
 
     return InitResult(
         created=True,
         files_registered=registered,
         files_skipped=skipped,
+        dedup_skipped=dedup_skipped,
         wiki_root=target,
         message=(
             f"Initialized wiki at {target}/{WIKI_DIR_NAME}/. "
-            f"Registered {registered} markdown source(s) as pending"
-            + (f" (skipped {skipped} via .gitignore)." if skipped else ".")
+            f"Registered {registered} markdown source(s) as pending" + suffix
         ),
     )
 
@@ -208,52 +223,90 @@ def _refuse_if_nested(target: Path) -> None:
     )
 
 
-def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[int, int]:
-    """Walk ``target``, register every ``.md`` file as a pending source, return (registered, skipped)."""
+def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[int, int, int]:
+    """Walk ``target``, register every ``.md`` file as a pending source.
+
+    Returns
+    -------
+    tuple[int, int, int]
+        ``(registered, gitignore_skipped, dedup_skipped)``.
+
+    Duplicate-content files (same SHA-256 prefix → same primary key) are
+    skipped via ``INSERT OR IGNORE``; the first occurrence wins, the existing
+    ``raw/<hash>-<slug>.md`` is left untouched, and a counter is bumped. Any
+    other per-row failure is logged to stderr and skipped, so one bad file
+    can't abort the whole walk.
+    """
+    import sys
+
     spec = _load_gitignore(target)
     md_paths = sorted(_iter_markdown_files(target))
     registered = 0
     skipped = 0
+    dedup_skipped = 0
     sidecar: dict[str, dict[str, str | float]] = {}
 
     with connect(db_path) as conn:
         for md_path in md_paths:
-            rel_posix = md_path.relative_to(target).as_posix()
-            if spec is not None and spec.match_file(rel_posix):
-                skipped += 1
+            try:
+                rel_posix = md_path.relative_to(target).as_posix()
+                if spec is not None and spec.match_file(rel_posix):
+                    skipped += 1
+                    continue
+
+                content_bytes = md_path.read_bytes()
+                content_hash = hashlib.sha256(content_bytes).hexdigest()
+                short_hash = content_hash[:12]
+                slug = _slugify(md_path.stem)
+                raw_filename = f"{short_hash}-{slug}.md"
+                raw_path_abs = raw_dir / raw_filename
+                # Don't clobber an existing raw/ file when the content is the
+                # same — the first registration wins both in the DB and on disk.
+                if not raw_path_abs.exists():
+                    shutil.copyfile(md_path, raw_path_abs)
+                mtime = md_path.stat().st_mtime
+
+                cursor = conn.execute(
+                    "INSERT OR IGNORE INTO sources (id, original_path, raw_path, content_hash, mtime, status) VALUES (?, ?, ?, ?, ?, ?)",
+                    (short_hash, rel_posix, f"raw/{raw_filename}", content_hash, mtime, "pending"),
+                )
+                if cursor.rowcount == 0:
+                    # Duplicate primary key — another file already registered this content.
+                    dedup_skipped += 1
+                    continue
+                sidecar[short_hash] = {
+                    "original_path": rel_posix,
+                    "raw_path": f"raw/{raw_filename}",
+                    "content_hash": content_hash,
+                    "mtime": mtime,
+                }
+                registered += 1
+            except Exception as exc:  # noqa: BLE001 — bulk-walk resilience
+                print(f"warning: failed to register {md_path}: {exc}", file=sys.stderr)
                 continue
-
-            content_bytes = md_path.read_bytes()
-            content_hash = hashlib.sha256(content_bytes).hexdigest()
-            short_hash = content_hash[:12]
-            slug = _slugify(md_path.stem)
-            raw_filename = f"{short_hash}-{slug}.md"
-            raw_path_abs = raw_dir / raw_filename
-            shutil.copyfile(md_path, raw_path_abs)
-            mtime = md_path.stat().st_mtime
-
-            conn.execute(
-                "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) VALUES (?, ?, ?, ?, ?, ?)",
-                (short_hash, rel_posix, f"raw/{raw_filename}", content_hash, mtime, "pending"),
-            )
-            sidecar[short_hash] = {
-                "original_path": rel_posix,
-                "raw_path": f"raw/{raw_filename}",
-                "content_hash": content_hash,
-                "mtime": mtime,
-            }
-            registered += 1
         conn.commit()
 
     if sidecar:
         (raw_dir / SOURCES_SIDECAR_NAME).write_text(json.dumps(sidecar, indent=2, sort_keys=True))
 
-    return registered, skipped
+    return registered, skipped, dedup_skipped
+
+
+# Folders we never recurse into when discovering source markdown.
+# - ``.mdwiki/`` holds the local cache + schema (never sources).
+# - ``wiki/`` and ``raw/`` get scaffolded BY init; on a re-init or a partially-
+#   prepared folder, files there are not user sources.
+_EXCLUDED_DIR_NAMES: frozenset[str] = frozenset({WIKI_DIR_NAME, "wiki", "raw"})
 
 
 def _iter_markdown_files(target: Path) -> list[Path]:
-    """Return every ``.md`` file under ``target``, excluding any inside ``.mdwiki/``."""
-    return [p for p in target.rglob("*.md") if WIKI_DIR_NAME not in p.parts]
+    """Return every ``.md`` file under ``target``, excluding internal/scaffold dirs.
+
+    Excludes ``.mdwiki/``, ``wiki/``, and ``raw/`` at any depth — those are
+    mdwiki-managed locations and registering files there as user sources
+    would pollute the source table on re-init.
+    """
+    return [p for p in target.rglob("*.md") if _EXCLUDED_DIR_NAMES.isdisjoint(p.parts)]
 
 
 def _load_gitignore(target: Path) -> pathspec.PathSpec | None:
