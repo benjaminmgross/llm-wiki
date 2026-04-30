@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +17,7 @@ import pathspec
 import tomli_w
 
 from mdwiki.discover import WIKI_DIR_NAME, WikiNotFound, find_wiki
+from mdwiki.loaders import UnsupportedFiletypeError, get_loader_for
 from mdwiki.state import connect, init_db
 
 SOURCES_SIDECAR_NAME: str = ".sources.json"
@@ -242,27 +242,30 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
     import sys
 
     spec = _load_gitignore(target)
-    md_paths = sorted(_iter_markdown_files(target))
+    source_paths = sorted(_iter_loadable_files(target))
     registered = 0
     skipped = 0
     dedup_skipped = 0
     sidecar: dict[str, dict[str, str | float]] = {}
 
     with connect(db_path) as conn:
-        for md_path in md_paths:
+        for source_path in source_paths:
             try:
-                rel_posix = md_path.relative_to(target).as_posix()
+                rel_posix = source_path.relative_to(target).as_posix()
                 if spec is not None and spec.match_file(rel_posix):
                     skipped += 1
                     continue
 
-                content_bytes = md_path.read_bytes()
+                # Hash original bytes — the source's identity. Loader output is
+                # derived; if a loader changes (bug fix, format tweak), the same
+                # source still resolves to the same id.
+                content_bytes = source_path.read_bytes()
                 content_hash = hashlib.sha256(content_bytes).hexdigest()
                 short_hash = content_hash[:12]
 
                 # Pre-check by primary key: if another file with identical
                 # content has already been registered this run, skip BOTH the
-                # INSERT and the copyfile. Without this pre-check, two files
+                # INSERT and the loader call. Without this pre-check, two files
                 # sharing content but differing in stem produce two different
                 # raw/<hash>-<slug>.md filenames; the second copy lands on
                 # disk before INSERT OR IGNORE drops the row, leaving an
@@ -274,14 +277,18 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
                     dedup_skipped += 1
                     continue
 
-                slug = _slugify(md_path.stem)
+                loader = get_loader_for(source_path)
+                markdown_text = loader.load_to_markdown(source_path)
+
+                slug = _slugify(source_path.stem)
                 raw_filename = f"{short_hash}-{slug}.md"
                 raw_path_abs = raw_dir / raw_filename
-                # Don't clobber an existing raw/ file when the content is the
-                # same — the first registration wins both in the DB and on disk.
+                # Don't clobber an existing raw/ file — the first registration
+                # wins both in the DB and on disk. raw/ is a homogeneous
+                # markdown store regardless of original filetype.
                 if not raw_path_abs.exists():
-                    shutil.copyfile(md_path, raw_path_abs)
-                mtime = md_path.stat().st_mtime
+                    raw_path_abs.write_text(markdown_text)
+                mtime = source_path.stat().st_mtime
 
                 conn.execute(
                     "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) VALUES (?, ?, ?, ?, ?, ?)",
@@ -292,10 +299,11 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
                     "raw_path": f"raw/{raw_filename}",
                     "content_hash": content_hash,
                     "mtime": mtime,
+                    "loader": loader.name,
                 }
                 registered += 1
             except Exception as exc:  # noqa: BLE001 — bulk-walk resilience
-                print(f"warning: failed to register {md_path}: {exc}", file=sys.stderr)
+                print(f"warning: failed to register {source_path}: {exc}", file=sys.stderr)
                 continue
         conn.commit()
 
@@ -312,14 +320,27 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
 _EXCLUDED_DIR_NAMES: frozenset[str] = frozenset({WIKI_DIR_NAME, "wiki", "raw"})
 
 
-def _iter_markdown_files(target: Path) -> list[Path]:
-    """Return every ``.md`` file under ``target``, excluding internal/scaffold dirs.
+def _iter_loadable_files(target: Path) -> list[Path]:
+    """Return every file under ``target`` that some registered loader claims.
 
     Excludes ``.mdwiki/``, ``wiki/``, and ``raw/`` at any depth — those are
     mdwiki-managed locations and registering files there as user sources
-    would pollute the source table on re-init.
+    would pollute the source table on re-init. Files no loader recognizes
+    are silently dropped (this is the registry's intended filter behavior;
+    use ``mdwiki source`` afterwards to verify what was picked up).
     """
-    return [p for p in target.rglob("*.md") if _EXCLUDED_DIR_NAMES.isdisjoint(p.parts)]
+    out: list[Path] = []
+    for p in target.rglob("*"):
+        if not p.is_file():
+            continue
+        if not _EXCLUDED_DIR_NAMES.isdisjoint(p.parts):
+            continue
+        try:
+            get_loader_for(p)
+        except UnsupportedFiletypeError:
+            continue
+        out.append(p)
+    return out
 
 
 def _load_gitignore(target: Path) -> pathspec.PathSpec | None:
