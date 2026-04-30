@@ -14,16 +14,36 @@ from __future__ import annotations
 from pathlib import Path
 
 from mdwiki.loaders.base import Loader
+from mdwiki.loaders.code import CodeLoader
+from mdwiki.loaders.csv_loader import CsvLoader
 from mdwiki.loaders.markdown import MarkdownLoader
+from mdwiki.loaders.text import TextLoader
 
-__all__ = ["Loader", "MarkdownLoader", "UnsupportedFiletypeError", "get_loader_for"]
+__all__ = [
+    "CodeLoader",
+    "CsvLoader",
+    "Loader",
+    "MarkdownLoader",
+    "TextLoader",
+    "UnsupportedFiletypeError",
+    "get_loader_for",
+]
 
 
 class UnsupportedFiletypeError(Exception):
     """Raised by ``get_loader_for`` when no registered loader claims the path."""
 
 
-_REGISTRY: tuple[Loader, ...] = (MarkdownLoader(),)
+# Registry order: markdown first (most specific use case), then code (specific
+# extensions), then csv (specific extensions), then text (generic fallback for
+# remaining text-like files). Each loader's can_handle is extension-bounded, so
+# order only matters if two loaders ever claim the same extension — they don't.
+_REGISTRY: tuple[Loader, ...] = (
+    MarkdownLoader(),
+    CodeLoader(),
+    CsvLoader(),
+    TextLoader(),
+)
 
 
 def get_loader_for(path: Path) -> Loader:

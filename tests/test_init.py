@@ -140,9 +140,14 @@ def test_init_gitignore_protects_state_db_and_undo(fresh_target: Path) -> None:
 
 
 @pytest.mark.unit
-def test_init_skips_non_md_files(fresh_target: Path) -> None:
-    (fresh_target / "notes.txt").write_text("plain text")
+def test_init_skips_filetypes_no_loader_claims(fresh_target: Path) -> None:
+    """Files with no registered loader (e.g. raw images, unknown extensions) are silently skipped.
+
+    Phase 2 expanded the registry to claim .txt / .py / .csv as well as .md, so the
+    skip set is now narrower than v1.0 — verify with truly unsupported extensions.
+    """
     (fresh_target / "image.png").write_bytes(b"\x89PNG")
+    (fresh_target / "weird.zzz").write_text("nothing claims this")
     result = init_wiki(fresh_target)
     assert result.files_registered == 3
 
