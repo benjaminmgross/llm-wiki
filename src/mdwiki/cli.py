@@ -24,6 +24,7 @@ from mdwiki.llm import UnknownProviderError
 from mdwiki.llm.anthropic import MissingAPIKeyError
 from mdwiki.query import QueryError, query_wiki
 from mdwiki.rebuild import RebuildError, rebuild_wiki
+from mdwiki.rebuild_log import rebuild_log
 from mdwiki.source import find_matching_sources, format_disambiguation, format_source_info, get_source_info
 from mdwiki.status import format_status, get_status
 from mdwiki.synthesize import SynthesisError, synthesize_auto, synthesize_topic
@@ -98,6 +99,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     rebuild_p = subparsers.add_parser("rebuild", help="Reconstruct .mdwiki/state.db from raw/.sources.json + wiki/log.md.")
     rebuild_p.set_defaults(_handler=_cmd_rebuild)
+
+    rebuild_log_p = subparsers.add_parser(
+        "rebuild-log",
+        help="Regenerate wiki/log.md from the events table (recovery if a write was lost).",
+    )
+    rebuild_log_p.set_defaults(_handler=_cmd_rebuild_log)
 
     doctor_p = subparsers.add_parser("doctor", help="Check provider config and ping the LLM API.")
     doctor_p.set_defaults(_handler=_cmd_doctor)
@@ -244,6 +251,18 @@ def _cmd_rebuild(_args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(result.message)
+    return 0
+
+
+def _cmd_rebuild_log(_args: argparse.Namespace) -> int:
+    """Handler for ``mdwiki rebuild-log`` — regenerate wiki/log.md from events."""
+    try:
+        wiki_root = find_wiki()
+    except WikiNotFound as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    result = rebuild_log(wiki_root)
+    print(f"Regenerated {result.log_path} ({result.lines_written} line(s) from events table).")
     return 0
 
 
