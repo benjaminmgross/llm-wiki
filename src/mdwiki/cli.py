@@ -12,6 +12,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+import anthropic
+
 from mdwiki import __version__
 from mdwiki.discover import WikiNotFound, find_wiki
 from mdwiki.doctor import format_report, run_doctor
@@ -151,6 +153,9 @@ def _cmd_init(args: argparse.Namespace) -> int:
     except (MissingAPIKeyError, UnknownProviderError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except (anthropic.AuthenticationError, anthropic.NotFoundError) as exc:
+        print(_fatal_api_error_message(exc), file=sys.stderr)
+        return 1
     applied = sum(1 for r in ingest_results if r.applied)
     print(f"\nBootstrap done: {applied} of {len(ingest_results)} applied.")
     return 0
@@ -224,6 +229,9 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         except (MissingAPIKeyError, UnknownProviderError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+        except (anthropic.AuthenticationError, anthropic.NotFoundError) as exc:
+            print(_fatal_api_error_message(exc), file=sys.stderr)
+            return 1
         applied = sum(1 for r in results if r.applied)
         print(f"\nDone: {applied} of {len(results)} applied.")
         return 0
@@ -242,6 +250,9 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         return 1
     except UnknownProviderError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except (anthropic.AuthenticationError, anthropic.NotFoundError) as exc:
+        print(_fatal_api_error_message(exc), file=sys.stderr)
         return 1
     print(result.message)
     return 0  # rejection is not an error
@@ -369,3 +380,25 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
         return 1
     print(format_report(report))
     return 0 if report.api_ok else 1
+
+
+def _fatal_api_error_message(exc: Exception) -> str:
+    """Render a user-friendly message for fatal Anthropic API errors.
+
+    These errors (auth/not-found) signal a config problem: a bad API key, a
+    typo'd model id, or insufficient permissions. They're identical for every
+    source, so ``ingest_many`` propagates them rather than swallowing per-source
+    failures and the CLI prints one clear "fix your config" message.
+    """
+    if isinstance(exc, anthropic.AuthenticationError):
+        return (
+            f"error: Anthropic API rejected the credentials ({exc}). "
+            "Fix the ANTHROPIC_API_KEY env var (or your provider config) and re-run."
+        )
+    if isinstance(exc, anthropic.NotFoundError):
+        return (
+            f"error: Anthropic API returned 'not found' ({exc}). "
+            "Likely cause: the model id in .mdwiki/config.toml ([llm] model = ...) "
+            "is misspelled or has been retired. Update it and re-run."
+        )
+    return f"error: {exc}"

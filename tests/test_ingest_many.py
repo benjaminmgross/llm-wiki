@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import anthropic
+import httpx
 import pytest
 from pytest_mock import MockerFixture
 
@@ -148,6 +150,34 @@ def test_ingest_many_empty_returns_empty(tmp_path: Path) -> None:
     init_wiki(tmp_path)
     results = ingest_many(tmp_path, scope="pending", yes=True)
     assert results == []
+
+
+@pytest.mark.unit
+def test_ingest_many_propagates_authentication_error(
+    wiki_with_three_pending: Path, mocker: MockerFixture
+) -> None:
+    """Regression: round-2 C2.
+
+    Round-1 broadened the catch to ``anthropic.APIError`` to handle transient
+    failures, but ``AuthenticationError`` extends ``APIError`` and was being
+    silently swallowed — every source ended up marked failed instead of
+    aborting fast on a bad key.
+
+    The fix narrows the catch to specifically-recoverable subclasses
+    (RateLimitError, APIConnectionError, InternalServerError) so auth/notfound
+    propagate to the CLI handler.
+    """
+    fake_response = httpx.Response(401, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    auth_error = anthropic.AuthenticationError(
+        message="invalid x-api-key", response=fake_response, body={"error": {"message": "invalid"}}
+    )
+    mocker.patch(
+        "mdwiki.llm.anthropic.AnthropicProvider.complete",
+        side_effect=auth_error,
+    )
+
+    with pytest.raises(anthropic.AuthenticationError):
+        ingest_many(wiki_with_three_pending, scope="pending", yes=True)
 
 
 @pytest.mark.unit

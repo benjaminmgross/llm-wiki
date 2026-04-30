@@ -230,12 +230,21 @@ def ingest_many(
                 embedder=embedder,
             )
             results.append(result)
-        except (IngestError, anthropic.APIError) as exc:
-            # IngestError covers logical failures (bad quotes, parse errors).
-            # anthropic.APIError covers SDK-level transient/permanent failures
-            # (rate limit, overloaded, server error) that the SDK's max_retries
-            # already exhausted — surface and continue rather than aborting
-            # the whole bulk run on one bad source.
+        except (
+            IngestError,
+            anthropic.RateLimitError,
+            anthropic.APIConnectionError,
+            anthropic.InternalServerError,
+        ) as exc:
+            # IngestError covers logical, per-source failures (bad quotes,
+            # parse errors). The three anthropic subclasses cover SDK-level
+            # transients that the SDK's max_retries already exhausted — surface
+            # and continue rather than aborting the whole bulk run on one bad
+            # source. AuthenticationError, NotFoundError, PermissionDeniedError,
+            # and BadRequestError are NOT caught here: those signal a config
+            # problem (bad key, wrong model id, lacking permission, malformed
+            # request) that will fail every subsequent source identically — we
+            # let them propagate so the CLI can print one clear error and exit.
             if on_failure is not None:
                 on_failure(original_path, exc)
             results.append(
