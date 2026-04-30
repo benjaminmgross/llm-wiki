@@ -86,3 +86,132 @@ def test_no_subcommand_prints_help_and_exits_nonzero(capsys: pytest.CaptureFixtu
 def test_unknown_subcommand_returns_nonzero(capsys: pytest.CaptureFixture[str]) -> None:
     exit_code = main(["definitely-not-a-command"])
     assert exit_code != 0
+
+
+def _seed_wiki(tmp_path: Path) -> Path:
+    """Helper: init a fresh wiki with two .md files; chdir into it not required."""
+    (tmp_path / "alpha.md").write_text("# Alpha")
+    (tmp_path / "beta.md").write_text("# Beta")
+    main(["init", str(tmp_path)])
+    return tmp_path
+
+
+@pytest.mark.unit
+def test_status_subcommand_shows_pending_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _seed_wiki(tmp_path)
+    capsys.readouterr()
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main(["status"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "2 pending" in out
+    assert "0 ingested" in out
+
+
+@pytest.mark.unit
+def test_status_subcommand_errors_outside_wiki(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    exit_code = main(["status"])
+    assert exit_code == 1
+    assert "no .mdwiki/" in capsys.readouterr().err.lower()
+
+
+@pytest.mark.unit
+def test_source_subcommand_prints_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mdwiki.state import connect
+
+    _seed_wiki(tmp_path)
+    capsys.readouterr()
+    monkeypatch.chdir(tmp_path)
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        first_id = conn.execute("SELECT id FROM sources WHERE original_path = 'alpha.md'").fetchone()["id"]
+
+    exit_code = main(["source", first_id[:6]])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert first_id in out
+    assert "alpha.md" in out
+
+
+@pytest.mark.unit
+def test_source_subcommand_errors_on_no_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _seed_wiki(tmp_path)
+    capsys.readouterr()
+    monkeypatch.chdir(tmp_path)
+    exit_code = main(["source", "deadbeef"])
+    assert exit_code == 1
+    assert "no source" in capsys.readouterr().err.lower()
+
+
+@pytest.mark.unit
+def test_source_subcommand_disambiguates_on_multiple_matches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Two sources sharing a hash prefix → ``mdwiki source <prefix>`` lists both and exits non-zero."""
+    from mdwiki.state import connect
+
+    _seed_wiki(tmp_path)
+    capsys.readouterr()
+    monkeypatch.chdir(tmp_path)
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        conn.execute(
+            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("aaaa11112222", "fake-1.md", "raw/fake-1.md", "a" * 64, 1.0, "pending"),
+        )
+        conn.execute(
+            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("aaaa33334444", "fake-2.md", "raw/fake-2.md", "a" * 64, 1.0, "pending"),
+        )
+        conn.commit()
+
+    exit_code = main(["source", "aaaa"])
+
+    assert exit_code == 1
+    text = capsys.readouterr().err
+    assert "ambiguous" in text.lower()
+    assert "aaaa11112222" in text
+    assert "aaaa33334444" in text
+
+
+@pytest.mark.unit
+def test_rebuild_subcommand_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _seed_wiki(tmp_path)
+    capsys.readouterr()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".mdwiki" / "state.db").unlink()
+
+    exit_code = main(["rebuild"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "2 source(s) restored" in out
+    assert (tmp_path / ".mdwiki" / "state.db").is_file()
+
+

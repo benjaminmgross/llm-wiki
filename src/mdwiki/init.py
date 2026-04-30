@@ -8,6 +8,7 @@ records every source as ``pending`` ingest. The user picks how to bootstrap from
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shutil
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ import tomli_w
 
 from mdwiki.discover import WIKI_DIR_NAME, WikiNotFound, find_wiki
 from mdwiki.state import connect, init_db
+
+SOURCES_SIDECAR_NAME: str = ".sources.json"
 
 DEFAULT_CONFIG: dict[str, dict[str, str | int | float | list[str]]] = {
     "llm": {
@@ -192,6 +195,7 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
     md_paths = sorted(_iter_markdown_files(target))
     registered = 0
     skipped = 0
+    sidecar: dict[str, dict[str, str | float]] = {}
 
     with connect(db_path) as conn:
         for md_path in md_paths:
@@ -207,20 +211,23 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
             raw_filename = f"{short_hash}-{slug}.md"
             raw_path_abs = raw_dir / raw_filename
             shutil.copyfile(md_path, raw_path_abs)
+            mtime = md_path.stat().st_mtime
 
             conn.execute(
                 "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    short_hash,
-                    rel_posix,
-                    f"raw/{raw_filename}",
-                    content_hash,
-                    md_path.stat().st_mtime,
-                    "pending",
-                ),
+                (short_hash, rel_posix, f"raw/{raw_filename}", content_hash, mtime, "pending"),
             )
+            sidecar[short_hash] = {
+                "original_path": rel_posix,
+                "raw_path": f"raw/{raw_filename}",
+                "content_hash": content_hash,
+                "mtime": mtime,
+            }
             registered += 1
         conn.commit()
+
+    if sidecar:
+        (raw_dir / SOURCES_SIDECAR_NAME).write_text(json.dumps(sidecar, indent=2, sort_keys=True))
 
     return registered, skipped
 

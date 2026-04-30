@@ -2,7 +2,7 @@
 title: mdwiki — v1.0.0 Design
 created: 2025-04-29
 updated: 2026-04-29
-version: 1.0.0
+version: 1.0.1
 status: locked
 tags: [mdwiki, design, llm-wiki, karpathy-pattern]
 supersedes: v0 design
@@ -88,7 +88,7 @@ my-wiki/
     syntheses/           # cross-cutting writeups
 ```
 
-`raw/` is **flat with content-addressed names** (`raw/<sha256[:12]>-<slug>.md`). Original folder paths live in `state.db` as `original_path` and surface to the LLM as a *hint* during ingest, not as a constraint. Rationale:
+`raw/` is **flat with content-addressed names** (`raw/<sha256[:12]>-<slug>.md`). Original folder paths live in `state.db` as `original_path` AND in `raw/.sources.json` (a small JSON sidecar mapping `<short_hash> → {original_path, mtime}`). The sidecar is what makes `mdwiki rebuild` truly source-of-truth-preserving: with `state.db` deleted, the sidecar plus the raw files are enough to reconstruct everything. The sidecar surfaces to the LLM as a *hint* during ingest, not as a constraint. Rationale:
 
 - The wiki layer is the only place "structure" should live, and the LLM owns it.
 - Flattening avoids two competing taxonomies (filesystem vs wiki).
@@ -301,7 +301,7 @@ Because ingest is interactive, conflict resolution happens in the conversation. 
 
 ## State schema (sqlite)
 
-`.mdwiki/state.db` is a **local cache, gitignored**. The source of truth is `raw/` + `wiki/` + `wiki/log.md`. `mdwiki rebuild` reconstructs the cache from those three.
+`.mdwiki/state.db` is a **local cache, gitignored**. The source of truth is `raw/` (including `raw/.sources.json`) + `wiki/` + `wiki/log.md`. `mdwiki rebuild` reconstructs the cache from those.
 
 Tables:
 

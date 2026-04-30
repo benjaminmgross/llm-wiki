@@ -144,6 +144,24 @@ def test_init_skips_non_md_files(fresh_target: Path) -> None:
 
 
 @pytest.mark.unit
+def test_init_writes_sources_sidecar(fresh_target: Path) -> None:
+    """init writes raw/.sources.json so rebuild can recover original_path even with no state.db."""
+    import json
+
+    init_wiki(fresh_target)
+    sidecar_path = fresh_target / "raw" / ".sources.json"
+    assert sidecar_path.is_file()
+    sidecar = json.loads(sidecar_path.read_text())
+    assert isinstance(sidecar, dict)
+    assert len(sidecar) == 3
+    for short_hash, meta in sidecar.items():
+        assert len(short_hash) == 12
+        assert "original_path" in meta
+        assert "mtime" in meta
+        assert isinstance(meta["mtime"], (int, float))
+
+
+@pytest.mark.unit
 def test_init_raw_path_in_db_is_relative(fresh_target: Path) -> None:
     init_wiki(fresh_target)
     with connect(fresh_target / ".mdwiki" / "state.db") as conn:
