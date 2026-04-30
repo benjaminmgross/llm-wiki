@@ -14,6 +14,9 @@ from typing import Any
 
 from mdwiki.chunker import MarkdownChunker
 from mdwiki.discover import WIKI_DIR_NAME
+from mdwiki.embedder import Embedder
+from mdwiki.embeddings import deserialize, find_top_k, serialize
+from mdwiki.index import build_index
 from mdwiki.llm import build_provider_from_config
 from mdwiki.llm.anthropic import OutputTruncatedError
 from mdwiki.llm.base import Message, Provider
@@ -22,6 +25,10 @@ from mdwiki.prompts import INGEST_SYSTEM_PROMPT, build_ingest_user_prompt
 from mdwiki.quote import verify_plan
 from mdwiki.state import connect
 from mdwiki.transaction import IngestTransaction
+
+CANDIDATES_PER_SECTION: int = 3
+MAX_CANDIDATES_TOTAL: int = 8
+MIN_CANDIDATE_SIMILARITY: float = 0.25
 
 
 class IngestError(Exception):
@@ -46,6 +53,7 @@ def ingest_source(
     provider: Provider | None = None,
     confirm: Callable[[Plan], bool] | None = None,
     max_tokens: int = 16000,
+    embedder: Embedder | None = None,
 ) -> IngestResult:
     """Run the full ingest pipeline for one source.
 
@@ -88,10 +96,14 @@ def ingest_source(
     recent_log = _recent_log_entries(wiki_root, limit=10)
 
     provider = provider or build_provider_from_config(wiki_root)
+    embedder = embedder or _DEFAULT_EMBEDDER.get()
+    section_vectors = [embedder.embed_text(s["content"]) for s in sections] if sections else []
+    candidate_pages = _find_candidate_pages(wiki_root=wiki_root, section_vectors=section_vectors)
+
     user_prompt = build_ingest_user_prompt(
         source_path=source_row["original_path"],
         sections=sections,
-        candidate_pages=[],
+        candidate_pages=candidate_pages,
         schema_text=schema_text,
         recent_log_entries=recent_log,
     )
@@ -141,13 +153,19 @@ def ingest_source(
 
     summary = f"ingest {source_row['original_path']} → {len(plan.updates)} update(s), {len(plan.new_pages)} new page(s)"
     with IngestTransaction(wiki_root=wiki_root, source_id=source_row["id"], summary=summary) as tx:
+        page_embeddings: dict[str, bytes] = {}
         for new_page in plan.new_pages:
             tx.write_file(wiki_root / new_page.path, new_page.content)
+            page_embeddings[new_page.path] = serialize(embedder.embed_text(new_page.content))
         for update in plan.updates:
-            existing = (wiki_root / update.page).read_text() if (wiki_root / update.page).is_file() else ""
-            tx.write_file(wiki_root / update.page, existing + "\n\n" + update.content if existing else update.content)
-        _ensure_pages_rows(tx_conn=tx._conn, plan=plan)  # noqa: SLF001
+            full_target = wiki_root / update.page
+            existing = full_target.read_text() if full_target.is_file() else ""
+            new_content = existing + "\n\n" + update.content if existing else update.content
+            tx.write_file(full_target, new_content)
+            page_embeddings[update.page] = serialize(embedder.embed_text(new_content))
+        _ensure_pages_rows(tx_conn=tx._conn, plan=plan, embeddings=page_embeddings)  # noqa: SLF001
         _record_backrefs(tx_conn=tx._conn, plan=plan, source_id=source_row["id"])  # noqa: SLF001
+        tx.write_file(wiki_root / "wiki" / "index.md", build_index(wiki_root))
 
     return IngestResult(source_id=source_row["id"], applied=True, message=summary, plan=plan)
 
@@ -269,22 +287,70 @@ def _record_backrefs(*, tx_conn: Any, plan: Plan, source_id: str) -> None:
             )
 
 
-def _ensure_pages_rows(*, tx_conn: Any, plan: Plan) -> None:
+def _ensure_pages_rows(*, tx_conn: Any, plan: Plan, embeddings: dict[str, bytes]) -> None:
     import time
 
     now = time.time()
     for new_page in plan.new_pages:
         tx_conn.execute(
-            "INSERT INTO pages (path, kind, last_touched_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(path) DO UPDATE SET kind = excluded.kind, last_touched_at = excluded.last_touched_at",
-            (new_page.path, new_page.kind, now),
+            "INSERT INTO pages (path, kind, embedding, last_touched_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET kind = excluded.kind, embedding = excluded.embedding, last_touched_at = excluded.last_touched_at",
+            (new_page.path, new_page.kind, embeddings.get(new_page.path), now),
         )
     for update in plan.updates:
         tx_conn.execute(
-            "INSERT INTO pages (path, kind, last_touched_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(path) DO UPDATE SET last_touched_at = excluded.last_touched_at",
-            (update.page, _infer_kind(update.page), now),
+            "INSERT INTO pages (path, kind, embedding, last_touched_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET embedding = excluded.embedding, last_touched_at = excluded.last_touched_at",
+            (update.page, _infer_kind(update.page), embeddings.get(update.page), now),
         )
+
+
+def _find_candidate_pages(*, wiki_root: Path, section_vectors: list[list[float]]) -> list[dict[str, str]]:
+    """ANN-search over ``pages.embedding`` to find pages most similar to the source's sections.
+
+    Returns a list of ``{path, content}`` dicts, deduplicated, capped at
+    ``MAX_CANDIDATES_TOTAL``. Empty when the wiki has no embedded pages yet
+    (first ingest into a fresh wiki).
+    """
+    if not section_vectors:
+        return []
+    db_path = wiki_root / WIKI_DIR_NAME / "state.db"
+    with connect(db_path) as conn:
+        rows = conn.execute("SELECT path, embedding FROM pages WHERE embedding IS NOT NULL").fetchall()
+    if not rows:
+        return []
+    page_vectors = {row["path"]: deserialize(row["embedding"]) for row in rows}
+
+    accumulated: dict[str, float] = {}
+    for vec in section_vectors:
+        for path, score in find_top_k(
+            vec, page_vectors, k=CANDIDATES_PER_SECTION, min_similarity=MIN_CANDIDATE_SIMILARITY
+        ):
+            accumulated[path] = max(accumulated.get(path, 0.0), score)
+
+    ranked_paths = sorted(accumulated, key=lambda p: accumulated[p], reverse=True)[:MAX_CANDIDATES_TOTAL]
+
+    candidates: list[dict[str, str]] = []
+    for path in ranked_paths:
+        full = wiki_root / path
+        if full.is_file():
+            candidates.append({"path": path, "content": full.read_text()})
+    return candidates
+
+
+class _LazyEmbedder:
+    """Module-singleton for the embedder; loads the model on first access only."""
+
+    def __init__(self) -> None:
+        self._instance: Embedder | None = None
+
+    def get(self) -> Embedder:
+        if self._instance is None:
+            self._instance = Embedder()
+        return self._instance
+
+
+_DEFAULT_EMBEDDER = _LazyEmbedder()
 
 
 def _infer_kind(page_path: str) -> str:

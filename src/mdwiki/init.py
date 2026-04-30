@@ -68,10 +68,28 @@ The LLM appends a footnote-style citation block at the bottom of each page secti
 [^src1]: <quote>... (raw/<hash>-<slug>.md, original: <original_path>)
 ```
 
-## When to update vs. create
+## When to update vs. create — STRONG PREFERENCE FOR UPDATE
 
-- **Update existing page** when the new source extends, refines, or qualifies a claim already on a page
-- **Create new page** when the source introduces a topic with no existing home, AND the topic warrants more than a single sentence anywhere
+**Default to UPDATING an existing candidate page over creating a new one.** A wiki that grows by accretion of new pages is just a folder of notes. The compounding value comes from refining and extending existing pages.
+
+Decision rule:
+- **Update** if any candidate page covers ≥40% of the source's topic OR if your prospective new page would link primarily to one existing page
+- **Create new page** ONLY when the source introduces a topic with no existing home, AND the topic warrants more than a paragraph anywhere
+- **A single source ingest should typically touch 5–15 wiki pages** (mostly updates, plus 1–3 new pages and 3–8 cross-refs). If you propose only 1–2 new pages and zero updates, ask yourself whether you missed a candidate.
+
+## Cross-references — REQUIRED ON CREATION
+
+**Every new page must include at least one cross-reference to a related existing page.** A new page with no inbound or outbound links is an orphan and a lint failure waiting to happen.
+
+If a candidate-pages list is provided, your new pages should link to whichever of those candidates is conceptually adjacent — even if you didn't update them. Use markdown relative links: `[concept name](../concepts/concept-name.md)`.
+
+## Synthesis pages — TRIGGER CONDITIONS
+
+Propose a `synthesis` page when:
+- A new source ties together ≥3 existing concept or entity pages, OR
+- You notice ≥3 existing pages would benefit from a unified writeup that compares/contrasts them
+
+Synthesis pages are short cross-cutting essays (300–800 words) with heavy cross-reference density, not catalog pages.
 
 ## Lint policies
 
@@ -79,6 +97,7 @@ The LLM appends a footnote-style citation block at the bottom of each page secti
 - Pages whose source files were modified after `last_touched_at` are flagged as stale
 - Pages with header depth > 4 are flagged for restructuring
 - Sources with backref count of 0 after ingest are flagged as poorly absorbed
+- Broken cross-references (markdown link to a path that doesn't exist) are flagged
 """
 
 GITIGNORE_CONTENT: str = """\

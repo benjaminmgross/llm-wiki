@@ -2,7 +2,7 @@
 title: mdwiki — v1.0.0 Design
 created: 2025-04-29
 updated: 2026-04-29
-version: 1.0.2
+version: 1.0.3
 status: locked
 tags: [mdwiki, design, llm-wiki, karpathy-pattern]
 supersedes: v0 design
@@ -386,6 +386,7 @@ No backwards-compat shims, no parallel front-end. Project rename: `markdown-cons
 Explicitly **not** in v1.0.0 (designed for, but deferred):
 
 - **Local model providers** (Qwen, Kimi, etc.) — provider seam exists, implementations are Day 2
+- **Multi-filetype ingest** — v1.0.0 reads `.md` only. v1.1.0 adds a `Loader` abstraction with concrete loaders for txt / csv / pdf / docx / html / code / images (vision OCR). The ingest pipeline below stays the same once content is markdown-text; only the front of the pipe changes
 - **Web UI / GUI** — CLI only
 - **Multi-user / collaboration** — single-user
 - **Real-time wiki preview** — no live render
