@@ -36,6 +36,10 @@ class QuoteVerificationResult:
 def verify_plan(plan: Plan, *, source_text: str, section_ids: set[str]) -> QuoteVerificationResult:
     """Check every claim against the source.
 
+    Section ids are also normalized before comparison — the LLM strips markdown
+    formatting and unicode oddities from headings when echoing them, so an
+    exact-match comparison would reject correctly-cited sections too.
+
     Parameters
     ----------
     plan : Plan
@@ -46,10 +50,11 @@ def verify_plan(plan: Plan, *, source_text: str, section_ids: set[str]) -> Quote
         The set of valid section ids the LLM is allowed to cite.
     """
     normalized_source = _normalize(source_text)
+    normalized_section_ids = {_normalize(sid) for sid in section_ids}
     errors: list[ClaimError] = []
 
     for claim in plan.all_claims():
-        if claim.source_section_id not in section_ids:
+        if _normalize(claim.source_section_id) not in normalized_section_ids:
             errors.append(ClaimError(claim=claim, message=f"unknown source_section_id: {claim.source_section_id!r}"))
             continue
         if len(claim.quote.split()) < MIN_QUOTE_WORDS:

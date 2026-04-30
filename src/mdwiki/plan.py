@@ -82,6 +82,10 @@ class Plan:
 def parse_plan(raw_json: str) -> Plan:
     """Parse the LLM's JSON response into a typed ``Plan``.
 
+    Tolerates the model occasionally wrapping the JSON in markdown code fences
+    or surrounding it with prose preamble/postamble — extracts the outermost
+    ``{...}`` block before parsing.
+
     Parameters
     ----------
     raw_json : str
@@ -92,8 +96,9 @@ def parse_plan(raw_json: str) -> Plan:
     PlanValidationError
         If the JSON is malformed or any required structure is missing or invalid.
     """
+    cleaned = _extract_json_object(raw_json)
     try:
-        payload: Any = json.loads(raw_json)
+        payload: Any = json.loads(cleaned)
     except json.JSONDecodeError as exc:
         raise PlanValidationError(f"Invalid JSON: {exc}") from exc
     if not isinstance(payload, dict):
@@ -113,6 +118,26 @@ def parse_plan(raw_json: str) -> Plan:
         )
 
     return Plan(verdict=verdict, rationale=rationale, updates=updates, new_pages=new_pages, cross_refs=cross_refs)
+
+
+def _extract_json_object(raw: str) -> str:
+    """Return the substring from the first ``{`` to the last ``}`` after stripping fences.
+
+    Strips ``` ``` ``` and ``` ```json ``` ``` wrappings, then snips off any prose
+    preamble/postamble around the outermost JSON object.
+    """
+    text = raw.strip()
+    if text.startswith("```"):
+        first_newline = text.find("\n")
+        if first_newline != -1:
+            text = text[first_newline + 1 :]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[: -len("```")]
+    first = text.find("{")
+    last = text.rfind("}")
+    if first == -1 or last == -1 or last < first:
+        return text  # no JSON object found; let json.loads produce the error
+    return text[first : last + 1]
 
 
 def _validate_verdict(verdict: str) -> None:

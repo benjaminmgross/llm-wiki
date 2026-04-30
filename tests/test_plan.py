@@ -183,3 +183,38 @@ def test_parse_rejects_extra_top_level_fields_silently_or_gracefully() -> None:
     payload["mystery_field"] = "should be ignored or rejected"
     plan = parse_plan(json.dumps(payload))
     assert plan.verdict == "ingest"
+
+
+@pytest.mark.unit
+def test_parse_strips_markdown_code_fences_with_lang_tag() -> None:
+    raw = "```json\n" + json.dumps(_valid_payload()) + "\n```"
+    plan = parse_plan(raw)
+    assert plan.verdict == "ingest"
+
+
+@pytest.mark.unit
+def test_parse_strips_bare_code_fences() -> None:
+    raw = "```\n" + json.dumps(_valid_payload()) + "\n```"
+    plan = parse_plan(raw)
+    assert plan.verdict == "ingest"
+
+
+@pytest.mark.unit
+def test_parse_strips_preamble_before_json_object() -> None:
+    raw = "Here is the plan:\n\n" + json.dumps(_valid_payload())
+    plan = parse_plan(raw)
+    assert plan.verdict == "ingest"
+
+
+@pytest.mark.unit
+def test_parse_strips_postamble_after_json_object() -> None:
+    raw = json.dumps(_valid_payload()) + "\n\nLet me know if you'd like changes."
+    plan = parse_plan(raw)
+    assert plan.verdict == "ingest"
+
+
+@pytest.mark.unit
+def test_parse_handles_fences_plus_preamble_plus_whitespace() -> None:
+    raw = "Here you go:\n\n```json\n" + json.dumps(_valid_payload()) + "\n```\n\nDone!"
+    plan = parse_plan(raw)
+    assert plan.verdict == "ingest"

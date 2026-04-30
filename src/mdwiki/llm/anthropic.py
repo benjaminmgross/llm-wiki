@@ -122,18 +122,23 @@ class AnthropicProvider(Provider):
     ) -> CompleteResult:
         """Issue a single completion request with prompt caching on the system prompt.
 
+        Streams the response so high ``max_tokens`` requests don't risk SDK HTTP
+        timeouts, then collects the final message via the SDK helper.
+
         Raises
         ------
         OutputTruncatedError
             If ``stop_reason`` is ``"max_tokens"`` — the response is truncated and
             cannot be safely parsed as JSON. Caller should retry with a higher cap.
         """
-        response = self._client.messages.create(
+        with self._client.messages.stream(
             model=self.model,
             max_tokens=max_tokens,
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": m.role, "content": m.content} for m in messages],
-        )
+        ) as stream:
+            response = stream.get_final_message()
+
         if getattr(response, "stop_reason", None) == "max_tokens":
             raise OutputTruncatedError(
                 f"Model hit max_tokens={max_tokens} mid-response. The output is truncated and likely invalid JSON. "

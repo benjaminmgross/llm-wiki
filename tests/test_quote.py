@@ -195,6 +195,43 @@ def test_markdown_inline_code_stripped() -> None:
 
 
 @pytest.mark.unit
+def test_section_id_with_markdown_link_in_heading_matches_clean_citation() -> None:
+    """The LLM strips markdown formatting when echoing a heading; we must too."""
+    source_text = "stuff about observe and the link to docs is fine to cite here"
+    section_ids = {"path.md/Observe [📖](https://docs.example.com/observe)"}
+    plan = _plan(
+        updates=(
+            _update(
+                Claim(
+                    source_section_id="path.md/Observe 📖",
+                    quote="stuff about observe and the link to docs is fine to cite here",
+                )
+            ),
+        )
+    )
+    result = verify_plan(plan, source_text=source_text, section_ids=section_ids)
+    assert result.valid is True
+
+
+@pytest.mark.unit
+def test_section_id_normalization_handles_emphasis_and_unicode() -> None:
+    source_text = "this is content with enough words to satisfy the minimum here"
+    section_ids = {"path.md/**Important**: it’s alive"}
+    plan = _plan(
+        updates=(
+            _update(
+                Claim(
+                    source_section_id="path.md/Important: it's alive",
+                    quote="this is content with enough words to satisfy the minimum here",
+                )
+            ),
+        )
+    )
+    result = verify_plan(plan, source_text=source_text, section_ids=section_ids)
+    assert result.valid is True
+
+
+@pytest.mark.unit
 def test_normalization_still_rejects_real_hallucinations() -> None:
     """Sanity check: smarter normalization shouldn't mask actual fabrications."""
     source_text = "Discipline is liberation in his journals at the time."

@@ -117,18 +117,28 @@ def test_ping_connection_error_returns_actionable_message(mocker: MockerFixture)
     assert "connect" in result.message.lower() or "network" in result.message.lower()
 
 
+def _mock_stream(fake_client: MagicMock, response: MagicMock) -> None:
+    """Wire ``fake_client.messages.stream(...)`` to yield a context manager whose
+    ``get_final_message()`` returns ``response``."""
+    stream_cm = MagicMock()
+    stream_cm.__enter__.return_value.get_final_message.return_value = response
+    stream_cm.__exit__.return_value = False
+    fake_client.messages.stream.return_value = stream_cm
+
+
 @pytest.mark.unit
 def test_complete_passes_system_with_cache_control(mocker: MockerFixture) -> None:
     fake_client = MagicMock()
     fake_response = MagicMock()
     fake_response.content = [MagicMock(type="text", text="hello back")]
+    fake_response.stop_reason = "end_turn"
     fake_response.usage = MagicMock(
         input_tokens=10,
         output_tokens=5,
         cache_read_input_tokens=0,
         cache_creation_input_tokens=120,
     )
-    fake_client.messages.create.return_value = fake_response
+    _mock_stream(fake_client, fake_response)
 
     provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="sk-x", client=fake_client)
     result = provider.complete(
@@ -137,8 +147,8 @@ def test_complete_passes_system_with_cache_control(mocker: MockerFixture) -> Non
         max_tokens=128,
     )
 
-    fake_client.messages.create.assert_called_once()
-    kwargs = fake_client.messages.create.call_args.kwargs
+    fake_client.messages.stream.assert_called_once()
+    kwargs = fake_client.messages.stream.call_args.kwargs
     assert kwargs["model"] == "claude-sonnet-4-6"
     assert kwargs["max_tokens"] == 128
     assert isinstance(kwargs["system"], list)
@@ -161,7 +171,7 @@ def test_complete_raises_clear_error_on_max_tokens_truncation(mocker: MockerFixt
     fake_response.usage = MagicMock(
         input_tokens=100, output_tokens=4096, cache_read_input_tokens=0, cache_creation_input_tokens=0
     )
-    fake_client.messages.create.return_value = fake_response
+    _mock_stream(fake_client, fake_response)
 
     provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="sk-x", client=fake_client)
     from mdwiki.llm.anthropic import OutputTruncatedError
@@ -178,13 +188,14 @@ def test_complete_reports_cache_read_tokens(mocker: MockerFixture) -> None:
     fake_client = MagicMock()
     fake_response = MagicMock()
     fake_response.content = [MagicMock(type="text", text="cached")]
+    fake_response.stop_reason = "end_turn"
     fake_response.usage = MagicMock(
         input_tokens=2,
         output_tokens=3,
         cache_read_input_tokens=500,
         cache_creation_input_tokens=0,
     )
-    fake_client.messages.create.return_value = fake_response
+    _mock_stream(fake_client, fake_response)
 
     provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="sk-x", client=fake_client)
     result = provider.complete(system="sys", messages=[Message(role="user", content="x")])
