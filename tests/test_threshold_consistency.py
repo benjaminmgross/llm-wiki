@@ -14,7 +14,7 @@ def test_threshold_flows_consistently():
     import tempfile
     from pathlib import Path
 
-    from markdown_consolidator.consolidator import consolidate
+    from mdwiki.consolidator import consolidate
 
     with tempfile.TemporaryDirectory() as tmpdir:
         source = Path(tmpdir) / "source"
@@ -56,9 +56,9 @@ def test_threshold_consistency_between_modules():
     import tempfile
     from pathlib import Path
 
-    from markdown_consolidator.clustering import cluster_files
-    from markdown_consolidator.inventory import inventory_directory
-    from markdown_consolidator.relationships import analyze_relationships
+    from mdwiki.clustering import cluster_files
+    from mdwiki.inventory import inventory_directory
+    from mdwiki.relationships import analyze_relationships
 
     with tempfile.TemporaryDirectory() as tmpdir:
         source = Path(tmpdir)

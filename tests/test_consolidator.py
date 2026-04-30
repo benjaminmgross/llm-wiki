@@ -10,13 +10,13 @@ import pytest
 
 def test_version():
     """Test that version is accessible."""
-    from markdown_consolidator import __version__
-    assert __version__ == "0.1.0"
+    from mdwiki import __version__
+    assert __version__ == "1.0.0"
 
 
 def test_inventory_empty_directory():
     """Test inventory on empty directory."""
-    from markdown_consolidator import inventory_directory
+    from mdwiki import inventory_directory
 
     with tempfile.TemporaryDirectory() as tmpdir:
         result = inventory_directory(directory=Path(tmpdir))
@@ -25,7 +25,7 @@ def test_inventory_empty_directory():
 
 def test_inventory_single_file():
     """Test inventory with a single markdown file."""
-    from markdown_consolidator import inventory_directory
+    from mdwiki import inventory_directory
 
     with tempfile.TemporaryDirectory() as tmpdir:
         md_file = Path(tmpdir) / "test.md"
@@ -41,7 +41,7 @@ def test_inventory_single_file():
 
 def test_extract_frontmatter():
     """Test frontmatter extraction."""
-    from markdown_consolidator.inventory import extract_frontmatter
+    from mdwiki.inventory import extract_frontmatter
 
     content = """---
 title: Test Document
@@ -59,7 +59,7 @@ tags: [a, b]
 
 def test_extract_links():
     """Test link extraction."""
-    from markdown_consolidator.inventory import extract_links
+    from mdwiki.inventory import extract_links
 
     content = """
 Check [[wikilink]] and [[another|display]].
@@ -76,7 +76,7 @@ Also [markdown](link.md) and [external](https://example.com).
 
 def test_compute_fingerprint():
     """Test content fingerprinting."""
-    from markdown_consolidator.inventory import compute_fingerprint
+    from mdwiki.inventory import compute_fingerprint
 
     fp1 = compute_fingerprint(content="Hello World!")
     fp2 = compute_fingerprint(content="hello world")
@@ -90,7 +90,7 @@ def test_compute_fingerprint():
 
 def test_cosine_similarity():
     """Test cosine similarity calculation."""
-    from markdown_consolidator.relationships import cosine_similarity
+    from mdwiki.relationships import cosine_similarity
 
     vec1 = {'a': 1.0, 'b': 2.0}
     vec2 = {'a': 1.0, 'b': 2.0}
@@ -104,7 +104,7 @@ def test_cosine_similarity():
 
 def test_topic_cluster():
     """Test topic clustering."""
-    from markdown_consolidator.clustering import topic_cluster
+    from mdwiki.clustering import topic_cluster
 
     relationships = {
         'content_similarities': [
@@ -121,7 +121,7 @@ def test_topic_cluster():
 
 def test_full_pipeline():
     """Test the full consolidation pipeline."""
-    from markdown_consolidator import consolidate
+    from mdwiki import consolidate
 
     with tempfile.TemporaryDirectory() as tmpdir:
         source = Path(tmpdir) / "source"
@@ -170,7 +170,7 @@ def test_consolidate_with_subfolders_copies_non_markdown(tmp_path: Path) -> None
     output = tmp_path / "output"
 
     # Act
-    from markdown_consolidator.consolidator import consolidate
+    from mdwiki.consolidator import consolidate
 
     result = consolidate(
         source_dir=source,
@@ -200,7 +200,7 @@ def test_consolidate_without_subfolders_no_copy(tmp_path: Path) -> None:
     output = tmp_path / "output"
 
     # Act
-    from markdown_consolidator.consolidator import consolidate
+    from mdwiki.consolidator import consolidate
 
     result = consolidate(
         source_dir=source,
@@ -230,7 +230,7 @@ def test_consolidate_subfolders_output_inside_source(tmp_path: Path) -> None:
     output = source / "consolidated"
 
     # Act
-    from markdown_consolidator.consolidator import consolidate
+    from mdwiki.consolidator import consolidate
 
     result = consolidate(
         source_dir=source,

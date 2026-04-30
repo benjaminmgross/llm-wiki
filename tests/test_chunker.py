@@ -10,7 +10,7 @@ def test_chunk_file_extracts_h2_sections():
     import tempfile
     from pathlib import Path
 
-    from markdown_consolidator.chunker import MarkdownChunker
+    from mdwiki.chunker import MarkdownChunker
 
     with tempfile.TemporaryDirectory() as tmpdir:
         md_file = Path(tmpdir) / "test.md"
@@ -55,7 +55,7 @@ def test_chunk_directory_processes_all_files():
     import tempfile
     from pathlib import Path
 
-    from markdown_consolidator.chunker import MarkdownChunker
+    from mdwiki.chunker import MarkdownChunker
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmppath = Path(tmpdir)
@@ -84,7 +84,7 @@ def test_chunk_file_skips_short_sections():
     import tempfile
     from pathlib import Path
 
-    from markdown_consolidator.chunker import MarkdownChunker
+    from mdwiki.chunker import MarkdownChunker
 
     with tempfile.TemporaryDirectory() as tmpdir:
         md_file = Path(tmpdir) / "test.md"
@@ -115,7 +115,7 @@ def test_chunk_file_strips_frontmatter():
     import tempfile
     from pathlib import Path
 
-    from markdown_consolidator.chunker import MarkdownChunker
+    from mdwiki.chunker import MarkdownChunker
 
     with tempfile.TemporaryDirectory() as tmpdir:
         md_file = Path(tmpdir) / "test.md"
@@ -150,7 +150,7 @@ def test_chunk_file_generates_fingerprints():
     import tempfile
     from pathlib import Path
 
-    from markdown_consolidator.chunker import MarkdownChunker
+    from mdwiki.chunker import MarkdownChunker
 
     with tempfile.TemporaryDirectory() as tmpdir:
         md_file1 = Path(tmpdir) / "file1.md"
@@ -176,7 +176,7 @@ def test_chunk_file_includes_metadata():
     import tempfile
     from pathlib import Path
 
-    from markdown_consolidator.chunker import MarkdownChunker
+    from mdwiki.chunker import MarkdownChunker
 
     with tempfile.TemporaryDirectory() as tmpdir:
         md_file = Path(tmpdir) / "test.md"

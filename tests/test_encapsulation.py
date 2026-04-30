@@ -2,7 +2,6 @@
 Tests for encapsulation scoring module.
 """
 
-import pytest
 
 
 def test_encapsulation_scorer_high_coherence():
@@ -11,7 +10,7 @@ def test_encapsulation_scorer_high_coherence():
     When: Computing encapsulation score
     Then: Score should be > 0.7
     """
-    from markdown_consolidator.encapsulation import EncapsulationScorer
+    from mdwiki.encapsulation import EncapsulationScorer
 
     scorer = EncapsulationScorer()
 
@@ -31,7 +30,7 @@ def test_encapsulation_scorer_low_coherence():
     When: Computing encapsulation score
     Then: Score should be < 0.5
     """
-    from markdown_consolidator.encapsulation import EncapsulationScorer
+    from mdwiki.encapsulation import EncapsulationScorer
 
     scorer = EncapsulationScorer()
 
@@ -51,7 +50,7 @@ def test_encapsulate_sections_adds_scores():
     When: Running encapsulate_sections
     Then: Each section has encapsulation_score key added
     """
-    from markdown_consolidator.encapsulation import EncapsulationScorer
+    from mdwiki.encapsulation import EncapsulationScorer
 
     sections = [
         {
@@ -84,7 +83,7 @@ def test_encapsulate_sections_empty_input():
     When: Running encapsulate_sections
     Then: Returns empty list without error
     """
-    from markdown_consolidator.encapsulation import EncapsulationScorer
+    from mdwiki.encapsulation import EncapsulationScorer
 
     scorer = EncapsulationScorer()
     result = scorer.encapsulate_sections([])
@@ -98,7 +97,7 @@ def test_rechunker_splits_mixed_content(mocker):
     When: Rechunking with LLM
     Then: Returns multiple sections with better encapsulation
     """
-    from markdown_consolidator.encapsulation import Rechunker
+    from mdwiki.encapsulation import Rechunker
 
     # Mock Claude response
     mock_content = mocker.Mock()
@@ -135,7 +134,7 @@ def test_rechunker_skips_well_encapsulated(mocker):
     When: Attempting to rechunk
     Then: Returns original section unchanged
     """
-    from markdown_consolidator.encapsulation import Rechunker
+    from mdwiki.encapsulation import Rechunker
 
     section = {
         'section_id': 'doc/OAuth',

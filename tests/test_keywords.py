@@ -7,7 +7,7 @@ def test_extract_keywords_from_sections():
     When: Extracting keywords
     Then: Each section has relevant keywords
     """
-    from markdown_consolidator.keywords import KeywordExtractor
+    from mdwiki.keywords import KeywordExtractor
 
     sections = [
         {
@@ -34,7 +34,7 @@ def test_extract_keywords_handles_empty_input():
     When: Extracting keywords
     Then: Returns empty list without error
     """
-    from markdown_consolidator.keywords import KeywordExtractor
+    from mdwiki.keywords import KeywordExtractor
 
     extractor = KeywordExtractor()
     result = extractor.extract_keywords([])
@@ -48,7 +48,7 @@ def test_extract_keywords_handles_single_section():
     When: Extracting keywords
     Then: Returns keywords without error (may be limited due to TF-IDF)
     """
-    from markdown_consolidator.keywords import KeywordExtractor
+    from mdwiki.keywords import KeywordExtractor
 
     sections = [
         {
@@ -71,7 +71,7 @@ def test_extract_keywords_max_limit():
     When: Extracting with max_keywords=3
     Then: Returns at most 3 keywords
     """
-    from markdown_consolidator.keywords import KeywordExtractor
+    from mdwiki.keywords import KeywordExtractor
 
     sections = [
         {

@@ -1,5 +1,4 @@
 """Tests for the summarizer module."""
-import pytest
 
 
 def test_summarizer_generates_summaries(mocker):
@@ -8,7 +7,7 @@ def test_summarizer_generates_summaries(mocker):
     When: Summarizing with Claude
     Then: Each section gets a summary
     """
-    from markdown_consolidator.summarizer import Summarizer
+    from mdwiki.summarizer import Summarizer
 
     # Mock Claude response
     mock_content = mocker.Mock()
@@ -38,7 +37,7 @@ def test_summarizer_handles_claude_unavailable(mocker):
     """
     import anthropic
 
-    from markdown_consolidator.summarizer import Summarizer
+    from mdwiki.summarizer import Summarizer
 
     mock_client = mocker.Mock()
     mock_client.messages.create.side_effect = anthropic.APIConnectionError(request=mocker.Mock())
@@ -58,7 +57,7 @@ def test_summarizer_handles_empty_input():
     When: Summarizing
     Then: Returns empty list without error
     """
-    from markdown_consolidator.summarizer import Summarizer
+    from mdwiki.summarizer import Summarizer
 
     summarizer = Summarizer()
     result = summarizer.summarize_sections([])

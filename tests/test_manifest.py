@@ -9,7 +9,7 @@ def test_generate_manifest_creates_valid_yaml():
     When: Generating manifest
     Then: Output is valid YAML with expected structure
     """
-    from markdown_consolidator.manifest import ManifestGenerator
+    from mdwiki.manifest import ManifestGenerator
 
     hierarchy = {
         'themes': [{
@@ -45,7 +45,7 @@ def test_parse_manifest_loads_edited_yaml():
     When: Parsing it
     Then: Returns structured data for synthesis
     """
-    from markdown_consolidator.manifest import ManifestParser
+    from mdwiki.manifest import ManifestParser
 
     yaml_content = """
 hierarchy:
@@ -70,7 +70,7 @@ def test_generate_manifest_includes_metadata():
     When: Generating manifest
     Then: Includes source, threshold, timestamps
     """
-    from markdown_consolidator.manifest import ManifestGenerator
+    from mdwiki.manifest import ManifestGenerator
 
     hierarchy = {'themes': [], 'orphans': []}
 
@@ -91,7 +91,7 @@ def test_parse_manifest_from_file(tmp_path):
     When: Parsing from file path
     Then: Returns parsed content
     """
-    from markdown_consolidator.manifest import ManifestParser
+    from mdwiki.manifest import ManifestParser
 
     manifest_file = tmp_path / "manifest.yaml"
     manifest_file.write_text("""
