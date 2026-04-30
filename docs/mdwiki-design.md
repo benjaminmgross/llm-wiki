@@ -2,7 +2,7 @@
 title: mdwiki — v1.0.0 Design
 created: 2025-04-29
 updated: 2026-04-29
-version: 1.0.1
+version: 1.0.2
 status: locked
 tags: [mdwiki, design, llm-wiki, karpathy-pattern]
 supersedes: v0 design
@@ -174,8 +174,8 @@ Step by step:
 
 1. Hash + register; copy to `raw/` if new.
 2. Chunk (`chunker.py`); embed each section (`embedder.py`).
-3. For each section: ANN search over `pages.embedding` → candidate pages (top-k).
-4. Single LLM call with: section + candidate pages + `schema.md` + recent log entries → JSON plan of `{verdict, updates, new_pages, cross_refs}`. Each claim carries `source_section_id` and a verbatim `quote`.
+3. ANN search over `pages.embedding` for the union of section embeddings → candidate pages (top-k).
+4. **One LLM call per source** with: all sections + candidate pages + `schema.md` + recent log entries → JSON plan of `{verdict, rationale, updates, new_pages, cross_refs}`. Each claim carries `source_section_id` and a verbatim `quote`. (One call per source — not per section — keeps cost and UX friction low; if quality suffers on long sources, decompose in a later release.)
 5. **Verify** every quote exists in the source text (pure Python, no LLM call). On failure, surface to the user.
 6. Show the plan as a diff. User approves, steers (e.g., "drop the new page, just update X"), or aborts.
 7. Apply edits to `wiki/`; append to `log.md`; insert `events` + `backrefs` rows in `state.db`; mark source `ingested`. All within a single sqlite transaction.

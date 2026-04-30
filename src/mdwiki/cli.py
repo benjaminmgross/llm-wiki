@@ -15,6 +15,7 @@ from pathlib import Path
 from mdwiki import __version__
 from mdwiki.discover import WikiNotFound, find_wiki
 from mdwiki.doctor import format_report, run_doctor
+from mdwiki.ingest import IngestError, ingest_source
 from mdwiki.init import NestedWikiError, init_wiki
 from mdwiki.llm import UnknownProviderError
 from mdwiki.llm.anthropic import MissingAPIKeyError
@@ -81,6 +82,11 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor_p = subparsers.add_parser("doctor", help="Check provider config and ping the LLM API.")
     doctor_p.set_defaults(_handler=_cmd_doctor)
 
+    ingest_p = subparsers.add_parser("ingest", help="Ingest one source through the LLM into the wiki.")
+    ingest_p.add_argument("source", help="Source id (12-char hash or unique prefix) or original_path of a registered source.")
+    ingest_p.add_argument("--yes", "-y", action="store_true", help="Apply the LLM plan without confirmation (verifies quotes regardless).")
+    ingest_p.set_defaults(_handler=_cmd_ingest)
+
     return parser
 
 
@@ -137,6 +143,28 @@ def _cmd_rebuild(_args: argparse.Namespace) -> int:
         return 1
     print(result.message)
     return 0
+
+
+def _cmd_ingest(args: argparse.Namespace) -> int:
+    """Handler for ``mdwiki ingest <source> [--yes]``."""
+    try:
+        wiki_root = find_wiki()
+    except WikiNotFound as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        result = ingest_source(wiki_root, args.source, yes=args.yes)
+    except IngestError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except MissingAPIKeyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except UnknownProviderError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(result.message)
+    return 0 if result.applied else 0  # rejection is not an error
 
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:
