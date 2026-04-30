@@ -79,10 +79,10 @@ The folder *is* the wiki. Move it, copy it, share it — `mdwiki` re-discovers i
 | `mdwiki init [path] [--bootstrap]` | Scaffold `.mdwiki/`, register every `.md` as pending. `--bootstrap` chains `ingest --pending --yes` |
 | `mdwiki status` | Pending/ingested counts, page counts by kind, recent events, last lint |
 | `mdwiki source <hash-prefix>` | Inspect one registered source — original path, raw path, dependent pages |
-| `mdwiki rebuild` | Reconstruct `state.db` from `raw/.sources.json` + `wiki/log.md` after deletion |
+| `mdwiki rebuild` | Restore the `sources` table from `raw/.sources.json` after `state.db` deletion. v1.0.0 does NOT replay `backrefs`/`pages`/`events` (the log format is too lossy); re-ingest sources to recover them |
 | `mdwiki doctor` | Pre-flight: provider config + 1-token API ping + embedder model |
 | `mdwiki ingest <source>` | Interactive single-source ingest (prompt → JSON plan → quote-verify → confirm → apply) |
-| `mdwiki ingest --pending` | Bulk-ingest every source still in pending status (`--yes` implied) |
+| `mdwiki ingest --pending` | Bulk-ingest every source still in pending status (`--yes` implied). Each source is its own atomic transaction — if a bulk run is interrupted, re-running `--pending` resumes from where it stopped |
 | `mdwiki ingest --all` | Re-ingest every source, including already-ingested ones |
 | `mdwiki query "<q>"` | Answer a question with citations from existing wiki pages |
 | `mdwiki query "<q>" --file` | …and file the answer as a synthesis page |
