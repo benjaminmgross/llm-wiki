@@ -2,7 +2,7 @@
 title: mdwiki — v1.0.0 Design
 created: 2025-04-29
 updated: 2026-04-29
-version: 1.0.3
+version: 1.0.4
 status: locked
 tags: [mdwiki, design, llm-wiki, karpathy-pattern]
 supersedes: v0 design
@@ -387,6 +387,7 @@ Explicitly **not** in v1.0.0 (designed for, but deferred):
 
 - **Local model providers** (Qwen, Kimi, etc.) — provider seam exists, implementations are Day 2
 - **Multi-filetype ingest** — v1.0.0 reads `.md` only. v1.1.0 adds a `Loader` abstraction with concrete loaders for txt / csv / pdf / docx / html / code / images (vision OCR). The ingest pipeline below stays the same once content is markdown-text; only the front of the pipe changes
+- **Batch API for `init --bootstrap`** — v1.0.0 `init --bootstrap` chains init + sync ingest. v1.1.0 adds Anthropic Batch API submission for ~50% cost reduction at the price of ~1h turnaround. The R1 ANN-candidates path already gives the LLM context to update existing pages, which was the structural cold-start problem; batching is now a pure cost optimization, not a correctness one
 - **Web UI / GUI** — CLI only
 - **Multi-user / collaboration** — single-user
 - **Real-time wiki preview** — no live render

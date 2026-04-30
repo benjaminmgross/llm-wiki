@@ -70,6 +70,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=Path.cwd(),
         help="Folder to turn into a wiki (default: current directory).",
     )
+    init_p.add_argument(
+        "--bootstrap",
+        action="store_true",
+        help="After init, immediately ingest every pending source (chains `ingest --pending --yes`).",
+    )
     init_p.set_defaults(_handler=_cmd_init)
 
     status_p = subparsers.add_parser("status", help="Show pending/ingested counts, recent events, last lint.")
@@ -117,13 +122,31 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
-    """Handler for ``mdwiki init``."""
+    """Handler for ``mdwiki init [--bootstrap]``."""
     try:
         result = init_wiki(args.path)
     except NestedWikiError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(result.message)
+
+    if not args.bootstrap or result.files_registered == 0:
+        return 0
+
+    print(f"\n--- bootstrap: ingesting {result.files_registered} pending source(s) ---\n")
+    try:
+        ingest_results = ingest_many(
+            args.path.resolve(),
+            scope="pending",
+            yes=True,
+            on_progress=lambda i, total, path: print(f"[{i}/{total}] {path}"),
+            on_failure=lambda path, exc: print(f"  ! failed: {path}: {exc}", file=sys.stderr),
+        )
+    except (MissingAPIKeyError, UnknownProviderError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    applied = sum(1 for r in ingest_results if r.applied)
+    print(f"\nBootstrap done: {applied} of {len(ingest_results)} applied.")
     return 0
 
 

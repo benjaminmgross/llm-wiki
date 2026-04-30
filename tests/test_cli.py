@@ -35,6 +35,47 @@ def test_init_subcommand_creates_wiki_in_cwd(
 
 
 @pytest.mark.unit
+def test_init_bootstrap_chains_ingest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mocker,  # type: ignore[no-untyped-def]
+) -> None:
+    """init --bootstrap should run init AND iterate over pending sources."""
+    import json
+    from mdwiki.llm.base import CompleteResult
+
+    (tmp_path / "a.md").write_text("# A\n\n## intro\n\nThis paper introduces attention sinks for long contexts.\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    plan = json.dumps({
+        "verdict": "ingest",
+        "rationale": "x",
+        "updates": [],
+        "new_pages": [{
+            "path": "wiki/concepts/x.md",
+            "kind": "concept",
+            "content": "# X\n\nbody",
+            "claims": [{"source_section_id": "a.md/intro", "quote": "this paper introduces attention sinks for long contexts"}],
+        }],
+        "cross_refs": [],
+    })
+    mocker.patch(
+        "mdwiki.llm.anthropic.AnthropicProvider.complete",
+        return_value=CompleteResult(text=plan, input_tokens=10, output_tokens=10),
+    )
+
+    exit_code = main(["init", "--bootstrap"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Bootstrap done" in out
+    assert "1 of 1" in out
+    assert (tmp_path / "wiki" / "concepts" / "x.md").exists()
+
+
+@pytest.mark.unit
 def test_init_subcommand_idempotent_message_on_second_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
