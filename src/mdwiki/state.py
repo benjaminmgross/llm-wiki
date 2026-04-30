@@ -106,14 +106,29 @@ def init_db(db_path: Path) -> None:
 
 
 def _apply_inline_migrations(conn) -> None:
-    """Add columns that newer code requires but older wikis don't yet have."""
-    inverse_cols = {row[1] for row in conn.execute("PRAGMA table_info(transaction_inverses)").fetchall()}
+    """Add columns that newer code requires but older wikis don't yet have.
+
+    Idempotent and cheap (PRAGMA + occasional ALTER). Skips silently if the
+    target table doesn't yet exist (e.g. when called on a brand-new DB before
+    schema creation).
+    """
+    inverse_cols_rows = conn.execute("PRAGMA table_info(transaction_inverses)").fetchall()
+    if not inverse_cols_rows:
+        return  # table doesn't exist yet; init_db will create it with the right schema
+    inverse_cols = {row[1] for row in inverse_cols_rows}
     if "params_json" not in inverse_cols:
         conn.execute("ALTER TABLE transaction_inverses ADD COLUMN params_json TEXT NOT NULL DEFAULT '[]'")
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
-    """Open a connection with foreign keys enabled and ``Row`` row factory.
+    """Open a connection with foreign keys, WAL journaling, and a busy timeout.
+
+    WAL mode allows concurrent readers alongside one writer (instead of sqlite's
+    default DELETE journaling, which serializes everything via exclusive locks).
+    The 30s ``busy_timeout`` keeps a second writer waiting for the first to
+    commit instead of failing instantly with ``database is locked``. Idempotent
+    inline migrations are also applied here so existing wikis upgrade
+    transparently when newer code reads their state.db.
 
     Parameters
     ----------
@@ -128,4 +143,11 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    # Cheap on every call: PRAGMA + occasional ALTER. Lets `pip install -U`
+    # pick up new columns without forcing the user to re-init or rebuild.
+    # Safe on brand-new DBs: _apply_inline_migrations is a no-op when target
+    # tables don't yet exist (init_db creates them with the latest schema).
+    _apply_inline_migrations(conn)
     return conn

@@ -2,6 +2,13 @@
 
 Source of truth: ``raw/`` (with ``raw/.sources.json`` sidecar) + ``wiki/`` + ``wiki/log.md``.
 Embeddings are NOT rebuilt here (they are local and recomputed lazily by ingest/query).
+
+**v1.0.0 limitation.** Only the ``sources`` table is restored from the sidecar.
+``backrefs``, ``pages``, and ``events`` are NOT replayable from ``log.md`` alone
+— each line is just ``- <ts> [<tx_id>] <summary>``, which is too lossy to
+reconstruct row-level facts. To recover those tables, re-ingest the relevant
+sources after rebuild (every source is marked ``pending`` so ``mdwiki ingest --pending``
+will sweep them up). This is documented in the spec at ``docs/mdwiki-design.md`` v1.0.5.
 """
 
 from __future__ import annotations
@@ -30,7 +37,13 @@ class RebuildResult:
 
 
 def rebuild_wiki(start: Path | None = None) -> RebuildResult:
-    """Reconstruct ``state.db`` from ``raw/.sources.json`` and ``wiki/log.md``.
+    """Reconstruct the ``sources`` table in ``state.db`` from ``raw/.sources.json``.
+
+    **v1.0.0 scope.** Only ``sources`` is restored. ``backrefs`` / ``pages`` /
+    ``events`` cannot be reconstructed from ``wiki/log.md`` alone because the
+    log format (``- <ts> [<tx_id>] <summary>``) is too lossy. To recover those
+    tables, re-ingest sources after rebuild: every restored row is marked
+    ``pending``, so ``mdwiki ingest --pending`` will sweep them up.
 
     Parameters
     ----------
@@ -40,7 +53,8 @@ def rebuild_wiki(start: Path | None = None) -> RebuildResult:
     Returns
     -------
     RebuildResult
-        Counts and a human-readable summary.
+        Counts and a human-readable summary. ``events_replayed`` is always 0
+        in v1.0.0 (kept in the result shape for forward compatibility).
 
     Raises
     ------
@@ -83,23 +97,13 @@ def rebuild_wiki(start: Path | None = None) -> RebuildResult:
             )
         conn.commit()
 
-    events_replayed = _replay_log(wiki_root=wiki_root, db_path=db_path)
-
     return RebuildResult(
         sources_restored=len(sidecar),
-        events_replayed=events_replayed,
+        events_replayed=0,
         wiki_root=wiki_root,
-        message=f"Rebuilt {wiki_root}/{WIKI_DIR_NAME}/state.db: {len(sidecar)} source(s) restored, {events_replayed} event(s) replayed.",
+        message=(
+            f"Rebuilt {wiki_root}/{WIKI_DIR_NAME}/state.db: {len(sidecar)} source(s) restored "
+            "(all marked pending). backrefs/events/pages are NOT replayable from log.md alone "
+            "— re-ingest sources to recover them."
+        ),
     )
-
-
-def _replay_log(*, wiki_root: Path, db_path: Path) -> int:
-    """Replay ``wiki/log.md`` into the ``events`` and ``backrefs`` tables.
-
-    Phase 2 deliberately implements this as a no-op when the log is empty or missing;
-    the parser arrives in Phase 4 alongside the first event-emitting feature (ingest).
-    """
-    log_path = wiki_root / "wiki" / "log.md"
-    if not log_path.is_file() or not log_path.read_text().strip():
-        return 0
-    return 0
