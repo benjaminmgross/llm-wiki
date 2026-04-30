@@ -43,6 +43,7 @@ def test_init_bootstrap_chains_ingest(
 ) -> None:
     """init --bootstrap should run init AND iterate over pending sources."""
     import json
+
     from mdwiki.llm.base import CompleteResult
 
     (tmp_path / "a.md").write_text("# A\n\n## intro\n\nThis paper introduces attention sinks for long contexts.\n")
@@ -250,8 +251,9 @@ def test_doctor_subcommand_green(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
 
-    from mdwiki.llm.base import PingResult
     from unittest.mock import patch
+
+    from mdwiki.llm.base import PingResult
 
     fake = PingResult(provider="anthropic", model="claude-sonnet-4-6", latency_ms=12.3, ok=True, message="pong")
     with patch("mdwiki.llm.anthropic.AnthropicProvider.ping", return_value=fake):
@@ -274,8 +276,9 @@ def test_doctor_subcommand_red_returns_nonzero(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-bad")
 
-    from mdwiki.llm.base import PingResult
     from unittest.mock import patch
+
+    from mdwiki.llm.base import PingResult
 
     fake = PingResult(provider="anthropic", model="claude-sonnet-4-6", latency_ms=8.0, ok=False, message="auth failed")
     with patch("mdwiki.llm.anthropic.AnthropicProvider.ping", return_value=fake):

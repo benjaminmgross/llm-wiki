@@ -89,7 +89,7 @@ Content B
             'orphans': []
         }
 
-        results = synthesize_from_manifest(manifest=manifest, output_dir=output_dir)
+        synthesize_from_manifest(manifest=manifest, output_dir=output_dir)
 
         output_file = output_dir / "test.md"
         content = output_file.read_text()

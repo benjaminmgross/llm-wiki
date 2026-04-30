@@ -1,6 +1,53 @@
 # Comprehensive Changes Guide
 
-This document outlines all recent changes made to the markdown-consolidator repository.
+This document outlines recent major changes to this repository.
+
+## v1.0.0 — Pivot to mdwiki (2026-04-30)
+
+**The repository now ships `mdwiki`, a Karpathy-pattern LLM-maintained wiki, replacing the legacy `markdown-consolidator` CLI.** This is a v1.0.0 release under a new package name; the legacy modules (chunker, embedder, clustering, synthesis, etc.) are now internals of `mdwiki`.
+
+### Breaking changes
+
+- **Package rename**: `src/markdown_consolidator/` → `src/mdwiki/`. Imports change from `from markdown_consolidator import ...` to `from mdwiki import ...`.
+- **CLI replacement**: `mdconsolidate` and the `mdconsolidate-*` subcommands are removed. The new entry point is `mdwiki`.
+- **No backwards-compat shims**: there is no transitional alias for the old CLI. Pin to the previous release if you need it.
+
+### What `mdwiki` ships
+
+The Karpathy llm-wiki loop, end-to-end:
+
+- **`mdwiki init [--bootstrap]`** — scaffold `.mdwiki/` and register every `.md` as a pending source. With `--bootstrap`, chain `ingest --pending --yes`.
+- **`mdwiki ingest <source> | --pending | --all`** — interactive (or bulk) ingest. Each source goes through chunk → embed → ANN candidates → LLM call → quote verification → user approval → atomic transactional apply.
+- **`mdwiki query "<q>" [--file]`** — cited Q&A drawn from existing wiki pages; `--file` files the answer as a synthesis page (channel A).
+- **`mdwiki synthesize "<topic>" | --auto`** — explicit synthesis pages from a topic, or auto-discovered from cross-ref clusters (channel B).
+- **`mdwiki lint`** — broken refs, orphans, stale pages, coverage gaps.
+- **`mdwiki undo [N]`** — atomic rollback of the last N transactions (files + DB rows).
+- **`mdwiki status` / `source` / `rebuild` / `doctor`** — read-only inspection + pre-flight tooling.
+
+### Architecture highlights
+
+- **Three-layer**: immutable `raw/` (with `.sources.json` sidecar) + LLM-owned `wiki/` + user-controlled `.mdwiki/schema.md`.
+- **Hallucination guards**: schema-validated JSON + cite-or-refuse + quote-anchor verification + anti-sycophancy framing. LLM has explicit license to refuse low-quality / out-of-scope / duplicate sources.
+- **Provider seam**: `src/mdwiki/llm/` ABC + `anthropic.py` adapter. v1.1 will add Qwen/Kimi local providers as drop-in files.
+- **Atomic transactions**: every wiki write goes through `IngestTransaction` with per-tx undo snapshot directories and `transaction_inverses` SQL replay.
+
+### Spec + plan
+
+- Locked spec: [`docs/mdwiki-design.md`](docs/mdwiki-design.md) (v1.0.4)
+- Implementation plan: `thoughts/plans/2026.04.29-bmg-mdwiki-v1.md`
+
+### v1.1 deferred
+
+- Multi-filetype ingest (PDF, DOCX, CSV, HTML, code, images via vision OCR)
+- Batch API for bootstrap (50% cost reduction, ~1h async turnaround)
+- Local model providers
+- Lint `--fix` interactive remediation
+
+---
+
+## Pre-v1.0.0 changes (legacy `markdown-consolidator`)
+
+The sections below document the final pre-pivot state of the legacy package. These features are preserved as internals of `mdwiki` but no longer have a public CLI surface.
 
 ## Overview
 

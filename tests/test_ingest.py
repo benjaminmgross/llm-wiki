@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from pytest_mock import MockerFixture
 
-from mdwiki.init import init_wiki
 from mdwiki.ingest import IngestError, ingest_source
+from mdwiki.init import init_wiki
 from mdwiki.llm.base import CompleteResult
 from mdwiki.state import connect
 

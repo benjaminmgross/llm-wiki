@@ -79,6 +79,12 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = ["mdwiki"]
 
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately use blind `pytest.raises(Exception)` to verify frozen-dataclass
+# immutability (the specific exception type varies across Python versions).
+# Tests also occasionally have unused loop variables for fixture seeding.
+"tests/*.py" = ["B017", "B007"]
+
 [tool.mypy]
 python_version = "3.12"
 warn_return_any = true
