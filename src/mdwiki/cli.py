@@ -24,6 +24,7 @@ from mdwiki.rebuild import RebuildError, rebuild_wiki
 from mdwiki.source import find_matching_sources, format_disambiguation, format_source_info, get_source_info
 from mdwiki.status import format_status, get_status
 from mdwiki.synthesize import SynthesisError, synthesize_auto, synthesize_topic
+from mdwiki.undo import UndoError, undo_last
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -94,6 +95,10 @@ def _build_parser() -> argparse.ArgumentParser:
     query_p.add_argument("--file", action="store_true", help="File the answer as a synthesis page (wiki/syntheses/<slug>.md).")
     query_p.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation prompt when --file is set.")
     query_p.set_defaults(_handler=_cmd_query)
+
+    undo_p = subparsers.add_parser("undo", help="Roll back the last N applied transactions (file writes + DB rows).")
+    undo_p.add_argument("n", nargs="?", type=int, default=1, help="Number of transactions to undo (default 1).")
+    undo_p.set_defaults(_handler=_cmd_undo)
 
     syn_p = subparsers.add_parser(
         "synthesize",
@@ -211,6 +216,22 @@ def _cmd_query(args: argparse.Namespace) -> int:
             print(f"  - {path}")
     if result.filed_path:
         print(f"\nFiled as synthesis page: {result.filed_path}")
+    return 0
+
+
+def _cmd_undo(args: argparse.Namespace) -> int:
+    """Handler for ``mdwiki undo [N]``."""
+    try:
+        wiki_root = find_wiki()
+    except WikiNotFound as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        result = undo_last(wiki_root, n=args.n)
+    except UndoError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(result.message)
     return 0
 
 

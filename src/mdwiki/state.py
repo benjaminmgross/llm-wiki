@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS transaction_inverses (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     transaction_id  TEXT NOT NULL,
     sql             TEXT NOT NULL,
+    params_json     TEXT NOT NULL DEFAULT '[]',
     FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
 );
 """
@@ -89,7 +90,9 @@ CREATE TABLE IF NOT EXISTS transaction_inverses (
 def init_db(db_path: Path) -> None:
     """Create the schema at ``db_path``, including any missing parent directories.
 
-    Idempotent — re-applies ``CREATE TABLE IF NOT EXISTS`` for every table.
+    Idempotent — re-applies ``CREATE TABLE IF NOT EXISTS`` for every table and
+    runs inline migrations for any older wikis whose tables are missing newer
+    columns.
 
     Parameters
     ----------
@@ -99,6 +102,14 @@ def init_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect(db_path) as conn:
         conn.executescript(SCHEMA_SQL)
+        _apply_inline_migrations(conn)
+
+
+def _apply_inline_migrations(conn) -> None:
+    """Add columns that newer code requires but older wikis don't yet have."""
+    inverse_cols = {row[1] for row in conn.execute("PRAGMA table_info(transaction_inverses)").fetchall()}
+    if "params_json" not in inverse_cols:
+        conn.execute("ALTER TABLE transaction_inverses ADD COLUMN params_json TEXT NOT NULL DEFAULT '[]'")
 
 
 def connect(db_path: Path) -> sqlite3.Connection:

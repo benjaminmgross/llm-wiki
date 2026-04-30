@@ -163,8 +163,7 @@ def ingest_source(
             new_content = existing + "\n\n" + update.content if existing else update.content
             tx.write_file(full_target, new_content)
             page_embeddings[update.page] = serialize(embedder.embed_text(new_content))
-        _ensure_pages_rows(tx_conn=tx._conn, plan=plan, embeddings=page_embeddings)  # noqa: SLF001
-        _record_backrefs(tx_conn=tx._conn, plan=plan, source_id=source_row["id"])  # noqa: SLF001
+        _apply_pages_and_backrefs(tx=tx, plan=plan, embeddings=page_embeddings, source_id=source_row["id"])
         tx.write_file(wiki_root / "wiki" / "index.md", build_index(wiki_root))
 
     return IngestResult(source_id=source_row["id"], applied=True, message=summary, plan=plan)
@@ -272,37 +271,32 @@ def _recent_log_entries(wiki_root: Path, *, limit: int) -> list[str]:
     return lines[-limit:]
 
 
-def _record_backrefs(*, tx_conn: Any, plan: Plan, source_id: str) -> None:
-    for update in plan.updates:
-        for claim in update.claims:
-            tx_conn.execute(
-                "INSERT INTO backrefs (page_path, source_id, section_anchor, quote) VALUES (?, ?, ?, ?)",
-                (update.page, source_id, claim.source_section_id, claim.quote),
-            )
-    for new_page in plan.new_pages:
-        for claim in new_page.claims:
-            tx_conn.execute(
-                "INSERT INTO backrefs (page_path, source_id, section_anchor, quote) VALUES (?, ?, ?, ?)",
-                (new_page.path, source_id, claim.source_section_id, claim.quote),
-            )
-
-
-def _ensure_pages_rows(*, tx_conn: Any, plan: Plan, embeddings: dict[str, bytes]) -> None:
+def _apply_pages_and_backrefs(*, tx: IngestTransaction, plan: Plan, embeddings: dict[str, bytes], source_id: str) -> None:
+    """Insert/update pages and insert backrefs through the transaction's undo-aware helpers."""
     import time
 
     now = time.time()
     for new_page in plan.new_pages:
-        tx_conn.execute(
-            "INSERT INTO pages (path, kind, embedding, last_touched_at) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(path) DO UPDATE SET kind = excluded.kind, embedding = excluded.embedding, last_touched_at = excluded.last_touched_at",
-            (new_page.path, new_page.kind, embeddings.get(new_page.path), now),
+        tx.upsert_page(
+            path=new_page.path, kind=new_page.kind, embedding=embeddings.get(new_page.path), last_touched_at=now
         )
     for update in plan.updates:
-        tx_conn.execute(
-            "INSERT INTO pages (path, kind, embedding, last_touched_at) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(path) DO UPDATE SET embedding = excluded.embedding, last_touched_at = excluded.last_touched_at",
-            (update.page, _infer_kind(update.page), embeddings.get(update.page), now),
+        tx.upsert_page(
+            path=update.page,
+            kind=_infer_kind(update.page),
+            embedding=embeddings.get(update.page),
+            last_touched_at=now,
         )
+    for update in plan.updates:
+        for claim in update.claims:
+            tx.insert_backref(
+                page_path=update.page, source_id=source_id, section_anchor=claim.source_section_id, quote=claim.quote
+            )
+    for new_page in plan.new_pages:
+        for claim in new_page.claims:
+            tx.insert_backref(
+                page_path=new_page.path, source_id=source_id, section_anchor=claim.source_section_id, quote=claim.quote
+            )
 
 
 def _find_candidate_pages(*, wiki_root: Path, section_vectors: list[list[float]]) -> list[dict[str, str]]:

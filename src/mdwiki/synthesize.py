@@ -327,11 +327,7 @@ def _file_synthesis(*, wiki_root: Path, topic: str, body: str, embedder: Embedde
     with IngestTransaction(wiki_root=wiki_root, source_id=None, summary=summary) as tx:
         tx.write_file(target, body if body.endswith("\n") else body + "\n")
         embedding_blob = serialize(embedder.embed_text(body))
-        tx._conn.execute(  # noqa: SLF001 — intentional cross-module access for tx coordination
-            "INSERT INTO pages (path, kind, embedding, last_touched_at) VALUES (?, 'synthesis', ?, ?) "
-            "ON CONFLICT(path) DO UPDATE SET embedding = excluded.embedding, last_touched_at = excluded.last_touched_at",
-            (rel_path, embedding_blob, _now_ts()),
-        )
+        tx.upsert_page(path=rel_path, kind="synthesis", embedding=embedding_blob, last_touched_at=_now_ts())
         tx.write_file(wiki_root / "wiki" / "index.md", build_index(wiki_root))
     return rel_path
 
