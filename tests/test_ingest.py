@@ -86,6 +86,91 @@ def test_ingest_refuses_unknown_source(wiki_with_one_source: Path) -> None:
 
 
 @pytest.mark.unit
+def test_ingest_strips_dot_slash_prefix(wiki_with_one_source: Path, mocker: MockerFixture) -> None:
+    _mock_provider(mocker, _good_plan_json())
+    result = ingest_source(wiki_with_one_source, "./ai.md", yes=True)
+    assert result.applied is True
+
+
+@pytest.mark.unit
+def test_ingest_normalizes_zsh_escaped_spaces(tmp_path: Path, mocker: MockerFixture) -> None:
+    """Users who quote AND backslash-escape (a zsh tarpit) get literal `\\ ` in the path."""
+    src = tmp_path / "with spaces.md"
+    src.write_text("# x\n\n## body\n\nthis paper introduces attention sinks for long contexts\n")
+    init_wiki(tmp_path)
+
+    plan_json = json.dumps(
+        {
+            "verdict": "ingest",
+            "rationale": "x",
+            "updates": [],
+            "new_pages": [
+                {
+                    "path": "wiki/concepts/x.md",
+                    "kind": "concept",
+                    "content": "...",
+                    "claims": [
+                        {
+                            "source_section_id": "with spaces.md/body",
+                            "quote": "this paper introduces attention sinks for long contexts",
+                        }
+                    ],
+                }
+            ],
+            "cross_refs": [],
+        }
+    )
+    _mock_provider(mocker, plan_json)
+
+    result = ingest_source(tmp_path, r"with\ spaces.md", yes=True)
+    assert result.applied is True
+
+
+@pytest.mark.unit
+def test_ingest_resolves_filesystem_path(tmp_path: Path, mocker: MockerFixture) -> None:
+    """Tab-completion gives a real filesystem path; resolve it to the registered source."""
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    src = sub / "doc.md"
+    src.write_text("# x\n\n## body\n\nattention sinks reduce drift in long contexts\n")
+    init_wiki(tmp_path)
+
+    plan_json = json.dumps(
+        {
+            "verdict": "ingest",
+            "rationale": "x",
+            "updates": [],
+            "new_pages": [
+                {
+                    "path": "wiki/concepts/x.md",
+                    "kind": "concept",
+                    "content": "...",
+                    "claims": [
+                        {
+                            "source_section_id": "sub/doc.md/body",
+                            "quote": "attention sinks reduce drift in long contexts",
+                        }
+                    ],
+                }
+            ],
+            "cross_refs": [],
+        }
+    )
+    _mock_provider(mocker, plan_json)
+
+    result = ingest_source(tmp_path, str(src), yes=True)
+    assert result.applied is True
+
+
+@pytest.mark.unit
+def test_ingest_unknown_source_suggests_close_matches(wiki_with_one_source: Path) -> None:
+    with pytest.raises(IngestError) as excinfo:
+        ingest_source(wiki_with_one_source, "ai", yes=True)
+    msg = str(excinfo.value)
+    assert "ai.md" in msg  # the close match should be suggested
+
+
+@pytest.mark.unit
 def test_ingest_idempotent_for_already_ingested_source(wiki_with_one_source: Path, mocker: MockerFixture) -> None:
     _mock_provider(mocker, _good_plan_json())
     first = ingest_source(wiki_with_one_source, "ai.md", yes=True)

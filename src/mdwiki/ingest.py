@@ -150,23 +150,77 @@ def ingest_source(
 
 def _resolve_source(wiki_root: Path, source_id_or_path: str) -> dict[str, Any]:
     db_path = wiki_root / WIKI_DIR_NAME / "state.db"
+    candidates = _candidate_paths(source_id_or_path, wiki_root=wiki_root)
+
     with connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT id, original_path, raw_path, status FROM sources WHERE original_path = ?",
-            (source_id_or_path,),
-        ).fetchone()
-        if row is not None:
-            return dict(row)
+        for candidate in candidates:
+            row = conn.execute(
+                "SELECT id, original_path, raw_path, status FROM sources WHERE original_path = ?",
+                (candidate,),
+            ).fetchone()
+            if row is not None:
+                return dict(row)
 
         rows = conn.execute(
             "SELECT id, original_path, raw_path, status FROM sources WHERE id LIKE ?",
             (source_id_or_path + "%",),
         ).fetchall()
-    if len(rows) == 1:
-        return dict(rows[0])
-    if len(rows) > 1:
-        raise IngestError(f"Ambiguous prefix {source_id_or_path!r} matches {len(rows)} sources.")
-    raise IngestError(f"Source {source_id_or_path!r} is not registered. Run `mdwiki status` to list known sources.")
+        if len(rows) == 1:
+            return dict(rows[0])
+        if len(rows) > 1:
+            ambiguous = ", ".join(r["id"] for r in rows[:5])
+            raise IngestError(f"Ambiguous prefix {source_id_or_path!r} matches {len(rows)} sources: {ambiguous}")
+
+        suggestions = _suggest_sources(conn, query=source_id_or_path, limit=5)
+
+    base_msg = f"Source {source_id_or_path!r} is not registered."
+    if suggestions:
+        listed = "\n  ".join(suggestions)
+        raise IngestError(f"{base_msg} Did you mean one of:\n  {listed}\n\nRun `mdwiki status` to list all sources.")
+    raise IngestError(f"{base_msg} Run `mdwiki status` to list known sources.")
+
+
+def _candidate_paths(raw: str, *, wiki_root: Path) -> list[str]:
+    """Generate normalized candidates to try against ``sources.original_path``."""
+    seen: list[str] = []
+
+    def add(value: str) -> None:
+        if value and value not in seen:
+            seen.append(value)
+
+    add(raw)
+    if raw.startswith("./"):
+        add(raw[2:])
+    if "\\ " in raw:
+        unescaped = raw.replace("\\ ", " ")
+        add(unescaped)
+        if unescaped.startswith("./"):
+            add(unescaped[2:])
+
+    candidate_path = Path(seen[-1]) if seen else None
+    if candidate_path is not None and candidate_path.is_file():
+        try:
+            rel = candidate_path.resolve().relative_to(wiki_root.resolve())
+        except ValueError:
+            rel = None
+        if rel is not None:
+            add(rel.as_posix())
+
+    return seen
+
+
+def _suggest_sources(conn: Any, *, query: str, limit: int) -> list[str]:
+    """Return up to ``limit`` original_paths that share a token with the query."""
+    tokens = [t for t in query.replace("\\ ", " ").replace("/", " ").split() if len(t) >= 2]
+    if not tokens:
+        return []
+    where_parts = " OR ".join(["original_path LIKE ?"] * len(tokens))
+    params = tuple(f"%{t}%" for t in tokens)
+    rows = conn.execute(
+        f"SELECT DISTINCT original_path FROM sources WHERE {where_parts} ORDER BY original_path LIMIT ?",
+        (*params, limit),
+    ).fetchall()
+    return [row["original_path"] for row in rows]
 
 
 def _chunk_or_whole(raw_path: Path, *, source_path: str, chunker: MarkdownChunker) -> list[dict[str, Any]]:
