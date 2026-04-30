@@ -7,7 +7,7 @@ def test_build_hierarchy_creates_themes():
     When: Building hierarchy
     Then: Returns themes containing documents containing sections
     """
-    from markdown_consolidator.tree_builder import TreeBuilder
+    from mdwiki.tree_builder import TreeBuilder
 
     # Create mock sections with embeddings
     # Two auth-related, one database-related
@@ -52,7 +52,7 @@ def test_deduplication_marks_duplicates():
     When: Building hierarchy
     Then: Newer one is kept, older marked as duplicate
     """
-    from markdown_consolidator.tree_builder import TreeBuilder
+    from mdwiki.tree_builder import TreeBuilder
 
     sections = [
         {
@@ -93,7 +93,7 @@ def test_empty_sections_returns_empty_hierarchy():
     When: Building hierarchy
     Then: Returns structure with empty themes and orphans
     """
-    from markdown_consolidator.tree_builder import TreeBuilder
+    from mdwiki.tree_builder import TreeBuilder
 
     builder = TreeBuilder()
     hierarchy = builder.build_hierarchy([])
@@ -107,7 +107,7 @@ def test_single_section_creates_single_theme():
     When: Building hierarchy
     Then: Returns a theme with one document
     """
-    from markdown_consolidator.tree_builder import TreeBuilder
+    from mdwiki.tree_builder import TreeBuilder
 
     sections = [
         {
@@ -133,7 +133,7 @@ def test_hierarchy_includes_section_metadata():
     When: Building hierarchy
     Then: Formatted sections include id, heading, keywords, source, modified
     """
-    from markdown_consolidator.tree_builder import TreeBuilder
+    from mdwiki.tree_builder import TreeBuilder
 
     sections = [
         {

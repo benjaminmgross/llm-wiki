@@ -1,0 +1,152 @@
+"""Tests for ``mdwiki.init`` — scaffold a wiki and register markdown sources."""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+import pytest
+
+from mdwiki.init import NestedWikiError, init_wiki
+from mdwiki.state import connect
+
+
+@pytest.fixture
+def fresh_target(tmp_path: Path) -> Path:
+    """A clean directory containing three .md files at varying depths."""
+    (tmp_path / "top.md").write_text("# Top\n\nfoo bar baz")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "a.md").write_text("# Sub A\n\nhello world")
+    (sub / "b.md").write_text("# Sub B\n\nlorem ipsum")
+    return tmp_path
+
+
+@pytest.mark.unit
+def test_fresh_init_creates_wiki_layout(fresh_target: Path) -> None:
+    init_wiki(fresh_target)
+    wiki = fresh_target / ".mdwiki"
+    assert (wiki / "config.toml").is_file()
+    assert (wiki / "state.db").is_file()
+    assert (wiki / "schema.md").is_file()
+    assert (wiki / ".gitignore").is_file()
+    assert (fresh_target / "raw").is_dir()
+    assert (fresh_target / "wiki").is_dir()
+
+
+@pytest.mark.unit
+def test_fresh_init_registers_all_md_files(fresh_target: Path) -> None:
+    result = init_wiki(fresh_target)
+    assert result.files_registered == 3
+    with connect(fresh_target / ".mdwiki" / "state.db") as conn:
+        rows = conn.execute("SELECT original_path, status FROM sources").fetchall()
+    assert len(rows) == 3
+    assert all(row["status"] == "pending" for row in rows)
+
+
+@pytest.mark.unit
+def test_fresh_init_copies_to_raw_with_content_addressed_name(fresh_target: Path) -> None:
+    init_wiki(fresh_target)
+    raw_files = list((fresh_target / "raw").glob("*.md"))
+    assert len(raw_files) == 3
+    expected_hash = hashlib.sha256(b"# Top\n\nfoo bar baz").hexdigest()[:12]
+    matches = [p for p in raw_files if p.name.startswith(expected_hash)]
+    assert len(matches) == 1, f"raw/ missing content-addressed file for top.md: {raw_files}"
+    assert matches[0].read_text() == "# Top\n\nfoo bar baz"
+
+
+@pytest.mark.unit
+def test_fresh_init_records_correct_content_hash(fresh_target: Path) -> None:
+    init_wiki(fresh_target)
+    expected_hash = hashlib.sha256(b"# Top\n\nfoo bar baz").hexdigest()
+    with connect(fresh_target / ".mdwiki" / "state.db") as conn:
+        row = conn.execute("SELECT content_hash FROM sources WHERE original_path = 'top.md'").fetchone()
+    assert row["content_hash"] == expected_hash
+
+
+@pytest.mark.unit
+def test_fresh_init_respects_gitignore(fresh_target: Path) -> None:
+    (fresh_target / ".gitignore").write_text("ignored/\n")
+    ignored = fresh_target / "ignored"
+    ignored.mkdir()
+    (ignored / "secret.md").write_text("# secret")
+    result = init_wiki(fresh_target)
+    assert result.files_registered == 3, "ignored/secret.md should not have been registered"
+
+
+@pytest.mark.unit
+def test_fresh_init_does_not_register_mdwiki_internals(fresh_target: Path) -> None:
+    """Fresh init should not register .mdwiki/schema.md (or anything else under .mdwiki/) as a source."""
+    init_wiki(fresh_target)
+    with connect(fresh_target / ".mdwiki" / "state.db") as conn:
+        rows = conn.execute("SELECT original_path FROM sources").fetchall()
+    paths = [row["original_path"] for row in rows]
+    assert all(not p.startswith(".mdwiki/") for p in paths), f"mdwiki internals leaked: {paths}"
+    assert len(paths) == 3
+
+
+@pytest.mark.unit
+def test_init_refuses_nested_wiki(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    (parent / ".mdwiki").mkdir()
+    child = parent / "child"
+    child.mkdir()
+    (child / "x.md").write_text("# x")
+    with pytest.raises(NestedWikiError) as excinfo:
+        init_wiki(child)
+    assert "parent" in str(excinfo.value).lower()
+
+
+@pytest.mark.unit
+def test_init_is_idempotent_when_already_initialized(fresh_target: Path) -> None:
+    first = init_wiki(fresh_target)
+    assert first.created is True
+    second = init_wiki(fresh_target)
+    assert second.created is False
+    assert second.files_registered == 0
+    with connect(fresh_target / ".mdwiki" / "state.db") as conn:
+        count = conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
+    assert count == 3, "re-init should not duplicate sources"
+
+
+@pytest.mark.unit
+def test_init_writes_config_with_llm_section(fresh_target: Path) -> None:
+    init_wiki(fresh_target)
+    config_text = (fresh_target / ".mdwiki" / "config.toml").read_text()
+    assert "[llm]" in config_text
+    assert "provider" in config_text
+
+
+@pytest.mark.unit
+def test_init_writes_nontrivial_schema(fresh_target: Path) -> None:
+    init_wiki(fresh_target)
+    schema = (fresh_target / ".mdwiki" / "schema.md").read_text()
+    assert "entity" in schema.lower()
+    assert "concept" in schema.lower()
+    assert "synthesis" in schema.lower()
+
+
+@pytest.mark.unit
+def test_init_gitignore_protects_state_db_and_undo(fresh_target: Path) -> None:
+    init_wiki(fresh_target)
+    gi = (fresh_target / ".mdwiki" / ".gitignore").read_text()
+    assert "state.db" in gi
+    assert "undo/" in gi
+
+
+@pytest.mark.unit
+def test_init_skips_non_md_files(fresh_target: Path) -> None:
+    (fresh_target / "notes.txt").write_text("plain text")
+    (fresh_target / "image.png").write_bytes(b"\x89PNG")
+    result = init_wiki(fresh_target)
+    assert result.files_registered == 3
+
+
+@pytest.mark.unit
+def test_init_raw_path_in_db_is_relative(fresh_target: Path) -> None:
+    init_wiki(fresh_target)
+    with connect(fresh_target / ".mdwiki" / "state.db") as conn:
+        row = conn.execute("SELECT raw_path FROM sources WHERE original_path = 'top.md'").fetchone()
+    assert row["raw_path"].startswith("raw/")
+    assert (fresh_target / row["raw_path"]).is_file()

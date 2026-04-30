@@ -8,7 +8,7 @@ def test_embedder_generates_vectors():
     When: Embedding the sections
     Then: Each section has a 384-dim embedding vector
     """
-    from markdown_consolidator.embedder import Embedder
+    from mdwiki.embedder import Embedder
 
     sections = [
         {'section_id': 'a', 'content': 'OAuth authentication setup guide'},
@@ -32,7 +32,7 @@ def test_similar_content_has_similar_embeddings():
     """
     import numpy as np
 
-    from markdown_consolidator.embedder import Embedder
+    from mdwiki.embedder import Embedder
 
     sections = [
         {'section_id': 'auth1', 'content': 'User authentication with OAuth tokens'},
@@ -58,7 +58,7 @@ def test_embedder_handles_empty_input():
     When: Embedding
     Then: Returns empty list without error
     """
-    from markdown_consolidator.embedder import Embedder
+    from mdwiki.embedder import Embedder
 
     embedder = Embedder()
     embedded = embedder.embed_sections([])
@@ -72,7 +72,7 @@ def test_embed_text_single_string():
     When: Embedding it
     Then: Returns a vector of correct dimension
     """
-    from markdown_consolidator.embedder import Embedder
+    from mdwiki.embedder import Embedder
 
     embedder = Embedder()
     vector = embedder.embed_text("Test document about authentication")

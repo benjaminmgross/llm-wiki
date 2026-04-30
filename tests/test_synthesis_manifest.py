@@ -10,7 +10,7 @@ def test_synthesize_from_manifest_creates_files():
     When: Synthesizing from manifest
     Then: Creates markdown files with correct content
     """
-    from markdown_consolidator.synthesis import synthesize_from_manifest
+    from mdwiki.synthesis import synthesize_from_manifest
 
     # Create source file with content
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -60,7 +60,7 @@ def test_synthesize_from_manifest_skips_duplicates():
     When: Synthesizing
     Then: Duplicate sections are not included in output
     """
-    from markdown_consolidator.synthesis import synthesize_from_manifest
+    from mdwiki.synthesis import synthesize_from_manifest
 
     with tempfile.TemporaryDirectory() as tmpdir:
         source_dir = Path(tmpdir) / "source"
@@ -103,7 +103,7 @@ def test_synthesize_from_manifest_handles_standalone_orphans():
     When: Synthesizing
     Then: Creates separate files for standalone orphans
     """
-    from markdown_consolidator.synthesis import synthesize_from_manifest
+    from mdwiki.synthesis import synthesize_from_manifest
 
     with tempfile.TemporaryDirectory() as tmpdir:
         source_dir = Path(tmpdir) / "source"
@@ -140,7 +140,7 @@ def test_synthesize_from_manifest_empty_hierarchy():
     When: Synthesizing
     Then: Returns empty results without errors
     """
-    from markdown_consolidator.synthesis import synthesize_from_manifest
+    from mdwiki.synthesis import synthesize_from_manifest
 
     with tempfile.TemporaryDirectory() as tmpdir:
         output_dir = Path(tmpdir) / "output"
