@@ -10,6 +10,7 @@ vision-based extraction. Vision is opt-in: the default implementation raises
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -117,3 +118,104 @@ class Provider(ABC):
             "Use a vision-capable provider (e.g. AnthropicProvider with claude-sonnet-4-6+) "
             "or set [loaders.image].enabled = false in your wiki config."
         )
+
+    def batch_complete(
+        self,
+        requests: list[BatchRequest],
+        *,
+        poll_interval: float = 60.0,
+        on_status: Callable[[str, int, int], None] | None = None,
+    ) -> list[BatchResult]:
+        """Submit a list of completion requests as a single batch (50% cheaper, ~1h ETA).
+
+        Default raises ``NotImplementedError`` — providers without batch APIs
+        (most local servers) inherit cleanly.
+
+        Parameters
+        ----------
+        requests : list[BatchRequest]
+            One request per pending source. ``custom_id`` matches results to sources.
+        poll_interval : float, optional
+            Seconds between status polls. Default 60s; tests pass 0.0 to spin fast.
+        on_status : callable, optional
+            Called as ``(status, succeeded, total)`` after each poll so the CLI can
+            report progress.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support batch_complete. "
+            "Use AnthropicProvider for the bootstrap-batch path, or run the sync "
+            "ingest path (`mdwiki init --bootstrap`)."
+        )
+
+    def estimate_batch_cost(self, requests: list[BatchRequest]) -> BatchCostEstimate:
+        """Return a coarse upper-bound cost estimate for the given batch.
+
+        Default uses a 4-chars-per-token heuristic over the prompt text plus
+        ``max_tokens`` per request as the output cap, then multiplies by the
+        provider-specific batch rates. Concrete providers override when more
+        accurate token counting is available.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement estimate_batch_cost."
+        )
+
+
+@dataclass(frozen=True)
+class BatchRequest:
+    """One pending completion in a batch submission.
+
+    Parameters
+    ----------
+    custom_id : str
+        Caller-chosen identifier (typically the source_id) — used to match
+        results back to the originating source.
+    system : str
+        System prompt (provider implementations should still cache this).
+    messages : list[Message]
+        Chat history, same shape as ``Provider.complete``.
+    max_tokens : int
+        Per-request output cap.
+    """
+
+    custom_id: str
+    system: str
+    messages: list[Message]
+    max_tokens: int = 16000
+
+
+@dataclass(frozen=True)
+class BatchResult:
+    """One outcome from a batch — success or failure.
+
+    Parameters
+    ----------
+    custom_id : str
+        Mirrors the ``BatchRequest.custom_id``.
+    text : str
+        Completion text. Empty when ``error`` is set.
+    error : str | None
+        Provider-side error code (e.g. ``"rate_limited"``, ``"invalid_request"``)
+        or ``None`` on success.
+    input_tokens : int
+        Prompt tokens billed for this result.
+    output_tokens : int
+        Output tokens billed for this result.
+    """
+
+    custom_id: str
+    text: str
+    error: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class BatchCostEstimate:
+    """Coarse upper-bound cost estimate for a batch submission, in USD."""
+
+    requests: int
+    input_tokens: int
+    output_tokens_max: int
+    usd_total: float
+
+

@@ -75,10 +75,17 @@ def _build_parser() -> argparse.ArgumentParser:
         default=Path.cwd(),
         help="Folder to turn into a wiki (default: current directory).",
     )
-    init_p.add_argument(
+    bootstrap_group = init_p.add_mutually_exclusive_group()
+    bootstrap_group.add_argument(
         "--bootstrap",
         action="store_true",
         help="After init, immediately ingest every pending source (chains `ingest --pending --yes`).",
+    )
+    bootstrap_group.add_argument(
+        "--bootstrap-batch",
+        action="store_true",
+        dest="bootstrap_batch",
+        help="After init, submit every pending source to the Anthropic Batch API (~50%% cheaper, ~1h ETA).",
     )
     init_p.set_defaults(_handler=_cmd_init)
 
@@ -130,7 +137,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
-    """Handler for ``mdwiki init [--bootstrap]``."""
+    """Handler for ``mdwiki init [--bootstrap | --bootstrap-batch]``."""
     try:
         result = init_wiki(args.path)
     except NestedWikiError as exc:
@@ -138,7 +145,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
         return 1
     print(result.message)
 
-    if not args.bootstrap or result.files_registered == 0:
+    if result.files_registered == 0:
+        return 0
+
+    if getattr(args, "bootstrap_batch", False):
+        return _run_bootstrap_batch(args.path.resolve())
+
+    if not args.bootstrap:
         return 0
 
     print(f"\n--- bootstrap: ingesting {result.files_registered} pending source(s) ---\n")
@@ -159,6 +172,35 @@ def _cmd_init(args: argparse.Namespace) -> int:
     applied = sum(1 for r in ingest_results if r.applied)
     print(f"\nBootstrap done: {applied} of {len(ingest_results)} applied.")
     return 0
+
+
+def _run_bootstrap_batch(wiki_root: Path) -> int:
+    """Submit every pending source to Anthropic's Batch API (~50% off, ~1h ETA)."""
+    from mdwiki.bootstrap import bootstrap_batch
+
+    print("\n--- bootstrap-batch: building batch request ---\n")
+    try:
+        result = bootstrap_batch(
+            wiki_root,
+            yes=False,
+            on_status=lambda status, ok, total: print(f"  [batch status: {status} — {ok}/{total} succeeded]"),
+            on_progress=lambda i, total, cid: print(f"  [{i}/{total}] applying {cid}..."),
+        )
+    except (MissingAPIKeyError, UnknownProviderError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except (anthropic.AuthenticationError, anthropic.NotFoundError) as exc:
+        print(_fatal_api_error_message(exc), file=sys.stderr)
+        return 1
+
+    if result.submitted == 0:
+        print("Bootstrap batch aborted (no submission).")
+        return 0
+    print(
+        f"\nBootstrap batch done: applied {result.applied} of {result.submitted} "
+        f"({result.failed} failed, {result.skipped} verdict-skip)."
+    )
+    return 0 if result.failed == 0 else 1
 
 
 def _cmd_status(_args: argparse.Namespace) -> int:

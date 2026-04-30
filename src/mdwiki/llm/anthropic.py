@@ -15,12 +15,30 @@ from __future__ import annotations
 import base64
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import anthropic
 import httpx
 
-from mdwiki.llm.base import CompleteResult, Message, PingResult, Provider
+from mdwiki.llm.base import (
+    BatchCostEstimate,
+    BatchRequest,
+    BatchResult,
+    CompleteResult,
+    Message,
+    PingResult,
+    Provider,
+)
+
+# Anthropic Sonnet 4.6 pricing (USD per million tokens). Batch API discount is 50%.
+# Source: https://www.anthropic.com/pricing
+_SONNET_INPUT_USD_PER_MTOK: float = 3.0
+_SONNET_OUTPUT_USD_PER_MTOK: float = 15.0
+_BATCH_DISCOUNT: float = 0.5
+# Coarse estimate: 4 chars per token (English text). Used as an upper bound for
+# cost estimation only — the real billing uses Anthropic's tokenizer.
+_CHARS_PER_TOKEN: float = 4.0
 
 _IMAGE_MEDIA_TYPES: dict[str, str] = {
     ".png": "image/png",
@@ -221,6 +239,98 @@ class AnthropicProvider(Provider):
             ],
         )
         return next((block.text for block in response.content if getattr(block, "type", None) == "text"), "")
+
+
+    def estimate_batch_cost(self, requests: list[BatchRequest]) -> BatchCostEstimate:
+        """Coarse upper-bound cost estimate using a 4-chars-per-token heuristic.
+
+        Output token count uses ``max_tokens`` (worst case). Real billing uses
+        Anthropic's tokenizer and the actual output length, so the actual cost
+        is typically lower.
+        """
+        input_chars = sum(
+            len(req.system) + sum(len(m.content) for m in req.messages) for req in requests
+        )
+        input_tokens = int(input_chars / _CHARS_PER_TOKEN)
+        output_tokens_max = sum(req.max_tokens for req in requests)
+        usd_total = (
+            (input_tokens * _SONNET_INPUT_USD_PER_MTOK / 1_000_000)
+            + (output_tokens_max * _SONNET_OUTPUT_USD_PER_MTOK / 1_000_000)
+        ) * _BATCH_DISCOUNT
+        return BatchCostEstimate(
+            requests=len(requests),
+            input_tokens=input_tokens,
+            output_tokens_max=output_tokens_max,
+            usd_total=usd_total,
+        )
+
+    def batch_complete(
+        self,
+        requests: list[BatchRequest],
+        *,
+        poll_interval: float = 60.0,
+        on_status: Callable[[str, int, int], None] | None = None,
+    ) -> list[BatchResult]:
+        """Submit one batch via ``client.messages.batches`` and poll until complete.
+
+        Returns one ``BatchResult`` per ``BatchRequest``. Failed/canceled results
+        come back with ``error`` populated and empty ``text`` — caller decides
+        how to surface them (typically: leave the source as ``pending`` and
+        log a warning).
+        """
+        sdk_requests = [
+            {
+                "custom_id": req.custom_id,
+                "params": {
+                    "model": self.model,
+                    "max_tokens": req.max_tokens,
+                    "system": [
+                        {"type": "text", "text": req.system, "cache_control": {"type": "ephemeral"}}
+                    ],
+                    "messages": [{"role": m.role, "content": m.content} for m in req.messages],
+                },
+            }
+            for req in requests
+        ]
+        batch = self._client.messages.batches.create(requests=sdk_requests)
+
+        while True:
+            batch = self._client.messages.batches.retrieve(batch.id)
+            counts = getattr(batch, "request_counts", None)
+            if on_status is not None:
+                succeeded = getattr(counts, "succeeded", 0) if counts else 0
+                on_status(batch.processing_status, succeeded, len(requests))
+            if batch.processing_status == "ended":
+                break
+            time.sleep(poll_interval)
+
+        results: list[BatchResult] = []
+        for entry in self._client.messages.batches.results(batch.id):
+            results.append(_decode_batch_entry(entry))
+        return results
+
+
+def _decode_batch_entry(entry: object) -> BatchResult:
+    """Convert one SDK batch-result entry into a ``BatchResult`` (success or error)."""
+    custom_id = getattr(entry, "custom_id", "")
+    result_obj = getattr(entry, "result", None)
+    result_type = getattr(result_obj, "type", None)
+    if result_type == "succeeded":
+        message = getattr(result_obj, "message", None)
+        content_blocks = getattr(message, "content", []) or []
+        text = next((b.text for b in content_blocks if getattr(b, "type", None) == "text"), "")
+        usage = getattr(message, "usage", None)
+        return BatchResult(
+            custom_id=custom_id,
+            text=text,
+            error=None,
+            input_tokens=getattr(usage, "input_tokens", 0) or 0,
+            output_tokens=getattr(usage, "output_tokens", 0) or 0,
+        )
+    # errored / canceled / expired: surface the type as the error code
+    error_obj = getattr(result_obj, "error", None)
+    error_msg = getattr(error_obj, "type", None) or result_type or "unknown_error"
+    return BatchResult(custom_id=custom_id, text="", error=error_msg)
 
 
 def _elapsed_ms(start: float) -> float:
