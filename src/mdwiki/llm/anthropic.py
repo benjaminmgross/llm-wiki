@@ -65,6 +65,27 @@ class OutputTruncatedError(RuntimeError):
     """Raised when the model hit ``max_tokens`` mid-response (truncated output)."""
 
 
+class BatchTimeoutError(RuntimeError):
+    """Raised when a batch poll exceeds the wall-clock cap (24h, matches Anthropic SLA).
+
+    The batch may still be in-flight server-side. The user can inspect or cancel
+    it via the Anthropic console using the batch id surfaced in the message.
+    """
+
+
+class BatchUnexpectedStatusError(RuntimeError):
+    """Raised when the batch enters a terminal/abnormal status (canceling, expired, errored).
+
+    These statuses indicate the batch will not produce results we can apply; we
+    surface a clear error rather than polling forever.
+    """
+
+
+# 24 hours — matches Anthropic's published Batch API SLA. A batch that hasn't
+# ended by then is almost certainly stuck; force the caller to investigate.
+_BATCH_WALL_CLOCK_TIMEOUT_SECONDS: float = 24 * 60 * 60
+
+
 class AnthropicProvider(Provider):
     """Concrete provider backed by Anthropic's Messages API."""
 
@@ -293,15 +314,32 @@ class AnthropicProvider(Provider):
             for req in requests
         ]
         batch = self._client.messages.batches.create(requests=sdk_requests)
+        batch_id = batch.id
 
+        # 24h wall-clock cap matches Anthropic's Batch API SLA. Unknown / abnormal
+        # statuses (canceling, expired, errored) are treated as terminal — they
+        # mean we won't get usable results, so polling further is pointless.
+        deadline = time.monotonic() + _BATCH_WALL_CLOCK_TIMEOUT_SECONDS
         while True:
-            batch = self._client.messages.batches.retrieve(batch.id)
+            batch = self._client.messages.batches.retrieve(batch_id)
             counts = getattr(batch, "request_counts", None)
+            status = batch.processing_status
             if on_status is not None:
                 succeeded = getattr(counts, "succeeded", 0) if counts else 0
-                on_status(batch.processing_status, succeeded, len(requests))
-            if batch.processing_status == "ended":
+                on_status(status, succeeded, len(requests))
+            if status == "ended":
                 break
+            if status in ("canceling", "canceled", "expired", "errored"):
+                raise BatchUnexpectedStatusError(
+                    f"Batch {batch_id} entered status {status!r} — it will not produce "
+                    f"applicable results. Inspect or retry via the Anthropic console."
+                )
+            if time.monotonic() >= deadline:
+                raise BatchTimeoutError(
+                    f"Batch {batch_id} did not finish within "
+                    f"{_BATCH_WALL_CLOCK_TIMEOUT_SECONDS / 3600:.0f}h "
+                    f"(last status: {status!r}). Cancel or inspect it via the Anthropic console."
+                )
             time.sleep(poll_interval)
 
         results: list[BatchResult] = []
