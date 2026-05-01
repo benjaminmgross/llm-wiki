@@ -190,6 +190,7 @@ class OpenAICompatibleProvider(Provider):
         *,
         poll_interval: float = 60.0,
         on_status: Callable[[str, int, int], None] | None = None,
+        on_batch_id: Callable[[str], None] | None = None,
     ) -> list[BatchResult]:
         """Most OpenAI-compatible local servers (vLLM, llama.cpp) don't expose a batch API."""
         raise NotImplementedError(

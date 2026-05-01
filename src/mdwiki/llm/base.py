@@ -125,6 +125,7 @@ class Provider(ABC):
         *,
         poll_interval: float = 60.0,
         on_status: Callable[[str, int, int], None] | None = None,
+        on_batch_id: Callable[[str], None] | None = None,
     ) -> list[BatchResult]:
         """Submit a list of completion requests as a single batch (50% cheaper, ~1h ETA).
 
@@ -140,6 +141,9 @@ class Provider(ABC):
         on_status : callable, optional
             Called as ``(status, succeeded, total)`` after each poll so the CLI can
             report progress.
+        on_batch_id : callable, optional
+            Called once with the provider-side batch id immediately after submission,
+            so callers (e.g. ``BootstrapResult``) can surface it for diagnostics.
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support batch_complete. "

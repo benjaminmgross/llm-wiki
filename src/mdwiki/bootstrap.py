@@ -89,6 +89,7 @@ def bootstrap_batch(
     confirm: Callable[[BatchCostEstimate], bool] | None = None,
     on_status: Callable[[str, int, int], None] | None = None,
     on_progress: Callable[[int, int, str], None] | None = None,
+    on_batch_id: Callable[[str], None] | None = None,
 ) -> BootstrapResult:
     """Submit every pending source as one batch and apply each successful result.
 
@@ -137,12 +138,25 @@ def bootstrap_batch(
                 submitted=0, applied=0, failed=0, skipped=0, cost_estimate=estimate, batch_id=""
             )
 
-    results = provider.batch_complete(requests, poll_interval=poll_interval, on_status=on_status)
+    captured_batch_id: str = ""
+
+    def _capture_batch_id(value: str) -> None:
+        nonlocal captured_batch_id
+        captured_batch_id = value
+        if on_batch_id is not None:
+            on_batch_id(value)
+
+    results = provider.batch_complete(
+        requests,
+        poll_interval=poll_interval,
+        on_status=on_status,
+        on_batch_id=_capture_batch_id,
+    )
 
     applied = 0
     failed = 0
     skipped = 0
-    batch_id = ""
+    batch_id = captured_batch_id
     for index, result in enumerate(results, start=1):
         if on_progress is not None:
             on_progress(index, len(results), result.custom_id)

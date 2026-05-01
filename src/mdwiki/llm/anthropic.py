@@ -291,6 +291,7 @@ class AnthropicProvider(Provider):
         *,
         poll_interval: float = 60.0,
         on_status: Callable[[str, int, int], None] | None = None,
+        on_batch_id: Callable[[str], None] | None = None,
     ) -> list[BatchResult]:
         """Submit one batch via ``client.messages.batches`` and poll until complete.
 
@@ -315,6 +316,8 @@ class AnthropicProvider(Provider):
         ]
         batch = self._client.messages.batches.create(requests=sdk_requests)
         batch_id = batch.id
+        if on_batch_id is not None:
+            on_batch_id(batch_id)
 
         # 24h wall-clock cap matches Anthropic's Batch API SLA. Unknown / abnormal
         # statuses (canceling, expired, errored) are treated as terminal — they
