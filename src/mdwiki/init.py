@@ -18,7 +18,8 @@ import pathspec
 import tomli_w
 
 from mdwiki.discover import WIKI_DIR_NAME, WikiNotFound, find_wiki
-from mdwiki.loaders import UnsupportedFiletypeError, get_loader_for
+from mdwiki.loaders import UnsupportedFiletypeError, build_registry, get_loader_for
+from mdwiki.loaders.base import Loader
 from mdwiki.state import connect, init_db
 
 SOURCES_SIDECAR_NAME: str = ".sources.json"
@@ -220,8 +221,14 @@ def init_wiki(target: Path) -> InitResult:
     (wiki_dir / "schema.md").write_text(DEFAULT_SCHEMA)
     (wiki_dir / ".gitignore").write_text(GITIGNORE_CONTENT)
 
+    # Build the loader registry ONCE from the default config. Reusing this
+    # avoids the O(N) TOML re-parse cost (one parse + ancestor walk per file)
+    # the previous per-file ``get_loader_for`` path incurred. Image loading is
+    # off by default so no provider is needed here; init never invokes vision.
+    registry = build_registry(config=DEFAULT_CONFIG, provider=None)
+
     registered, skipped, dedup_skipped, empty_load_skipped = _register_sources(
-        target=target, raw_dir=raw_dir, db_path=wiki_dir / "state.db"
+        target=target, raw_dir=raw_dir, db_path=wiki_dir / "state.db", registry=registry
     )
 
     suffix_parts: list[str] = []
@@ -261,8 +268,23 @@ def _refuse_if_nested(target: Path) -> None:
     )
 
 
-def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[int, int, int, int]:
+def _register_sources(
+    *,
+    target: Path,
+    raw_dir: Path,
+    db_path: Path,
+    registry: tuple[Loader, ...] | None = None,
+) -> tuple[int, int, int, int]:
     """Walk ``target``, register every loadable file as a pending source.
+
+    Parameters
+    ----------
+    registry : tuple[Loader, ...], optional
+        Pre-built loader registry. When provided, every file's loader resolution
+        uses this in-memory registry rather than calling ``get_loader_for`` —
+        which would re-parse ``.mdwiki/config.toml`` per file (O(N) TOML parses
+        for a corpus of N files). When None, falls back to ``get_loader_for``
+        for callers that haven't migrated.
 
     Returns
     -------
@@ -280,7 +302,7 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
     import sys
 
     spec = _load_gitignore(target)
-    source_paths = sorted(_iter_loadable_files(target))
+    source_paths = sorted(_iter_loadable_files(target, registry=registry))
     registered = 0
     skipped = 0
     dedup_skipped = 0
@@ -316,7 +338,7 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
                     dedup_skipped += 1
                     continue
 
-                loader = get_loader_for(source_path)
+                loader = _resolve_loader(source_path, registry=registry)
                 markdown_text = loader.load_to_markdown(source_path)
                 if not markdown_text.strip():
                     # Loader returned empty (e.g. PdfLoader on a scanned PDF,
@@ -366,8 +388,19 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
 _EXCLUDED_DIR_NAMES: frozenset[str] = frozenset({WIKI_DIR_NAME, "wiki", "raw"})
 
 
-def _iter_loadable_files(target: Path) -> list[Path]:
+def _iter_loadable_files(
+    target: Path, *, registry: tuple[Loader, ...] | None = None
+) -> list[Path]:
     """Return every file under ``target`` that some registered loader claims.
+
+    Parameters
+    ----------
+    registry : tuple[Loader, ...], optional
+        Pre-built loader registry. When provided, ``can_handle`` is checked
+        directly against this registry — avoiding the per-file
+        ``get_loader_for`` call that re-parses ``.mdwiki/config.toml``. When
+        None, falls back to ``get_loader_for`` (preserves backward-compat for
+        external callers).
 
     Excludes ``.mdwiki/``, ``wiki/``, and ``raw/`` at any depth — those are
     mdwiki-managed locations and registering files there as user sources
@@ -381,12 +414,36 @@ def _iter_loadable_files(target: Path) -> list[Path]:
             continue
         if not _EXCLUDED_DIR_NAMES.isdisjoint(p.parts):
             continue
-        try:
-            get_loader_for(p)
-        except UnsupportedFiletypeError:
-            continue
+        if registry is not None:
+            if not any(loader.can_handle(p) for loader in registry):
+                continue
+        else:
+            try:
+                get_loader_for(p)
+            except UnsupportedFiletypeError:
+                continue
         out.append(p)
     return out
+
+
+def _resolve_loader(path: Path, *, registry: tuple[Loader, ...] | None) -> Loader:
+    """Return the first loader from ``registry`` that claims ``path``.
+
+    Falls back to ``get_loader_for`` when no registry is supplied (preserves
+    backward-compat for callers that haven't migrated to the registry-passing
+    convention).
+
+    Raises
+    ------
+    UnsupportedFiletypeError
+        No registered loader claims this path's extension.
+    """
+    if registry is None:
+        return get_loader_for(path)
+    for loader in registry:
+        if loader.can_handle(path):
+            return loader
+    raise UnsupportedFiletypeError(f"No loader registered for: {path}")
 
 
 def _load_gitignore(target: Path) -> pathspec.PathSpec | None:
