@@ -23,6 +23,7 @@ from typing import Any
 
 import openai
 
+from mdwiki.llm.anthropic import OutputTruncatedError
 from mdwiki.llm.base import (
     BatchRequest,
     BatchResult,
@@ -100,15 +101,56 @@ class OpenAICompatibleProvider(Provider):
         )
 
     def ping(self) -> PingResult:
-        """Issue a 1-token call to verify the endpoint is reachable + serving the model."""
+        """Issue a 1-token call to verify the endpoint is reachable + serving the model.
+
+        Sends a tiny system message in addition to the user message so that
+        misconfigurations affecting system-prompt handling (e.g. a server that
+        rejects the ``system`` role) surface here instead of waiting until a
+        real ``complete()`` call.
+        """
         start = time.perf_counter()
         try:
             self._client.chat.completions.create(
                 model=self.model,
                 max_tokens=1,
-                messages=[{"role": "user", "content": "ping"}],
+                messages=[
+                    {"role": "system", "content": "You are a health-check probe."},
+                    {"role": "user", "content": "ping"},
+                ],
             )
-        except Exception as exc:  # noqa: BLE001 — we want one ping that never raises
+        except openai.AuthenticationError as exc:
+            return PingResult(
+                provider=self.name,
+                model=self.model,
+                latency_ms=_elapsed_ms(start),
+                ok=False,
+                message=f"auth failed — check the api_key for {self.base_url} ({exc})",
+            )
+        except openai.NotFoundError as exc:
+            return PingResult(
+                provider=self.name,
+                model=self.model,
+                latency_ms=_elapsed_ms(start),
+                ok=False,
+                message=f"model not found — verify '{self.model}' is served at {self.base_url} ({exc})",
+            )
+        except openai.APIConnectionError as exc:
+            return PingResult(
+                provider=self.name,
+                model=self.model,
+                latency_ms=_elapsed_ms(start),
+                ok=False,
+                message=f"network/connection error — could not reach {self.base_url} ({exc})",
+            )
+        except openai.APIStatusError as exc:
+            return PingResult(
+                provider=self.name,
+                model=self.model,
+                latency_ms=_elapsed_ms(start),
+                ok=False,
+                message=f"API error ({getattr(exc, 'status_code', '?')}) — {exc}",
+            )
+        except Exception as exc:  # noqa: BLE001 — fallback; ping must never raise
             return PingResult(
                 provider=self.name,
                 model=self.model,
@@ -131,7 +173,15 @@ class OpenAICompatibleProvider(Provider):
         messages: list[Message],
         max_tokens: int = 1024,
     ) -> CompleteResult:
-        """Translate to OpenAI's chat-completions format and call the endpoint."""
+        """Translate to OpenAI's chat-completions format and call the endpoint.
+
+        Raises
+        ------
+        OutputTruncatedError
+            If ``finish_reason == "length"`` — mirrors the Anthropic ``stop_reason
+            == "max_tokens"`` check. The output is truncated and likely invalid
+            JSON; caller should retry with a higher ``--max-tokens``.
+        """
         sdk_messages = [{"role": "system", "content": system}] + [
             {"role": m.role, "content": m.content} for m in messages
         ]
@@ -140,7 +190,14 @@ class OpenAICompatibleProvider(Provider):
             max_tokens=max_tokens,
             messages=sdk_messages,
         )
-        text = response.choices[0].message.content or ""
+        choice = response.choices[0]
+        if getattr(choice, "finish_reason", None) == "length":
+            raise OutputTruncatedError(
+                f"Model hit max_tokens={max_tokens} mid-response (finish_reason='length'). "
+                f"The output is truncated and likely invalid JSON. "
+                f"Re-run with a higher --max-tokens (or trim the source if it's enormous)."
+            )
+        text = choice.message.content or ""
         usage = getattr(response, "usage", None)
         return CompleteResult(
             text=text,
