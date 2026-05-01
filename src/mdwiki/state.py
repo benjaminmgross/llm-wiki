@@ -174,26 +174,38 @@ def _apply_inline_migrations(conn) -> None:
     # (``mdwiki.plan.allowed_kinds_for_wiki``). SQLite has no
     # ``ALTER TABLE DROP CONSTRAINT`` until very recent versions, so the
     # standard portable pattern is rebuild-via-temp-table.
+    #
+    # CRITICAL: ``DROP TABLE pages`` while ``foreign_keys = ON`` cascade-deletes
+    # every ``backrefs`` row (FK is ``ON DELETE CASCADE``), silently destroying
+    # all citation data on v1.1 → v1.2 upgrade. We disable FKs around the
+    # rebuild per the SQLite recipe at
+    # https://www.sqlite.org/lang_altertable.html#otheralter and re-enable in a
+    # ``finally`` so a mid-rebuild failure can't leave the connection with FKs
+    # silently disabled.
     pages_sql_row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='pages'"
     ).fetchone()
     if pages_sql_row is not None and "CHECK" in (pages_sql_row[0] or ""):
-        conn.executescript(
-            """
-            BEGIN;
-            CREATE TABLE pages_new (
-                path            TEXT PRIMARY KEY,
-                kind            TEXT NOT NULL,
-                embedding       BLOB,
-                last_touched_at REAL NOT NULL
-            );
-            INSERT INTO pages_new (path, kind, embedding, last_touched_at)
-                SELECT path, kind, embedding, last_touched_at FROM pages;
-            DROP TABLE pages;
-            ALTER TABLE pages_new RENAME TO pages;
-            COMMIT;
-            """
-        )
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            conn.executescript(
+                """
+                BEGIN;
+                CREATE TABLE pages_new (
+                    path            TEXT PRIMARY KEY,
+                    kind            TEXT NOT NULL,
+                    embedding       BLOB,
+                    last_touched_at REAL NOT NULL
+                );
+                INSERT INTO pages_new (path, kind, embedding, last_touched_at)
+                    SELECT path, kind, embedding, last_touched_at FROM pages;
+                DROP TABLE pages;
+                ALTER TABLE pages_new RENAME TO pages;
+                COMMIT;
+                """
+            )
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
