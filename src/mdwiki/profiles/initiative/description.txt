@@ -1,0 +1,1 @@
+Project / strategy / cross-functional initiative folder. Mixed file types (md+csv+pdf+docx); README-as-canon; subfolders-as-workstreams. Best for capital-raise / market-expansion / vc-scheduling-style folders. Adds decision/status/workstream/owner page kinds.

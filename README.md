@@ -7,7 +7,22 @@
 
 Built on [Karpathy's llm-wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). The wiki is a *persistent, compounding artifact* — each ingest doesn't just file the source, it weaves into existing pages, adds cross-references, and may produce synthesis writeups across what you already have. Sources are immutable. Pages are LLM-owned. You ask questions and curate; the LLM does the bookkeeping.
 
-**v1.1.0 highlights:**
+**v1.2.0 highlights (new):**
+
+- **Corpus-aware profiles** — `mdwiki init --profile=initiative|transcripts|framework|working-dir`. Each profile pre-bakes a tuned `schema.md` + `config.toml` overlay tailored to its corpus shape. `working-dir` is the legacy default.
+- **`initiative` profile** — workhorse for project / strategy / cross-functional folders. Page kinds `decision` / `status` / `workstream` / `owner`.
+- **`transcripts` profile** — meeting / call / interview corpora. Speaker-turn-aware chunker, `[HH:MM:SS]` timestamp-stripping quote-anchor mode, mandatory `person` entity per speaker, `meeting` / `decision` / `commitment` / `blocker` page kinds. New `TranscriptLoader` for `.vtt` / `.srt` / Fathom-style markdown.
+- **`framework` profile** — procedure / template / assessment / learning four-kind taxonomy for "how-we-do-X" folders.
+- **Page version chain** — every wiki/ page write embeds `previous_hash:` (SHA-256 of the prior body) in YAML frontmatter, building a tamper-evident chain. Inspired by [demarkus](https://github.com/latebit-io/demarkus).
+- **Fallback chunker tiers** — `MarkdownChunker` now falls back from H2 → H1 → paragraph → sliding-window when no H2 is present. Transcripts and unstructured md no longer return zero sections.
+- **`mdwiki skill`** — runtime command that prints the wiki's `.mdwiki/schema.md` plus an embedded agent how-to guide to stdout, so a Claude Code instance opening a wiki folder can `mdwiki skill` for inline docs.
+- **Quality compounding primitives** (state.db tables + modules ready; full integration into ingest hot path is staged for v1.2.1):
+  - `state.db.rejections` + `mdwiki.rejection_memory` — per-source rejection logging for prompt re-injection
+  - `state.db.cost_ledger` + `mdwiki.cost_guard` — daily-USD spend tracking + budget enforcement
+  - `[unverified-quote]` lint check flags any wiki page containing the marker
+- **`canary` runner** — `scripts/run_canary.py` exercises mdwiki against a real folder and emits a Karpathy-style scorecard (page counts by kind, cross-ref density, coverage, backref count). Free structural mode + opt-in `--live` LLM mode.
+
+**v1.1.0 (still shipped):**
 
 - **Multi-filetype ingest** — markdown, plain text, code (35+ languages), CSV/TSV, PDF, DOCX, HTML; plus opt-in image OCR via Claude vision
 - **Anthropic Batch API** — `init --bootstrap-batch` submits every pending source as one batch (~50% cheaper, ~1h ETA)

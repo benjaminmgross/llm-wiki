@@ -1,0 +1,22 @@
+# Initiative profile config overlay.
+#
+# Deep-merged into mdwiki's DEFAULT_CONFIG at init time. Only keys that should
+# differ from the default appear here — anything not listed inherits from the
+# default.
+
+[ingest]
+# Initiative folders typically span 5+ workstreams with multiple existing pages
+# touching any given source. Bumping candidate_top_k from the default of 8
+# gives the LLM more existing-page context to update rather than create
+# duplicates.
+candidate_top_k = 12
+
+[profile]
+# Self-describing — tooling that wants to know "what profile is this wiki
+# using" can read this without re-importing the profile module.
+name = "initiative"
+
+[profile.initiative]
+# Page kinds beyond the baseline (entity / concept / synthesis) that the
+# `pages.kind` write-time validator allows. Order matters only for help text.
+extra_page_kinds = ["decision", "status", "workstream", "owner"]

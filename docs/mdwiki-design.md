@@ -1,12 +1,13 @@
 ---
-title: mdwiki — Design (v1.1.0)
+title: mdwiki — Design (v1.2.0)
 created: 2025-04-29
 updated: 2026-04-30
-version: 1.1.0
+version: 1.2.0
 status: locked
-tags: [mdwiki, design, llm-wiki, karpathy-pattern, multi-filetype, batch-api, local-providers]
+tags: [mdwiki, design, llm-wiki, karpathy-pattern, multi-filetype, batch-api, local-providers, profiles, version-chain]
 supersedes: v0 design
 changelog:
+  - 1.2.0 (2026-04-30) — Corpus-aware profiles (`mdwiki init --profile=working-dir|initiative|transcripts|framework`) layered on a Profile + deep-merge config-overlay foundation. New profile contents under `src/mdwiki/profiles/`. `MarkdownChunker` fallback tiers (H2 → H1 → paragraph → sliding-window). `_normalize(mode="transcripts")` strips `[HH:MM:SS]` and `Speaker:` prefixes for transcripts mode. New `TranscriptLoader` (VTT / SRT / Fathom-md). Page version chain (`previous_hash:` SHA-256 in YAML frontmatter, auto-embedded by `transaction.write_file()` for `wiki/` paths). Profile-aware plan validation (`allowed_kinds_for_wiki()`); legacy `pages.kind` CHECK constraint dropped via inline migration. New `mdwiki skill` command (runtime agent guide). Phase-5 quality primitives (`state.db.rejections`, `state.db.cost_ledger`, `mdwiki.rejection_memory`, `mdwiki.cost_guard`, `[unverified-quote]` lint check) — primitives only; ingest-path wiring is v1.2.1. New `scripts/run_canary.py` for real-corpus structural + live scorecards. Schema is forward-compatible; existing wikis auto-migrate on first connect (drops the kind CHECK; adds rejections + cost_ledger tables). 29 new tests, 416 total passing, 0 regressions.
   - 1.1.0 (2026-04-30) — Multi-filetype ingest via Loader registry (md/txt/code/csv/pdf/docx/html/image), Anthropic Batch API (`init --bootstrap-batch`), generic `OpenAICompatibleProvider` for vLLM/llama.cpp/OpenRouter/Together, opt-in Claude vision OCR for images and scanned-PDF fallback, `mdwiki lint --fix [=full]` interactive remediation, `mdwiki rebuild-log` recovery utility. Schema + ingest prompt rewritten for healthier entity-page creation balance (Karpathy rubric 47→79 on a mixed-filetype test corpus). New deps — pypdfium2, python-docx, markdownify, openai. Schema is forward-compatible; no v1.0→v1.1 migration needed.
   - 1.0.5 (2026-04-30) — round-1 review fixes. UPDATE schema: drop `section`; `content` is the COMPLETE revised page body (no section splicing in v1.0.0). Document `mdwiki rebuild` as sources-only restoration; backrefs/events/pages are not replayable from log.md alone (re-ingest sources to recover). Document `mdwiki ingest --pending` as the bulk-run resume mechanism (no checkpoint file in v1.0.0). Add path-traversal defense in plan parser. Atomic file writes via tmp+os.replace. WAL journaling + 30s busy_timeout for concurrent invocation safety. HTTP timeout + max_retries=2 on the Anthropic client.
 ---

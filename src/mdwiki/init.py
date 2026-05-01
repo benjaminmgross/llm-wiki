@@ -177,13 +177,17 @@ class InitResult:
     message: str
 
 
-def init_wiki(target: Path) -> InitResult:
+def init_wiki(target: Path, *, profile: str = "working-dir") -> InitResult:
     """Scaffold a wiki at ``target`` and register every markdown source as pending.
 
     Parameters
     ----------
     target : Path
         The folder to turn into a wiki. Must not be inside another wiki.
+    profile : str, default "working-dir"
+        Corpus-aware profile name. Determines the seed schema and config
+        overlay written to ``.mdwiki/``. ``"working-dir"`` is the legacy
+        behavior (DEFAULT_SCHEMA + DEFAULT_CONFIG verbatim).
 
     Returns
     -------
@@ -194,7 +198,15 @@ def init_wiki(target: Path) -> InitResult:
     ------
     NestedWikiError
         If a parent of ``target`` already contains ``.mdwiki/``.
+    UnknownProfileError
+        If ``profile`` doesn't match a bundled profile name.
     """
+    # Imported here to avoid a circular import: profiles imports DEFAULT_SCHEMA
+    # from this module to define the working-dir profile.
+    from mdwiki.profiles import deep_merge, load_profile
+
+    loaded_profile = load_profile(name=profile)
+
     target = target.resolve()
     _refuse_if_nested(target)
 
@@ -216,16 +228,22 @@ def init_wiki(target: Path) -> InitResult:
     raw_dir.mkdir(exist_ok=True)
     inner_wiki_dir.mkdir(exist_ok=True)
 
+    # Merge the profile's overlay into DEFAULT_CONFIG so per-profile knobs (e.g.
+    # candidate_top_k, sub-profile activation rules) land in .mdwiki/config.toml
+    # alongside the defaults. Working-dir's overlay is empty, so the merged dict
+    # equals DEFAULT_CONFIG byte-for-byte after toml round-trip.
+    merged_config = deep_merge(base=DEFAULT_CONFIG, overlay=loaded_profile.config_overlay)
+
     init_db(wiki_dir / "state.db")
-    (wiki_dir / "config.toml").write_bytes(tomli_w.dumps(DEFAULT_CONFIG).encode("utf-8"))
-    (wiki_dir / "schema.md").write_text(DEFAULT_SCHEMA)
+    (wiki_dir / "config.toml").write_bytes(tomli_w.dumps(merged_config).encode("utf-8"))
+    (wiki_dir / "schema.md").write_text(loaded_profile.schema_text)
     (wiki_dir / ".gitignore").write_text(GITIGNORE_CONTENT)
 
-    # Build the loader registry ONCE from the default config. Reusing this
+    # Build the loader registry ONCE from the merged config. Reusing this
     # avoids the O(N) TOML re-parse cost (one parse + ancestor walk per file)
     # the previous per-file ``get_loader_for`` path incurred. Image loading is
     # off by default so no provider is needed here; init never invokes vision.
-    registry = build_registry(config=DEFAULT_CONFIG, provider=None)
+    registry = build_registry(config=merged_config, provider=None)
 
     registered, skipped, dedup_skipped, empty_load_skipped = _register_sources(
         target=target, raw_dir=raw_dir, db_path=wiki_dir / "state.db", registry=registry

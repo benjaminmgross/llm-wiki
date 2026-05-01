@@ -1,0 +1,1 @@
+Folder documenting a framework / methodology / procedure: README + templates + applied assessments + learnings. Adds procedure/template/assessment/learning page kinds and embeds previous_hash: in every page's YAML frontmatter for tamper-evident version history.

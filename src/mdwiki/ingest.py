@@ -22,9 +22,9 @@ from mdwiki.index import build_index
 from mdwiki.llm import build_provider_from_config
 from mdwiki.llm.anthropic import OutputTruncatedError
 from mdwiki.llm.base import Message, Provider
-from mdwiki.plan import Plan, PlanValidationError, parse_plan
+from mdwiki.plan import Plan, PlanValidationError, allowed_kinds_for_wiki, parse_plan
 from mdwiki.prompts import INGEST_SYSTEM_PROMPT, build_ingest_user_prompt
-from mdwiki.quote import verify_plan
+from mdwiki.quote import quote_normalize_mode_for_wiki, verify_plan
 from mdwiki.state import connect
 from mdwiki.transaction import IngestTransaction
 
@@ -125,11 +125,16 @@ def ingest_source(
         raise IngestError(str(exc)) from exc
 
     try:
-        plan = parse_plan(response.text)
+        plan = parse_plan(response.text, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
     except PlanValidationError as exc:
         raise IngestError(f"LLM returned an unparseable plan: {exc}") from exc
 
-    verification = verify_plan(plan, source_text=source_text, section_ids=section_ids)
+    verification = verify_plan(
+        plan,
+        source_text=source_text,
+        section_ids=section_ids,
+        mode=quote_normalize_mode_for_wiki(wiki_root),
+    )
     if not verification.valid:
         details = "\n  ".join(err.message for err in verification.errors)
         raise IngestError(f"Quote verification failed:\n  {details}")

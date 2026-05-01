@@ -1,0 +1,18 @@
+# Framework profile config overlay.
+#
+# Tunes mdwiki for procedure / template / assessment / learning corpora.
+
+[ingest]
+# Frameworks have tightly interlinked artifacts; more candidates help the LLM
+# update existing templates / cite existing assessments rather than creating
+# duplicates.
+candidate_top_k = 14
+
+[profile]
+name = "framework"
+
+[profile.framework]
+extra_page_kinds = ["procedure", "template", "assessment", "learning"]
+# Note: every wiki/ page write embeds previous_hash: in YAML frontmatter
+# unconditionally in v1.2 (see src/mdwiki/version_chain.py). There is no
+# v1.2 opt-out knob; if one is added later, it will live here.

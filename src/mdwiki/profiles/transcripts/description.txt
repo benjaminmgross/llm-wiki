@@ -1,0 +1,1 @@
+Folder of meeting / call / interview transcripts. VTT, SRT, or markdown exports from Fathom / Otter / Zoom. Adds meeting/decision/commitment/blocker/person page kinds and runs quote-anchor in transcripts mode.

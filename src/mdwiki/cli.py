@@ -24,6 +24,8 @@ from mdwiki.lint import lint_wiki
 from mdwiki.lint_fix import lint_fix
 from mdwiki.llm import UnknownProviderError
 from mdwiki.llm.anthropic import BatchTimeoutError, BatchUnexpectedStatusError, MissingAPIKeyError
+from mdwiki.profiles import UnknownProfileError, list_profile_names
+from mdwiki.skill import WikiNotFoundForSkill, run_skill
 from mdwiki.query import QueryError, query_wiki
 from mdwiki.rebuild import RebuildError, rebuild_wiki
 from mdwiki.rebuild_log import rebuild_log
@@ -114,6 +116,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="With --bootstrap-batch, skip the cost-estimate confirmation prompt (no effect with --bootstrap).",
     )
+    init_p.add_argument(
+        "--profile",
+        default="working-dir",
+        choices=list_profile_names(),
+        help="Corpus-aware profile (default: working-dir). Determines the seed schema and config overlay.",
+    )
     init_p.set_defaults(_handler=_cmd_init)
 
     status_p = subparsers.add_parser("status", help="Show pending/ingested counts, recent events, last lint.")
@@ -176,16 +184,25 @@ def _build_parser() -> argparse.ArgumentParser:
     syn_p.add_argument("--yes", "-y", action="store_true", help="Apply (or apply-all in --auto) without prompting.")
     syn_p.set_defaults(_handler=_cmd_synthesize)
 
+    skill_p = subparsers.add_parser(
+        "skill",
+        help="Print this wiki's schema + an agent how-to guide to stdout (for AI agent self-orientation).",
+    )
+    skill_p.set_defaults(_handler=_cmd_skill)
+
     return parser
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
-    """Handler for ``mdwiki init [--bootstrap | --bootstrap-batch]``."""
+    """Handler for ``mdwiki init [--profile=<name>] [--bootstrap | --bootstrap-batch]``."""
     try:
-        result = init_wiki(args.path)
+        result = init_wiki(args.path, profile=args.profile)
     except NestedWikiError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except UnknownProfileError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     print(result.message)
 
     if result.files_registered == 0:
@@ -491,6 +508,22 @@ def _cmd_synthesize(args: argparse.Namespace) -> int:
     except _FATAL_API_ERRORS as exc:
         print(_fatal_api_error_message(exc), file=sys.stderr)
         return 1
+
+
+def _cmd_skill(_args: argparse.Namespace) -> int:
+    """Handler for ``mdwiki skill`` — print schema + agent guide to stdout."""
+    try:
+        wiki_root = find_wiki()
+    except WikiNotFound as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        text = run_skill(wiki_root)
+    except WikiNotFoundForSkill as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(text)
+    return 0
 
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:

@@ -34,9 +34,9 @@ from mdwiki.llm.base import (
     Message,
     Provider,
 )
-from mdwiki.plan import PlanValidationError, parse_plan
+from mdwiki.plan import PlanValidationError, allowed_kinds_for_wiki, parse_plan
 from mdwiki.prompts import INGEST_SYSTEM_PROMPT, build_ingest_user_prompt
-from mdwiki.quote import verify_plan
+from mdwiki.quote import quote_normalize_mode_for_wiki, verify_plan
 from mdwiki.state import connect
 from mdwiki.transaction import IngestTransaction
 
@@ -243,11 +243,21 @@ def _apply_one_result(
 ) -> str:
     """Parse, verify, and apply one batch result. Returns ``"applied"|"skipped"|"failed"``."""
     try:
-        plan = parse_plan(response_text)
+        # Mirror the sync ingest path: pass profile-aware allowed_kinds so
+        # batch results that propose profile-specific page kinds (framework's
+        # ``procedure``/``template``, transcripts' ``meeting``/``decision``,
+        # initiative's ``workstream``/``owner``, etc.) parse instead of being
+        # rejected as "Invalid page kind".
+        plan = parse_plan(response_text, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
     except PlanValidationError:
         return "failed"
 
-    verification = verify_plan(plan, source_text=context.source_text, section_ids=context.section_ids)
+    verification = verify_plan(
+        plan,
+        source_text=context.source_text,
+        section_ids=context.section_ids,
+        mode=quote_normalize_mode_for_wiki(wiki_root),
+    )
     if not verification.valid:
         return "failed"
 
