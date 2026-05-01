@@ -27,12 +27,23 @@ INFRASTRUCTURE_PAGES: frozenset[str] = frozenset({"wiki/index.md", "wiki/log.md"
 
 @dataclass(frozen=True)
 class LintFinding:
-    """One issue surfaced by ``lint_wiki``."""
+    """One issue surfaced by ``lint_wiki``.
+
+    Parameters
+    ----------
+    kind, page_path, message, severity
+        Stable fields used by every rule.
+    link_text, link_target
+        Populated by ``broken-ref`` findings so ``lint_fix`` can repair the link
+        without re-parsing the human-readable message. ``None`` for other rules.
+    """
 
     kind: str
     page_path: str
     message: str
     severity: str
+    link_text: str | None = None
+    link_target: str | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +106,8 @@ def _check_broken_refs(wiki_root: Path) -> list[LintFinding]:
                         page_path=rel_page,
                         message=f"link [{match.group(1)}]({target}) → not found at {resolved}",
                         severity="warn",
+                        link_text=match.group(1),
+                        link_target=target,
                     )
                 )
     return findings

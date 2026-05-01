@@ -129,20 +129,28 @@ def _dispatch(finding: LintFinding, *, wiki_root: Path, mode: LintFixMode) -> bo
     return False
 
 
+# Fallback parser for findings produced by older lint runs that didn't populate
+# ``link_text`` / ``link_target``. New findings should always carry those fields.
 _BROKEN_REF_TARGET_RE = re.compile(r"link \[([^\]]+)\]\(([^)]+)\) → not found")
 
 
 def _fix_broken_ref(finding: LintFinding, *, wiki_root: Path) -> bool:
     """Replace ``[text](broken-target)`` with bare ``text`` in the linking page.
 
-    Reads the target from the finding message (``link [text](target) → not found``)
-    so we don't have to re-discover which link is broken.
+    Prefers the structured ``link_text`` / ``link_target`` fields populated by
+    ``_check_broken_refs``. Falls back to parsing the human-readable message
+    only when those fields are absent (e.g. findings produced by older lint
+    runs persisted somewhere or hand-built test fixtures).
     """
-    match = _BROKEN_REF_TARGET_RE.search(finding.message)
-    if match is None:
-        return False
-    link_text = match.group(1)
-    target = match.group(2)
+    if finding.link_text is not None and finding.link_target is not None:
+        link_text = finding.link_text
+        target = finding.link_target
+    else:
+        match = _BROKEN_REF_TARGET_RE.search(finding.message)
+        if match is None:
+            return False
+        link_text = match.group(1)
+        target = match.group(2)
 
     page_path = wiki_root / finding.page_path
     if not page_path.is_file():
