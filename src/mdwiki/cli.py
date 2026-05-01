@@ -112,7 +112,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--yes",
         "-y",
         action="store_true",
-        help="With --bootstrap-batch, skip the cost-estimate confirmation prompt.",
+        help="With --bootstrap-batch, skip the cost-estimate confirmation prompt (no effect with --bootstrap).",
     )
     init_p.set_defaults(_handler=_cmd_init)
 
@@ -525,6 +525,12 @@ def _fatal_api_error_message(exc: Exception) -> str:
     stack trace per source. Both Anthropic and OpenAI-compatible errors are
     handled here so the message is symmetric across providers.
     """
+    # NOTE: openai.AuthenticationError, NotFoundError, RateLimitError all
+    # subclass openai.APIStatusError — keep the specific isinstance checks
+    # above the APIStatusError check or auth/404/429 errors will silently
+    # re-route through the generic branch and lose their tailored remediation
+    # text. Same applies to anthropic's hierarchy; specific-before-generic
+    # is the contract this function relies on.
     if isinstance(exc, anthropic.AuthenticationError):
         return (
             f"error: Anthropic API rejected the credentials ({exc}). "
