@@ -18,7 +18,9 @@ Each successful fix is wrapped in an ``IngestTransaction`` so it's reversible vi
 
 from __future__ import annotations
 
+import logging
 import re
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +31,8 @@ from mdwiki.ingest import IngestResult, ingest_source
 from mdwiki.lint import LintFinding, lint_wiki
 from mdwiki.state import connect
 from mdwiki.transaction import IngestTransaction
+
+logger = logging.getLogger(__name__)
 
 LintFixMode = Literal["default", "full"]
 
@@ -89,7 +93,14 @@ def lint_fix(
             continue
         try:
             handled = _dispatch(finding, wiki_root=wiki_root, mode=mode)
-        except Exception:  # noqa: BLE001 — one bad fix shouldn't abort the rest
+        except Exception as exc:  # noqa: BLE001 — one bad fix shouldn't abort the rest
+            print(
+                f"  ! lint-fix failed for {finding.kind} on {finding.page_path}: {exc}",
+                file=sys.stderr,
+            )
+            logger.exception(
+                "lint-fix failed for %s on %s", finding.kind, finding.page_path
+            )
             failed += 1
             continue
         if handled:
