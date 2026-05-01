@@ -23,7 +23,7 @@ from mdwiki.init import NestedWikiError, init_wiki
 from mdwiki.lint import lint_wiki
 from mdwiki.lint_fix import lint_fix
 from mdwiki.llm import UnknownProviderError
-from mdwiki.llm.anthropic import MissingAPIKeyError
+from mdwiki.llm.anthropic import BatchTimeoutError, BatchUnexpectedStatusError, MissingAPIKeyError
 from mdwiki.query import QueryError, query_wiki
 from mdwiki.rebuild import RebuildError, rebuild_wiki
 from mdwiki.rebuild_log import rebuild_log
@@ -230,6 +230,12 @@ def _run_bootstrap_batch(wiki_root: Path, *, yes: bool = False) -> int:
             on_progress=lambda i, total, cid: print(f"  [{i}/{total}] applying {cid}..."),
         )
     except (MissingAPIKeyError, UnknownProviderError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    # NOTE: batch-specific RuntimeErrors must be caught BEFORE _FATAL_API_ERRORS;
+    # they're not in that tuple, but listing them first guards against future
+    # additions accidentally reclassifying them through the generic branch.
+    except (BatchTimeoutError, BatchUnexpectedStatusError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except _FATAL_API_ERRORS as exc:

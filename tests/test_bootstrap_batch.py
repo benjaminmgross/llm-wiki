@@ -193,3 +193,73 @@ def test_bootstrap_batch_unparseable_response_counted_as_failed(tmp_path: Path, 
     # alpha = unparseable JSON (failed), beta = applied, gamma = invalid plan structure (failed)
     assert result.applied == 1
     assert result.failed == 2
+
+
+@pytest.mark.unit
+def test_cli_init_bootstrap_batch_handles_batch_timeout_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mocker: MockerFixture,
+) -> None:
+    """``mdwiki init --bootstrap-batch`` surfaces ``BatchTimeoutError`` as a friendly error.
+
+    Without the CLI catch, a 24h batch poll timeout would dump a RuntimeError
+    stack trace; the CLI must intercept it and print ``error: ...`` to stderr.
+    """
+    from mdwiki.cli import main
+    from mdwiki.llm.anthropic import BatchTimeoutError
+
+    (tmp_path / "a.md").write_text("# A\n\n## intro\n\nbody.\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    mocker.patch(
+        "mdwiki.llm.anthropic.AnthropicProvider.estimate_batch_cost",
+        return_value=BatchCostEstimate(requests=1, input_tokens=10, output_tokens_max=100, usd_total=0.01),
+    )
+    mocker.patch(
+        "mdwiki.llm.anthropic.AnthropicProvider.batch_complete",
+        side_effect=BatchTimeoutError(
+            "Batch batch_xyz did not finish within 24h (last status: 'in_progress')."
+        ),
+    )
+
+    exit_code = main(["init", "--bootstrap-batch", "--yes"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Batch batch_xyz" in captured.err
+    assert "error:" in captured.err
+
+
+@pytest.mark.unit
+def test_cli_init_bootstrap_batch_handles_unexpected_status_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mocker: MockerFixture,
+) -> None:
+    """``mdwiki init --bootstrap-batch`` surfaces ``BatchUnexpectedStatusError`` as a friendly error."""
+    from mdwiki.cli import main
+    from mdwiki.llm.anthropic import BatchUnexpectedStatusError
+
+    (tmp_path / "a.md").write_text("# A\n\n## intro\n\nbody.\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    mocker.patch(
+        "mdwiki.llm.anthropic.AnthropicProvider.estimate_batch_cost",
+        return_value=BatchCostEstimate(requests=1, input_tokens=10, output_tokens_max=100, usd_total=0.01),
+    )
+    mocker.patch(
+        "mdwiki.llm.anthropic.AnthropicProvider.batch_complete",
+        side_effect=BatchUnexpectedStatusError(
+            "Batch batch_abc entered status 'expired' — it will not produce applicable results."
+        ),
+    )
+
+    exit_code = main(["init", "--bootstrap-batch", "--yes"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "expired" in captured.err
+    assert "error:" in captured.err
