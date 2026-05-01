@@ -126,10 +126,19 @@ NOT meeting summaries.
 
 ## Lint policies
 
-- Pages with no inbound `cross_refs` are flagged as orphans
-- Meeting pages without a `meeting_date:` in frontmatter are flagged
-- Commitment pages without a named owner cross-ref are flagged
-- Decision pages without alternatives discussed are flagged for review
-- Person entities with 0 meeting cross-refs are flagged (orphan speaker)
+Transcripts-specific lint rules (kind-aware checks for `meeting`, `decision`,
+`commitment`, `person`) are deferred to a follow-up phase. For now, only the
+generic rules ship and run against transcripts wikis:
+
+- Pages with no inbound `cross_refs` are flagged as orphans (catches orphan
+  meetings, orphan person entities, orphan decisions)
 - Pages whose source files were modified after `last_touched_at` are flagged as stale
 - Broken cross-references (markdown link to a path that doesn't exist) are flagged
+- Sources marked `ingested` but with zero backrefs are flagged as `coverage-gap`
+- Pages containing the `[unverified-quote]` marker are flagged for review
+
+When transcripts-aware lint lands:
+- Meeting pages without a `meeting_date:` in frontmatter → `meeting_missing_date`
+- Commitment pages without a named owner cross-ref → `commitment_missing_owner`
+- Decision pages without alternatives discussed → `decision_missing_alternatives`
+- Person entities with 0 meeting cross-refs → `orphan_speaker`
