@@ -12,9 +12,11 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import openai
 import pytest
 from pytest_mock import MockerFixture
 
+from mdwiki.llm.anthropic import OutputTruncatedError
 from mdwiki.llm.base import BatchRequest, Message
 from mdwiki.llm.openai_compatible import OpenAICompatibleProvider
 
@@ -57,6 +59,34 @@ def test_complete_calls_openai_chat_completions(mocker: MockerFixture) -> None:
 
 
 @pytest.mark.unit
+def test_complete_raises_on_finish_reason_length() -> None:
+    """``finish_reason='length'`` mirrors Anthropic's ``stop_reason='max_tokens'`` and must raise.
+
+    A truncated response is almost certainly invalid JSON; raising forces the
+    caller to surface the issue rather than parse garbage.
+    """
+    provider, fake_client = _build_provider_with_mocked_client()
+    response = MagicMock()
+    response.choices = [
+        MagicMock(
+            finish_reason="length",
+            message=MagicMock(content='{"verdict":"ingest","ration'),
+        )
+    ]
+    fake_client.chat.completions.create.return_value = response
+
+    with pytest.raises(OutputTruncatedError) as excinfo:
+        provider.complete(
+            system="s",
+            messages=[Message(role="user", content="x")],
+            max_tokens=100,
+        )
+    msg = str(excinfo.value)
+    assert "100" in msg
+    assert "truncat" in msg.lower() or "length" in msg.lower()
+
+
+@pytest.mark.unit
 def test_ping_returns_ok_on_successful_call(mocker: MockerFixture) -> None:
     """``ping()`` issues a 1-token call and reports OK on success."""
     provider, fake_client = _build_provider_with_mocked_client()
@@ -80,6 +110,48 @@ def test_ping_returns_failure_on_connection_error(mocker: MockerFixture) -> None
     result = provider.ping()
     assert result.ok is False
     assert "could not connect" in result.message.lower() or "connect" in result.message.lower()
+
+
+def _make_openai_exc(exc_cls: type[Exception]) -> Exception:
+    """Construct an openai SDK exception with the kwargs each subclass requires.
+
+    AuthenticationError / NotFoundError / APIStatusError need ``response``+``body``;
+    APIConnectionError needs ``request``. Mirrors test_llm_anthropic.py's pattern.
+    """
+    if exc_cls is openai.APIConnectionError:
+        return exc_cls(request=MagicMock())
+    return exc_cls(message="boom", response=MagicMock(status_code=400, headers={}), body=None)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("exc_cls", "expected_keywords"),
+    [
+        (openai.AuthenticationError, ("auth",)),
+        (openai.NotFoundError, ("model", "not found")),
+        (openai.APIConnectionError, ("connect", "network")),
+        (openai.APIStatusError, ("api error", "status")),
+    ],
+)
+def test_ping_translates_specific_openai_errors_into_actionable_messages(
+    exc_cls: type[Exception], expected_keywords: tuple[str, ...]
+) -> None:
+    """Each narrow openai SDK exception yields a PingResult with the matching keyword.
+
+    Guards the ladder of specific ``except`` branches in ``OpenAICompatibleProvider.ping``
+    against silent re-routing (e.g. AuthenticationError subclasses APIStatusError, so
+    catching APIStatusError first would mask the auth-specific message).
+    """
+    provider, fake_client = _build_provider_with_mocked_client()
+    fake_client.chat.completions.create.side_effect = _make_openai_exc(exc_cls)
+
+    result = provider.ping()
+
+    assert result.ok is False
+    lower = result.message.lower()
+    assert any(kw in lower for kw in expected_keywords), (
+        f"expected one of {expected_keywords!r} in {result.message!r}"
+    )
 
 
 @pytest.mark.unit
