@@ -13,7 +13,6 @@ name = "framework"
 
 [profile.framework]
 extra_page_kinds = ["procedure", "template", "assessment", "learning"]
-# When set, every page write embeds previous_hash: in YAML frontmatter (the
-# default in v1.2; this flag exists so a future user could explicitly opt
-# out for compatibility with downstream tooling that doesn't expect frontmatter).
-version_chain_enabled = true
+# Note: every wiki/ page write embeds previous_hash: in YAML frontmatter
+# unconditionally in v1.2 (see src/mdwiki/version_chain.py). There is no
+# v1.2 opt-out knob; if one is added later, it will live here.
