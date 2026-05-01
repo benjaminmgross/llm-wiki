@@ -12,8 +12,51 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
+# Baseline page kinds always allowed by every profile. Extra kinds declared
+# by a profile's config-overlay (``[profile.<name>].extra_page_kinds``) are
+# unioned in by ``allowed_kinds_for_wiki()`` at plan-validation time. We keep
+# the baseline frozenset for callers that don't have a wiki context (e.g.
+# pure unit tests of ``parse_plan``) — those use the legacy validation.
 VALID_KINDS: frozenset[str] = frozenset({"entity", "concept", "synthesis"})
 VALID_BARE_VERDICTS: frozenset[str] = frozenset({"ingest", "low-quality", "out-of-scope"})
+
+
+def allowed_kinds_for_wiki(wiki_root: object) -> frozenset[str]:
+    """Return the union of baseline page kinds + the wiki's profile extras.
+
+    Reads ``.mdwiki/config.toml`` looking for ``[profile.<name>].extra_page_kinds``.
+    Returns ``VALID_KINDS`` unchanged when the config doesn't declare extras
+    (e.g. working-dir profile or a pre-Phase-2 wiki).
+
+    Parameters
+    ----------
+    wiki_root : Path-like
+        Directory containing ``.mdwiki/config.toml``. Typed as ``object`` to
+        avoid a circular import on ``pathlib.Path`` in modules that already
+        import this one.
+
+    Returns
+    -------
+    frozenset[str]
+        Allowed page kinds for plans validated against this wiki.
+    """
+    import tomllib
+    from pathlib import Path
+
+    config_path = Path(str(wiki_root)) / ".mdwiki" / "config.toml"
+    if not config_path.is_file():
+        return VALID_KINDS
+    try:
+        config = tomllib.loads(config_path.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return VALID_KINDS
+    profile_name = config.get("profile", {}).get("name")
+    if not profile_name:
+        return VALID_KINDS
+    extras = config.get("profile", {}).get(profile_name, {}).get("extra_page_kinds", [])
+    if not isinstance(extras, list):
+        return VALID_KINDS
+    return frozenset(VALID_KINDS | {str(k) for k in extras})
 
 # Page paths the LLM proposes must be confined to wiki/. Anything else
 # (.mdwiki/config.toml, raw/<hash>.md, /etc/passwd) is rejected at parse time
@@ -90,7 +133,7 @@ class Plan:
         return not (self.updates or self.new_pages or self.cross_refs)
 
 
-def parse_plan(raw_json: str) -> Plan:
+def parse_plan(raw_json: str, *, allowed_kinds: frozenset[str] | None = None) -> Plan:
     """Parse the LLM's JSON response into a typed ``Plan``.
 
     Tolerates the model occasionally wrapping the JSON in markdown code fences
@@ -101,12 +144,20 @@ def parse_plan(raw_json: str) -> Plan:
     ----------
     raw_json : str
         The raw text the LLM produced.
+    allowed_kinds : frozenset[str], optional
+        Page kinds permitted in ``new_pages[].kind``. Defaults to ``VALID_KINDS``
+        (entity / concept / synthesis). Profile-aware callers should pass the
+        result of ``allowed_kinds_for_wiki(wiki_root)`` so profile-declared
+        extras (e.g. framework's ``procedure``/``template``/``assessment``/
+        ``learning``) are accepted.
 
     Raises
     ------
     PlanValidationError
         If the JSON is malformed or any required structure is missing or invalid.
     """
+    if allowed_kinds is None:
+        allowed_kinds = VALID_KINDS
     cleaned = _extract_json_object(raw_json)
     try:
         payload: Any = json.loads(cleaned)
@@ -120,7 +171,7 @@ def parse_plan(raw_json: str) -> Plan:
 
     rationale = _require(payload, "rationale", str)
     updates = tuple(_parse_update(u) for u in _require(payload, "updates", list))
-    new_pages = tuple(_parse_new_page(p) for p in _require(payload, "new_pages", list))
+    new_pages = tuple(_parse_new_page(p, allowed_kinds=allowed_kinds) for p in _require(payload, "new_pages", list))
     cross_refs = tuple(_parse_cross_ref(r) for r in _require(payload, "cross_refs", list))
 
     if verdict != "ingest" and (updates or new_pages or cross_refs):
@@ -204,12 +255,12 @@ def _parse_update(raw: Any) -> Update:
     )
 
 
-def _parse_new_page(raw: Any) -> NewPage:
+def _parse_new_page(raw: Any, *, allowed_kinds: frozenset[str] = VALID_KINDS) -> NewPage:
     if not isinstance(raw, dict):
         raise PlanValidationError(f"Expected new_page object, got {type(raw).__name__}.")
     kind = _require(raw, "kind", str)
-    if kind not in VALID_KINDS:
-        raise PlanValidationError(f"Invalid page kind {kind!r}. Must be one of {sorted(VALID_KINDS)}.")
+    if kind not in allowed_kinds:
+        raise PlanValidationError(f"Invalid page kind {kind!r}. Must be one of {sorted(allowed_kinds)}.")
     return NewPage(
         path=_require(raw, "path", str),
         kind=kind,

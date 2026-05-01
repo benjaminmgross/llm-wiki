@@ -282,7 +282,13 @@ def test_ingest_update_replaces_entire_page_content(wiki_with_one_source: Path, 
     ingest_source(wiki_with_one_source, "ai.md", yes=True)
 
     body = page.read_text()
-    assert body == "# Attention\n\nfully revised page body"
+    # Phase 4 (page version chain): wiki page overwrites embed previous_hash:
+    # in YAML frontmatter linking back to the prior body. Assert the chain is
+    # set AND the body content matches expected when frontmatter is stripped.
+    from mdwiki.version_chain import extract_previous_hash, strip_frontmatter
+
+    assert extract_previous_hash(body) is not None, "expected previous_hash chain"
+    assert strip_frontmatter(body) == "# Attention\n\nfully revised page body"
     assert "old body that must be removed" not in body
 
 

@@ -19,6 +19,9 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         "embeddings",
         "transactions",
         "transaction_inverses",
+        # Phase 5 — Q1 quality compounding.
+        "rejections",
+        "cost_ledger",
     }
 )
 
@@ -35,9 +38,15 @@ CREATE TABLE IF NOT EXISTS sources (
 
 CREATE TABLE IF NOT EXISTS pages (
     path            TEXT PRIMARY KEY,
-    kind            TEXT NOT NULL CHECK (kind IN ('entity', 'concept', 'synthesis', 'index', 'log')),
+    kind            TEXT NOT NULL,
     embedding       BLOB,
     last_touched_at REAL NOT NULL
+    -- Page kind allowlist is enforced at the app layer by
+    -- ``mdwiki.plan.allowed_kinds_for_wiki()``, which unions baseline kinds
+    -- with the extras declared by the active profile in
+    -- ``.mdwiki/config.toml``. The previous DB-level CHECK constraint was
+    -- removed in Phase 5 to support corpus-aware profiles (initiative,
+    -- transcripts, framework) without per-profile schema migrations.
 );
 
 CREATE TABLE IF NOT EXISTS backrefs (
@@ -84,6 +93,34 @@ CREATE TABLE IF NOT EXISTS transaction_inverses (
     params_json     TEXT NOT NULL DEFAULT '[]',
     FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
 );
+
+-- Phase 5: rejection memory. Every plan rejection (verdict-based or quote-
+-- anchor failure) records a row here so subsequent ingests of the same source
+-- can inject prior reasons into the prompt.
+CREATE TABLE IF NOT EXISTS rejections (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id   TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    verdict     TEXT,
+    ts          REAL NOT NULL,
+    FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_rejections_source ON rejections(source_id);
+CREATE INDEX IF NOT EXISTS idx_rejections_ts ON rejections(ts);
+
+-- Phase 5: cost ledger. Every LLM call appends a row; the daily budget cap
+-- (config.toml [cost_guard].daily_budget_usd) is enforced by check_budget().
+CREATE TABLE IF NOT EXISTS cost_ledger (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL NOT NULL,
+    operation   TEXT NOT NULL,
+    tokens_in   INTEGER,
+    tokens_out  INTEGER,
+    cost_usd    REAL NOT NULL,
+    source_id   TEXT,
+    FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cost_ledger_ts ON cost_ledger(ts);
 """
 
 
@@ -130,6 +167,33 @@ def _apply_inline_migrations(conn) -> None:
             # SQL) must still surface.
             if "duplicate column" not in str(exc).lower():
                 raise
+
+    # Phase 5: drop the legacy ``pages.kind`` CHECK constraint so corpus-aware
+    # profiles (initiative, transcripts, framework) can write profile-specific
+    # page kinds. Page-kind validation now lives in the app layer
+    # (``mdwiki.plan.allowed_kinds_for_wiki``). SQLite has no
+    # ``ALTER TABLE DROP CONSTRAINT`` until very recent versions, so the
+    # standard portable pattern is rebuild-via-temp-table.
+    pages_sql_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='pages'"
+    ).fetchone()
+    if pages_sql_row is not None and "CHECK" in (pages_sql_row[0] or ""):
+        conn.executescript(
+            """
+            BEGIN;
+            CREATE TABLE pages_new (
+                path            TEXT PRIMARY KEY,
+                kind            TEXT NOT NULL,
+                embedding       BLOB,
+                last_touched_at REAL NOT NULL
+            );
+            INSERT INTO pages_new (path, kind, embedding, last_touched_at)
+                SELECT path, kind, embedding, last_touched_at FROM pages;
+            DROP TABLE pages;
+            ALTER TABLE pages_new RENAME TO pages;
+            COMMIT;
+            """
+        )
 
 
 def connect(db_path: Path) -> sqlite3.Connection:

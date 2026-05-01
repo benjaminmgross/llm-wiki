@@ -1,0 +1,20 @@
+# Transcripts profile config overlay.
+#
+# Tunes mdwiki for dense low-signal-density speaker-turn corpora.
+
+[ingest]
+# Transcripts ingestion benefits from MORE candidate pages, because a single
+# meeting can touch many existing person entities + concept pages. The
+# default of 8 risks the LLM creating duplicate person pages for speakers
+# already in the wiki.
+candidate_top_k = 16
+
+[profile]
+name = "transcripts"
+
+[profile.transcripts]
+extra_page_kinds = ["meeting", "decision", "commitment", "blocker", "person"]
+# When set, quote-anchor verification runs in transcripts mode (strips
+# [HH:MM:SS] timestamps and Speaker: prefixes) — required for verbatim
+# quotes that don't include the speaker attribution.
+quote_normalize_mode = "transcripts"

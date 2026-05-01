@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mdwiki"
-version = "1.1.0"
+version = "1.2.0"
 description = "A folder-local CLI that turns any directory of markdown into an LLM-maintained wiki (Karpathy llm-wiki pattern)"
 readme = "README.md"
 license = {text = "MIT"}

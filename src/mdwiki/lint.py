@@ -65,6 +65,7 @@ def lint_wiki(wiki_root: Path) -> LintReport:
     findings.extend(_check_orphans(wiki_root))
     findings.extend(_check_stale_pages(wiki_root))
     findings.extend(_check_coverage_gaps(wiki_root))
+    findings.extend(_check_unverified_quotes(wiki_root))
 
     _record_lint_event(wiki_root, findings_count=len(findings))
 
@@ -164,6 +165,39 @@ def _check_stale_pages(wiki_root: Path) -> list[LintFinding]:
                 page_path=row["page_path"],
                 message=f"source modified after page (page touched {row['page_ts']:.0f}, source {row['source_mtime']:.0f})",
                 severity="info",
+            )
+        )
+    return findings
+
+
+_UNVERIFIED_QUOTE_MARKER: str = "[unverified-quote]"
+
+
+def _check_unverified_quotes(wiki_root: Path) -> list[LintFinding]:
+    """Pages containing the ``[unverified-quote]`` marker.
+
+    The marker is inserted by ingest in lenient quote-anchor mode (an opt-in
+    config flag, defaults off): when a claim's quote can't be verbatim-anchored
+    in the source, the claim survives in the page with this marker rather than
+    rejecting the entire plan. The lint check surfaces these so the user can
+    remove or replace the unverified content. Borrowed from OmegaWiki's
+    ``UNCONFIRMED_`` BibTeX-key fail-closed pattern (see research doc).
+    """
+    findings: list[LintFinding] = []
+    for page in _iter_wiki_pages(wiki_root):
+        text = page.read_text()
+        if _UNVERIFIED_QUOTE_MARKER not in text:
+            continue
+        rel = page.relative_to(wiki_root).as_posix()
+        # Count occurrences for the message; finer-grained line-level info
+        # is left to a future ``mdwiki lint --fix`` interactive flow.
+        occurrences = text.count(_UNVERIFIED_QUOTE_MARKER)
+        findings.append(
+            LintFinding(
+                kind="unverified_quote",
+                page_path=rel,
+                message=f"contains {occurrences} unverified-quote marker(s); review or remove",
+                severity="warn",
             )
         )
     return findings

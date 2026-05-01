@@ -28,6 +28,7 @@ from mdwiki.loaders.image import ImageLoader
 from mdwiki.loaders.markdown import MarkdownLoader
 from mdwiki.loaders.pdf import PdfLoader
 from mdwiki.loaders.text import TextLoader
+from mdwiki.loaders.transcript import TranscriptLoader
 
 __all__ = [
     "CodeLoader",
@@ -39,6 +40,7 @@ __all__ = [
     "MarkdownLoader",
     "PdfLoader",
     "TextLoader",
+    "TranscriptLoader",
     "UnsupportedFiletypeError",
     "build_registry",
     "get_loader_for",
@@ -76,7 +78,14 @@ def build_registry(
     image_enabled = bool(loaders_cfg.get("image", {}).get("enabled", False))
     pdf_vision = bool(loaders_cfg.get("pdf", {}).get("vision_fallback", False))
 
+    # TranscriptLoader is listed BEFORE MarkdownLoader so a ``*-transcript.md``
+    # file routes to TranscriptLoader (which promotes Fathom-style speaker
+    # blocks to H2) instead of falling through to passthrough markdown
+    # handling. ``.vtt`` and ``.srt`` are exclusively TranscriptLoader's;
+    # plain ``.md`` without a transcript filename hint still goes to
+    # MarkdownLoader.
     loaders: list[Loader] = [
+        TranscriptLoader(),
         MarkdownLoader(),
         CodeLoader(),
         CsvLoader(),

@@ -106,18 +106,42 @@ class IngestTransaction:
 
         Snapshots the previous file (or marks the path for deletion if new)
         so rollback can undo the change.
+
+        For paths under ``wiki/`` (i.e. wiki page writes), the prior body's
+        SHA-256 hash is automatically embedded into the new content's YAML
+        frontmatter as ``previous_hash:``, building a tamper-evident page
+        version chain (see ``version_chain.py``). Non-wiki writes pass through
+        unchanged.
         """
         path = path.resolve()
         rel = path.relative_to(self._wiki_root.resolve())
 
+        prev_body: str | None = None
         if path.exists():
             snapshot_target = self._undo_dir / rel
             snapshot_target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, snapshot_target)
+            # Snapshot already on disk — read for the version chain BEFORE
+            # the os.replace below clobbers the file.
+            if _is_wiki_page(rel):
+                try:
+                    prev_body = path.read_text()
+                except OSError:
+                    prev_body = None
         else:
             marker = self._undo_dir / DELETION_MARKER_DIR / rel
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text("")
+
+        # Embed previous_hash for wiki/ pages. New pages get a "genesis"
+        # marker (no previous_hash key) — a missing key is itself meaningful
+        # ("this is the first version").
+        if _is_wiki_page(rel) and prev_body is not None:
+            from mdwiki.version_chain import compute_body_hash, embed_previous_hash
+
+            content = embed_previous_hash(
+                body=content, previous_hash=compute_body_hash(prev_body)
+            )
 
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_name(f"{path.name}.tmp-{self._tx_id}")
@@ -279,3 +303,21 @@ def _iso_utc(ts: float) -> str:
     from datetime import UTC, datetime
 
     return datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _is_wiki_page(rel: Path) -> bool:
+    """Return True when ``rel`` (relative to wiki_root) names a wiki page eligible for version-chain embedding.
+
+    Pages live under ``wiki/`` and are markdown. We deliberately exclude the
+    auto-generated ``wiki/log.md`` and ``wiki/index.md`` because their format
+    is line-oriented / catalog-style respectively, and embedding YAML
+    frontmatter would corrupt them.
+    """
+    if not rel.parts or rel.parts[0] != "wiki":
+        return False
+    if rel.suffix.lower() not in {".md", ".markdown"}:
+        return False
+    name = rel.name.lower()
+    if name in {"log.md", "index.md"}:
+        return False
+    return True
