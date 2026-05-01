@@ -188,8 +188,14 @@ def _apply_inline_migrations(conn) -> None:
     if pages_sql_row is not None and "CHECK" in (pages_sql_row[0] or ""):
         conn.execute("PRAGMA foreign_keys = OFF")
         try:
+            # ``DROP TABLE IF EXISTS pages_new`` runs OUTSIDE the BEGIN so a
+            # prior crash that left ``pages_new`` on disk (SIGKILL or
+            # disk-full mid-script with original ``pages`` intact) doesn't
+            # turn the next migration into "table pages_new already exists"
+            # and lock the user out of the wiki on every subsequent open.
             conn.executescript(
                 """
+                DROP TABLE IF EXISTS pages_new;
                 BEGIN;
                 CREATE TABLE pages_new (
                     path            TEXT PRIMARY KEY,
