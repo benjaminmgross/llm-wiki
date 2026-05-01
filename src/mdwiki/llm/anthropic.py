@@ -33,6 +33,8 @@ from mdwiki.llm.base import (
 
 # Anthropic Sonnet 4.6 pricing (USD per million tokens). Batch API discount is 50%.
 # Source: https://www.anthropic.com/pricing
+# Last verified: 2026-04-30. TODO: re-check annually — these are hardcoded and
+# will silently drift if Anthropic adjusts list pricing.
 _SONNET_INPUT_USD_PER_MTOK: float = 3.0
 _SONNET_OUTPUT_USD_PER_MTOK: float = 15.0
 _BATCH_DISCOUNT: float = 0.5
