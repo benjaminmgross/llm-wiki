@@ -31,7 +31,7 @@ def test_lint_flags_page_with_unverified_quote_marker(tmp_path: Path) -> None:
 
     report = lint_wiki(tmp_path)
 
-    findings = [f for f in report.findings if f.kind == "unverified_quote"]
+    findings = [f for f in report.findings if f.kind == "unverified-quote"]
     assert len(findings) == 1
     assert findings[0].page_path == "wiki/concepts/foo.md"
 
@@ -46,7 +46,7 @@ def test_lint_does_not_flag_pages_without_marker(tmp_path: Path) -> None:
 
     report = lint_wiki(tmp_path)
 
-    findings = [f for f in report.findings if f.kind == "unverified_quote"]
+    findings = [f for f in report.findings if f.kind == "unverified-quote"]
     assert findings == []
 
 
@@ -61,5 +61,5 @@ def test_lint_flags_all_pages_with_marker(tmp_path: Path) -> None:
 
     report = lint_wiki(tmp_path)
 
-    findings = [f for f in report.findings if f.kind == "unverified_quote"]
+    findings = [f for f in report.findings if f.kind == "unverified-quote"]
     assert len(findings) == 3

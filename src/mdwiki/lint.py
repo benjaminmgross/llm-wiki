@@ -194,7 +194,7 @@ def _check_unverified_quotes(wiki_root: Path) -> list[LintFinding]:
         occurrences = text.count(_UNVERIFIED_QUOTE_MARKER)
         findings.append(
             LintFinding(
-                kind="unverified_quote",
+                kind="unverified-quote",
                 page_path=rel,
                 message=f"contains {occurrences} unverified-quote marker(s); review or remove",
                 severity="warn",
