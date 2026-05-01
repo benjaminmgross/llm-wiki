@@ -233,6 +233,33 @@ def test_cli_init_bootstrap_batch_handles_batch_timeout_error(
 
 
 @pytest.mark.unit
+def test_cli_init_bootstrap_batch_surfaces_provider_config_value_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mocker: MockerFixture,
+) -> None:
+    """A ValueError from build_provider_from_config (e.g. missing base_url) → friendly stderr."""
+    from mdwiki.cli import main
+
+    (tmp_path / "a.md").write_text("# A\n\n## intro\n\nbody.\n")
+    monkeypatch.chdir(tmp_path)
+    mocker.patch(
+        "mdwiki.bootstrap.build_provider_from_config",
+        side_effect=ValueError(
+            "provider 'openai-compatible' requires [llm.openai_compatible].base_url"
+        ),
+    )
+
+    exit_code = main(["init", "--bootstrap-batch", "--yes"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "provider config invalid" in captured.err
+    assert "base_url" in captured.err
+
+
+@pytest.mark.unit
 def test_cli_init_bootstrap_batch_handles_unexpected_status_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

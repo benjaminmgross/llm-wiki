@@ -209,6 +209,12 @@ def _cmd_init(args: argparse.Namespace) -> int:
     except (MissingAPIKeyError, UnknownProviderError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except ValueError as exc:
+        # _build_openai_compatible raises ValueError for missing required keys
+        # (e.g. base_url). UnknownProviderError is a ValueError subclass but is
+        # caught above first, so this branch is reserved for config-shape errors.
+        print(f"error: provider config invalid — {exc}", file=sys.stderr)
+        return 1
     except _FATAL_API_ERRORS as exc:
         print(_fatal_api_error_message(exc), file=sys.stderr)
         return 1
@@ -231,6 +237,12 @@ def _run_bootstrap_batch(wiki_root: Path, *, yes: bool = False) -> int:
         )
     except (MissingAPIKeyError, UnknownProviderError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        # _build_openai_compatible raises ValueError for missing required keys
+        # (e.g. base_url). UnknownProviderError is a ValueError subclass but is
+        # caught above first, so this branch is reserved for config-shape errors.
+        print(f"error: provider config invalid — {exc}", file=sys.stderr)
         return 1
     # NOTE: batch-specific RuntimeErrors must be caught BEFORE _FATAL_API_ERRORS;
     # they're not in that tuple, but listing them first guards against future
