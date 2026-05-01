@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import anthropic
+import openai
 
 from mdwiki import __version__
 from mdwiki.discover import WikiNotFound, find_wiki
@@ -30,6 +31,24 @@ from mdwiki.source import find_matching_sources, format_disambiguation, format_s
 from mdwiki.status import format_status, get_status
 from mdwiki.synthesize import SynthesisError, synthesize_auto, synthesize_topic
 from mdwiki.undo import UndoError, undo_last
+
+# Fatal API errors signal a config problem (bad key, wrong model id, unreachable
+# endpoint) — they're identical for every source so the CLI surfaces ONE friendly
+# message rather than a per-source stack trace. Both Anthropic and OpenAI-compatible
+# errors are caught everywhere a provider call can be made.
+_FATAL_ANTHROPIC_ERRORS: tuple[type[Exception], ...] = (
+    anthropic.AuthenticationError,
+    anthropic.NotFoundError,
+)
+_FATAL_OPENAI_ERRORS: tuple[type[Exception], ...] = (
+    openai.AuthenticationError,
+    openai.NotFoundError,
+    openai.APIConnectionError,
+    openai.APITimeoutError,
+    openai.RateLimitError,
+    openai.APIStatusError,
+)
+_FATAL_API_ERRORS: tuple[type[Exception], ...] = _FATAL_ANTHROPIC_ERRORS + _FATAL_OPENAI_ERRORS
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -184,7 +203,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
     except (MissingAPIKeyError, UnknownProviderError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except (anthropic.AuthenticationError, anthropic.NotFoundError) as exc:
+    except _FATAL_API_ERRORS as exc:
         print(_fatal_api_error_message(exc), file=sys.stderr)
         return 1
     applied = sum(1 for r in ingest_results if r.applied)
@@ -207,7 +226,7 @@ def _run_bootstrap_batch(wiki_root: Path) -> int:
     except (MissingAPIKeyError, UnknownProviderError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except (anthropic.AuthenticationError, anthropic.NotFoundError) as exc:
+    except _FATAL_API_ERRORS as exc:
         print(_fatal_api_error_message(exc), file=sys.stderr)
         return 1
 
@@ -301,7 +320,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         except (MissingAPIKeyError, UnknownProviderError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-        except (anthropic.AuthenticationError, anthropic.NotFoundError) as exc:
+        except _FATAL_API_ERRORS as exc:
             print(_fatal_api_error_message(exc), file=sys.stderr)
             return 1
         applied = sum(1 for r in results if r.applied)
@@ -323,7 +342,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     except UnknownProviderError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except (anthropic.AuthenticationError, anthropic.NotFoundError) as exc:
+    except _FATAL_API_ERRORS as exc:
         print(_fatal_api_error_message(exc), file=sys.stderr)
         return 1
     print(result.message)
@@ -347,6 +366,9 @@ def _cmd_query(args: argparse.Namespace) -> int:
         return 1
     except UnknownProviderError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except _FATAL_API_ERRORS as exc:
+        print(_fatal_api_error_message(exc), file=sys.stderr)
         return 1
 
     print(result.answer)
@@ -442,6 +464,9 @@ def _cmd_synthesize(args: argparse.Namespace) -> int:
     except UnknownProviderError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except _FATAL_API_ERRORS as exc:
+        print(_fatal_api_error_message(exc), file=sys.stderr)
+        return 1
 
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:
@@ -459,17 +484,22 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     except UnknownProviderError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except _FATAL_API_ERRORS as exc:
+        print(_fatal_api_error_message(exc), file=sys.stderr)
+        return 1
     print(format_report(report))
     return 0 if report.api_ok else 1
 
 
 def _fatal_api_error_message(exc: Exception) -> str:
-    """Render a user-friendly message for fatal Anthropic API errors.
+    """Render a user-friendly message for fatal LLM-API errors.
 
-    These errors (auth/not-found) signal a config problem: a bad API key, a
-    typo'd model id, or insufficient permissions. They're identical for every
-    source, so ``ingest_many`` propagates them rather than swallowing per-source
-    failures and the CLI prints one clear "fix your config" message.
+    These errors (auth/not-found/connection/rate-limit/timeout/status) signal a
+    config problem: bad API key, typo'd model id, unreachable endpoint, etc.
+    They're identical for every source, so ``ingest_many`` propagates them and
+    the CLI prints one clear "fix your config" message rather than dumping a
+    stack trace per source. Both Anthropic and OpenAI-compatible errors are
+    handled here so the message is symmetric across providers.
     """
     if isinstance(exc, anthropic.AuthenticationError):
         return (
@@ -481,5 +511,39 @@ def _fatal_api_error_message(exc: Exception) -> str:
             f"error: Anthropic API returned 'not found' ({exc}). "
             "Likely cause: the model id in .mdwiki/config.toml ([llm] model = ...) "
             "is misspelled or has been retired. Update it and re-run."
+        )
+    if isinstance(exc, openai.AuthenticationError):
+        return (
+            f"error: OpenAI-compatible endpoint rejected the credentials ({exc}). "
+            "Check the api_key under [llm.openai_compatible] in .mdwiki/config.toml "
+            "(or the env var your endpoint expects) and re-run."
+        )
+    if isinstance(exc, openai.NotFoundError):
+        return (
+            f"error: OpenAI-compatible endpoint returned 'not found' ({exc}). "
+            "Likely cause: the model id under [llm.openai_compatible] doesn't match "
+            "what the server is serving, or the base_url path is wrong. Update it and re-run."
+        )
+    if isinstance(exc, openai.APIConnectionError):
+        return (
+            f"error: could not reach the OpenAI-compatible endpoint ({exc}). "
+            "Verify base_url under [llm.openai_compatible] points at a running server "
+            "(e.g. vLLM, llama.cpp) and that the host is reachable."
+        )
+    if isinstance(exc, openai.APITimeoutError):
+        return (
+            f"error: OpenAI-compatible request timed out ({exc}). "
+            "The endpoint may be overloaded; retry, or raise the client timeout."
+        )
+    if isinstance(exc, openai.RateLimitError):
+        return (
+            f"error: OpenAI-compatible endpoint rate-limited the request ({exc}). "
+            "Wait and retry, or check your provider's rate-limit settings."
+        )
+    if isinstance(exc, openai.APIStatusError):
+        return (
+            f"error: OpenAI-compatible endpoint returned an API error "
+            f"(status {getattr(exc, 'status_code', '?')}): {exc}. "
+            "Check the server logs and your config under [llm.openai_compatible]."
         )
     return f"error: {exc}"
