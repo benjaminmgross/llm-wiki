@@ -10,6 +10,14 @@ Phase 4 ships these pure functions plus the ``transaction.write_file`` wiring
 that calls them automatically for files under ``wiki/``. CLI surface
 (``mdwiki history <page>``) is deferred to a later phase.
 
+Genesis on delete + recreate: ``transaction.write_file`` keys the chain off
+``path.exists()``. If a wiki page is deleted (e.g. via ``mdwiki undo``) and
+later re-created at the same path, the new version is treated as a fresh
+genesis (no ``previous_hash:`` key) — the chain does NOT span the gap. The
+``transactions``/``transaction_inverses`` tables retain the prior history
+for audit, but downstream tooling that walks the on-disk chain should not
+assume monotonic continuity across deletions.
+
 Borrows the pattern from latebit-io/demarkus's ``previous-hash`` chain
 (``server/internal/store/store.go:1107-1124``); see the research doc for
 context.
