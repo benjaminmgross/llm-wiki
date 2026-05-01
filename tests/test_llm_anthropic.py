@@ -380,6 +380,67 @@ def test_batch_complete_decodes_errored_results(mocker: MockerFixture) -> None:
 
 
 @pytest.mark.unit
+def test_batch_complete_raises_timeout_when_deadline_elapses(mocker: MockerFixture) -> None:
+    """When the wall-clock deadline elapses while polling, raise ``BatchTimeoutError``.
+
+    Mocks ``time.monotonic`` to advance past the 24h deadline on the second call
+    so the polling loop hits the timeout branch deterministically without sleeping.
+    """
+    from mdwiki.llm.anthropic import BatchTimeoutError
+    from mdwiki.llm.base import BatchRequest
+
+    provider, fake_client = _build_batch_provider()
+    fake_client.messages.batches.create.return_value = MagicMock(
+        id="batch_timeout", processing_status="in_progress"
+    )
+    # Always in-progress — never reaches "ended", so deadline check trips.
+    fake_client.messages.batches.retrieve.return_value = MagicMock(
+        id="batch_timeout",
+        processing_status="in_progress",
+        request_counts=MagicMock(succeeded=0),
+    )
+    # First call sets ``deadline`` (start + 24h). Subsequent calls in the loop
+    # body return a value past the deadline so the timeout branch fires.
+    mocker.patch(
+        "mdwiki.llm.anthropic.time.monotonic",
+        side_effect=[0.0, 1e9, 1e9, 1e9],
+    )
+    mocker.patch("mdwiki.llm.anthropic.time.sleep", return_value=None)
+
+    requests = [BatchRequest(custom_id="src-a", system="s", messages=[Message(role="user", content="p")])]
+    with pytest.raises(BatchTimeoutError) as excinfo:
+        provider.batch_complete(requests, poll_interval=0.0)
+    assert "batch_timeout" in str(excinfo.value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status", ["canceling", "canceled", "expired", "errored"])
+def test_batch_complete_raises_on_terminal_abnormal_status(
+    mocker: MockerFixture, status: str
+) -> None:
+    """Terminal/abnormal statuses (canceling, canceled, expired, errored) raise ``BatchUnexpectedStatusError``."""
+    from mdwiki.llm.anthropic import BatchUnexpectedStatusError
+    from mdwiki.llm.base import BatchRequest
+
+    provider, fake_client = _build_batch_provider()
+    fake_client.messages.batches.create.return_value = MagicMock(
+        id="batch_abnormal", processing_status=status
+    )
+    fake_client.messages.batches.retrieve.return_value = MagicMock(
+        id="batch_abnormal",
+        processing_status=status,
+        request_counts=MagicMock(succeeded=0),
+    )
+
+    requests = [BatchRequest(custom_id="src-a", system="s", messages=[Message(role="user", content="p")])]
+    with pytest.raises(BatchUnexpectedStatusError) as excinfo:
+        provider.batch_complete(requests, poll_interval=0.0)
+    msg = str(excinfo.value)
+    assert "batch_abnormal" in msg
+    assert status in msg
+
+
+@pytest.mark.unit
 def test_estimate_batch_cost_uses_chars_per_token_heuristic() -> None:
     """Cost estimate scales linearly with prompt char count + max_tokens × Sonnet batch rates."""
     from mdwiki.llm.base import BatchRequest
