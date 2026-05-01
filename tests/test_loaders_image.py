@@ -62,8 +62,14 @@ def test_get_loader_for_image_disabled_by_default(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_get_loader_for_image_enabled_via_config(tmp_path: Path) -> None:
-    """A wiki whose ``config.toml`` sets [loaders.image].enabled = true routes images to ImageLoader."""
+def test_get_loader_for_image_enabled_in_config_still_unsupported_without_provider(tmp_path: Path) -> None:
+    """Even with [loaders.image].enabled = true, ``get_loader_for`` (no provider) keeps images unsupported.
+
+    The factory only registers ``ImageLoader`` when both the config opts in AND
+    a vision-capable provider is supplied. ``get_loader_for`` never injects a
+    provider, so images stay UnsupportedFiletypeError — callers needing image
+    loading must switch to ``build_registry(provider=...)``.
+    """
     wiki_dir = tmp_path / ".mdwiki"
     wiki_dir.mkdir()
     config = {"loaders": {"image": {"enabled": True}}, "llm": {"provider": "anthropic", "model": "x"}}
@@ -71,8 +77,22 @@ def test_get_loader_for_image_enabled_via_config(tmp_path: Path) -> None:
 
     src = tmp_path / "x.png"
     src.write_bytes(b"\x89PNG")
-    loader = get_loader_for(src)
-    assert isinstance(loader, ImageLoader)
+    with pytest.raises(UnsupportedFiletypeError):
+        get_loader_for(src)
+
+
+@pytest.mark.unit
+def test_build_registry_image_enabled_with_provider_registers_image_loader(tmp_path: Path) -> None:
+    """``build_registry(config=..., provider=fake)`` with image enabled registers a usable ImageLoader."""
+    from unittest.mock import MagicMock
+
+    from mdwiki.loaders import build_registry
+
+    fake_provider = MagicMock()
+    config = {"loaders": {"image": {"enabled": True}}}
+    registry = build_registry(config=config, provider=fake_provider)
+    image_loaders = [loader for loader in registry if isinstance(loader, ImageLoader)]
+    assert len(image_loaders) == 1
 
 
 @pytest.mark.unit

@@ -85,7 +85,12 @@ def build_registry(
         HtmlLoader(),
         TextLoader(),
     ]
-    if image_enabled:
+    # Only register ImageLoader when both the config opts in AND a real provider
+    # is available. Without a provider the loader's ``can_handle`` would still
+    # claim the file but ``load_to_markdown`` would blow up at call time —
+    # surprising behavior we'd rather avoid by leaving images "unsupported"
+    # until the user wires up a vision-capable provider.
+    if image_enabled and provider is not None:
         loaders.append(ImageLoader(provider=provider))
     return tuple(loaders)
 
@@ -95,9 +100,10 @@ def get_loader_for(path: Path) -> Loader:
 
     Walks up from ``path`` looking for ``.mdwiki/config.toml``; uses defaults
     (image disabled, pdf vision_fallback disabled) when no wiki ancestor exists.
-    The returned ``ImageLoader`` (when enabled) has no provider injected — callers
-    that need to actually call ``load_to_markdown`` on an image must use
-    ``build_registry(provider=...)`` instead.
+    No provider is injected here, so ``ImageLoader`` is NOT registered even
+    when ``[loaders.image].enabled = true`` in config — image inputs route to
+    ``UnsupportedFiletypeError`` until the caller switches to
+    ``build_registry(config=..., provider=...)`` with a vision-capable provider.
 
     Raises
     ------
