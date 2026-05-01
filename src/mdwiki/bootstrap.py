@@ -36,7 +36,7 @@ from mdwiki.llm.base import (
 )
 from mdwiki.plan import PlanValidationError, allowed_kinds_for_wiki, parse_plan
 from mdwiki.prompts import INGEST_SYSTEM_PROMPT, build_ingest_user_prompt
-from mdwiki.quote import verify_plan
+from mdwiki.quote import quote_normalize_mode_for_wiki, verify_plan
 from mdwiki.state import connect
 from mdwiki.transaction import IngestTransaction
 
@@ -252,7 +252,12 @@ def _apply_one_result(
     except PlanValidationError:
         return "failed"
 
-    verification = verify_plan(plan, source_text=context.source_text, section_ids=context.section_ids)
+    verification = verify_plan(
+        plan,
+        source_text=context.source_text,
+        section_ids=context.section_ids,
+        mode=quote_normalize_mode_for_wiki(wiki_root),
+    )
     if not verification.valid:
         return "failed"
 

@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from mdwiki.plan import Claim, Plan
+
+VALID_NORMALIZE_MODES: frozenset[str] = frozenset({"default", "transcripts"})
 
 MIN_QUOTE_WORDS: int = 4
 
@@ -33,7 +36,13 @@ class QuoteVerificationResult:
     errors: tuple[ClaimError, ...]
 
 
-def verify_plan(plan: Plan, *, source_text: str, section_ids: set[str]) -> QuoteVerificationResult:
+def verify_plan(
+    plan: Plan,
+    *,
+    source_text: str,
+    section_ids: set[str],
+    mode: str = "default",
+) -> QuoteVerificationResult:
     """Check every claim against the source.
 
     Section ids are also normalized before comparison — the LLM strips markdown
@@ -48,8 +57,16 @@ def verify_plan(plan: Plan, *, source_text: str, section_ids: set[str]) -> Quote
         The raw text of the source being ingested.
     section_ids : set[str]
         The set of valid section ids the LLM is allowed to cite.
+    mode : str, default "default"
+        Normalization mode applied to BOTH source and quote text. ``"default"``
+        is the legacy prose-aware normalization. ``"transcripts"`` additionally
+        strips ``[HH:MM:SS]``/``[HH:MM]`` timestamps and ``Speaker Name:``
+        line prefixes so a quote extracted mid-utterance still anchors when
+        the source has speaker attribution prepended. Section-id normalization
+        always uses ``"default"`` — section ids are headings, not transcript
+        lines.
     """
-    normalized_source = _normalize(source_text)
+    normalized_source = _normalize(source_text, mode=mode)
     normalized_section_ids = {_normalize(sid) for sid in section_ids}
     errors: list[ClaimError] = []
 
@@ -62,7 +79,7 @@ def verify_plan(plan: Plan, *, source_text: str, section_ids: set[str]) -> Quote
                 ClaimError(claim=claim, message=f"quote too short ({len(claim.quote.split())} words; minimum {MIN_QUOTE_WORDS})")
             )
             continue
-        if _normalize(claim.quote) not in normalized_source:
+        if _normalize(claim.quote, mode=mode) not in normalized_source:
             errors.append(ClaimError(claim=claim, message=f"quote not found in source: {claim.quote!r}"))
 
     return QuoteVerificationResult(valid=not errors, errors=tuple(errors))
@@ -140,3 +157,41 @@ def _normalize(text: str, *, mode: str = "default") -> str:
     out = out.translate(_UNICODE_PUNCT_FOLDS)
     out = _NON_ALNUM_RE.sub(" ", out)
     return _WHITESPACE_RE.sub(" ", out).strip().lower()
+
+
+def quote_normalize_mode_for_wiki(wiki_root: Path) -> str:
+    """Return the wiki's profile-declared quote normalization mode.
+
+    Reads ``.mdwiki/config.toml`` looking for
+    ``[profile.<name>].quote_normalize_mode``. Returns ``"default"`` when the
+    config doesn't declare a mode (most profiles), or when the declared mode
+    is not one of ``VALID_NORMALIZE_MODES``. Mirrors the structure of
+    ``mdwiki.plan.allowed_kinds_for_wiki``.
+
+    Parameters
+    ----------
+    wiki_root : Path
+        Directory containing ``.mdwiki/config.toml``.
+
+    Returns
+    -------
+    str
+        Normalization mode to pass to ``verify_plan``. Always one of
+        ``VALID_NORMALIZE_MODES``.
+    """
+    import tomllib
+
+    config_path = wiki_root / ".mdwiki" / "config.toml"
+    if not config_path.is_file():
+        return "default"
+    try:
+        config = tomllib.loads(config_path.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return "default"
+    profile_name = config.get("profile", {}).get("name")
+    if not profile_name:
+        return "default"
+    declared = config.get("profile", {}).get(profile_name, {}).get("quote_normalize_mode")
+    if not isinstance(declared, str) or declared not in VALID_NORMALIZE_MODES:
+        return "default"
+    return declared
