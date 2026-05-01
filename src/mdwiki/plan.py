@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 # Baseline page kinds always allowed by every profile. Extra kinds declared
@@ -21,7 +22,7 @@ VALID_KINDS: frozenset[str] = frozenset({"entity", "concept", "synthesis"})
 VALID_BARE_VERDICTS: frozenset[str] = frozenset({"ingest", "low-quality", "out-of-scope"})
 
 
-def allowed_kinds_for_wiki(wiki_root: object) -> frozenset[str]:
+def allowed_kinds_for_wiki(wiki_root: Path) -> frozenset[str]:
     """Return the union of baseline page kinds + the wiki's profile extras.
 
     Reads ``.mdwiki/config.toml`` looking for ``[profile.<name>].extra_page_kinds``.
@@ -30,10 +31,8 @@ def allowed_kinds_for_wiki(wiki_root: object) -> frozenset[str]:
 
     Parameters
     ----------
-    wiki_root : Path-like
-        Directory containing ``.mdwiki/config.toml``. Typed as ``object`` to
-        avoid a circular import on ``pathlib.Path`` in modules that already
-        import this one.
+    wiki_root : Path
+        Directory containing ``.mdwiki/config.toml``.
 
     Returns
     -------
@@ -41,9 +40,8 @@ def allowed_kinds_for_wiki(wiki_root: object) -> frozenset[str]:
         Allowed page kinds for plans validated against this wiki.
     """
     import tomllib
-    from pathlib import Path
 
-    config_path = Path(str(wiki_root)) / ".mdwiki" / "config.toml"
+    config_path = wiki_root / ".mdwiki" / "config.toml"
     if not config_path.is_file():
         return VALID_KINDS
     try:
