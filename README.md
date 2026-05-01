@@ -3,11 +3,19 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**A folder-local CLI that turns any directory of markdown into an LLM-maintained wiki.**
+**A folder-local CLI that turns any directory of mixed-type sources into an LLM-maintained wiki.**
 
 Built on [Karpathy's llm-wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). The wiki is a *persistent, compounding artifact* — each ingest doesn't just file the source, it weaves into existing pages, adds cross-references, and may produce synthesis writeups across what you already have. Sources are immutable. Pages are LLM-owned. You ask questions and curate; the LLM does the bookkeeping.
 
-> **Replaces `markdown-consolidator`.** This is a clean v1.0.0 rewrite under a new package name. The old `mdconsolidate` CLI is removed; the legacy modules (chunker, embedder, clustering, synthesis) live on as internals.
+**v1.1.0 highlights:**
+
+- **Multi-filetype ingest** — markdown, plain text, code (35+ languages), CSV/TSV, PDF, DOCX, HTML; plus opt-in image OCR via Claude vision
+- **Anthropic Batch API** — `init --bootstrap-batch` submits every pending source as one batch (~50% cheaper, ~1h ETA)
+- **OpenAI-compatible provider** — point at vLLM, llama.cpp, OpenRouter, Together, etc. for local/cheaper inference
+- **Interactive `lint --fix`** — remediate broken refs deterministically; `--fix=full` re-ingests stale and coverage-gap sources
+- **`rebuild-log`** — regenerate `wiki/log.md` from the events table (recovery utility)
+
+> Replaces `markdown-consolidator`. v1.0.0 was a clean rewrite under the `mdwiki` package name.
 
 ## Install
 
@@ -76,20 +84,32 @@ The folder *is* the wiki. Move it, copy it, share it — `mdwiki` re-discovers i
 
 | Command | Purpose |
 |---|---|
-| `mdwiki init [path] [--bootstrap]` | Scaffold `.mdwiki/`, register every `.md` as pending. `--bootstrap` chains `ingest --pending --yes` |
+| `mdwiki init [path] [--bootstrap \| --bootstrap-batch]` | Scaffold `.mdwiki/`, register every loadable file as pending. `--bootstrap` chains sync `ingest --pending --yes`; `--bootstrap-batch` submits every pending source via Anthropic's Batch API (~50% cheaper, ~1h ETA) |
 | `mdwiki status` | Pending/ingested counts, page counts by kind, recent events, last lint |
 | `mdwiki source <hash-prefix>` | Inspect one registered source — original path, raw path, dependent pages |
-| `mdwiki rebuild` | Restore the `sources` table from `raw/.sources.json` after `state.db` deletion. v1.0.0 does NOT replay `backrefs`/`pages`/`events` (the log format is too lossy); re-ingest sources to recover them |
+| `mdwiki rebuild` | Restore the `sources` table from `raw/.sources.json` after `state.db` deletion |
+| `mdwiki rebuild-log` | Regenerate `wiki/log.md` from the events table (recovery utility) |
 | `mdwiki doctor` | Pre-flight: provider config + 1-token API ping + embedder model |
 | `mdwiki ingest <source>` | Interactive single-source ingest (prompt → JSON plan → quote-verify → confirm → apply) |
-| `mdwiki ingest --pending` | Bulk-ingest every source still in pending status (`--yes` implied). Each source is its own atomic transaction — if a bulk run is interrupted, re-running `--pending` resumes from where it stopped |
+| `mdwiki ingest --pending` | Bulk-ingest every source still in pending status. Resumes cleanly if interrupted |
 | `mdwiki ingest --all` | Re-ingest every source, including already-ingested ones |
-| `mdwiki query "<q>"` | Answer a question with citations from existing wiki pages |
-| `mdwiki query "<q>" --file` | …and file the answer as a synthesis page |
-| `mdwiki synthesize "<topic>"` | Explicit synthesis page from a topic + the wiki's most-relevant pages |
-| `mdwiki synthesize --auto` | Walk cross-ref graph; LLM proposes syntheses for each cluster |
-| `mdwiki lint` | Broken refs, orphans, stale pages, coverage gaps |
+| `mdwiki query "<q>" [--file]` | Cited Q&A from existing wiki pages; `--file` files the answer as a synthesis |
+| `mdwiki synthesize "<topic>" \| --auto` | Explicit synthesis from a topic, or walk the cross-ref graph and propose syntheses |
+| `mdwiki lint [--fix [=full]]` | Health check (broken refs, orphans, stale, coverage gaps). `--fix` strips broken refs deterministically; `--fix=full` re-ingests stale/coverage-gap sources |
 | `mdwiki undo [N]` | Roll back the last N applied transactions (file writes + DB rows) |
+
+## Supported filetypes (v1.1.0)
+
+| Extension | Loader | Notes |
+|---|---|---|
+| `.md`, `.markdown` | `MarkdownLoader` | Passthrough |
+| `.txt`, `.log`, `.rst` | `TextLoader` | Wrapped in a fenced code block |
+| `.py`/`.js`/`.ts`/`.go`/`.rs`/`.java`/`.rb`/`.sh`/`.sql`/... (35+ extensions) | `CodeLoader` | Wrapped in a language-tagged fence |
+| `.csv`, `.tsv` | `CsvLoader` | Converted to a markdown table; truncates to 100 rows |
+| `.pdf` | `PdfLoader` | Text via pypdfium2; opt-in vision fallback for scanned PDFs |
+| `.docx` | `DocxLoader` | Headings / paragraphs / tables preserved |
+| `.html`, `.htm` | `HtmlLoader` | markdownify with `<script>`/`<style>`/`<noscript>` stripped |
+| `.png`/`.jpg`/`.jpeg`/`.webp`/`.gif` | `ImageLoader` | Opt-in only; calls Claude vision (~$0.10–0.50/image) |
 
 ## How ingest works
 
@@ -118,17 +138,44 @@ model = "sentence-transformers/all-MiniLM-L6-v2"
 [ingest]
 candidate_top_k = 8
 max_undo_history = 50
+
+# v1.1.0 — opt-in loaders (cost-sensitive)
+[loaders.image]
+enabled = false  # set true to ingest .png/.jpg/etc via Claude vision (~$0.10–0.50/image)
+
+[loaders.pdf]
+vision_fallback = false  # set true to OCR scanned PDFs via Claude vision when text extraction is empty
 ```
+
+### Local providers (v1.1.0)
+
+To run against a vLLM / llama.cpp / OpenRouter / Together endpoint:
+
+```toml
+[llm]
+provider = "openai-compatible"
+model = "qwen2.5-72b-instruct"   # whatever your endpoint serves
+
+[llm.openai_compatible]
+base_url = "http://localhost:8000/v1"
+api_key = "not-needed-for-vllm"  # optional; required for OpenRouter / Together
+timeout = 120.0
+vision_capable = false           # set true only for vision-capable models (Qwen-VL, LLaVA)
+```
+
+Caveats: `--bootstrap-batch` requires `provider = "anthropic"` (most local servers don't have a batch API); `describe_image` requires `vision_capable = true`.
 
 `.mdwiki/schema.md` is the LLM's rulebook — page kinds, naming conventions, citation format, when to update vs create, synthesis triggers. It ships with sane defaults; edit to taste, the LLM honors it on every ingest/query/synthesize.
 
-## v1.0.0 non-goals
+## v1.1.0 non-goals
 
-Designed for, deferred to v1.1+:
+Designed for, deferred to v1.2+:
 
-- **Local model providers** (Qwen, Kimi) — `Provider` ABC seam exists in `src/mdwiki/llm/`
-- **Multi-filetype ingest** — v1.0.0 reads `.md` only; PDF / DOCX / CSV / images via vision OCR planned for v1.1
-- **Batch API for `init --bootstrap`** — v1.0.0 chains sync ingest. Batch (~50% cheaper, ~1h turnaround) is a v1.1 cost-optimization
+- **Streaming Batch API status** — `--bootstrap-batch` polls every 60s and reports progress, but doesn't expose the underlying batch object
+- **Loader registry pluggable via entry_points** — third-party loaders are v1.2+
+- **Audio / video / xlsx loaders** — punted
+- **Multi-provider dispatch within one wiki** — config still names ONE provider
+- **`--verbose` flag** — first-time `init --bootstrap` is too silent; planned for v1.1.1
 - Web UI, multi-user collaboration, real-time preview, cross-machine `state.db` sync, scheduled background ingest
 
 ## Architecture

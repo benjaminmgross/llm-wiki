@@ -1,12 +1,13 @@
 ---
-title: mdwiki — v1.0.0 Design
+title: mdwiki — Design (v1.1.0)
 created: 2025-04-29
 updated: 2026-04-30
-version: 1.0.5
+version: 1.1.0
 status: locked
-tags: [mdwiki, design, llm-wiki, karpathy-pattern]
+tags: [mdwiki, design, llm-wiki, karpathy-pattern, multi-filetype, batch-api, local-providers]
 supersedes: v0 design
 changelog:
+  - 1.1.0 (2026-04-30) — Multi-filetype ingest via Loader registry (md/txt/code/csv/pdf/docx/html/image), Anthropic Batch API (`init --bootstrap-batch`), generic `OpenAICompatibleProvider` for vLLM/llama.cpp/OpenRouter/Together, opt-in Claude vision OCR for images and scanned-PDF fallback, `mdwiki lint --fix [=full]` interactive remediation, `mdwiki rebuild-log` recovery utility. Schema + ingest prompt rewritten for healthier entity-page creation balance (Karpathy rubric 47→79 on a mixed-filetype test corpus). New deps — pypdfium2, python-docx, markdownify, openai. Schema is forward-compatible; no v1.0→v1.1 migration needed.
   - 1.0.5 (2026-04-30) — round-1 review fixes. UPDATE schema: drop `section`; `content` is the COMPLETE revised page body (no section splicing in v1.0.0). Document `mdwiki rebuild` as sources-only restoration; backrefs/events/pages are not replayable from log.md alone (re-ingest sources to recover). Document `mdwiki ingest --pending` as the bulk-run resume mechanism (no checkpoint file in v1.0.0). Add path-traversal defense in plan parser. Atomic file writes via tmp+os.replace. WAL journaling + 30s busy_timeout for concurrent invocation safety. HTTP timeout + max_retries=2 on the Anthropic client.
 ---
 
