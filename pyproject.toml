@@ -40,7 +40,6 @@ dependencies = [
     "numpy>=1.24.0",
     "openai>=1.40.0",
     "pathspec>=0.12.0",
-    "pypdf>=5.0.0",
     "pypdfium2>=4.30.0",
     "python-docx>=1.1.0",
     "pyyaml>=6.0",
@@ -109,6 +108,7 @@ markers = [
 [dependency-groups]
 dev = [
     "mypy>=1.19.0",
+    "pypdf>=5.0.0",
     "pytest>=9.0.1",
     "pytest-cov>=7.0.0",
     "pytest-mock>=3.15.1",
