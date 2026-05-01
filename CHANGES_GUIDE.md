@@ -2,6 +2,113 @@
 
 This document outlines recent major changes to this repository.
 
+## v1.1.0 — Multi-filetype ingest, batch API, local providers (2026-04-30)
+
+**v1.1.0 broadens what `mdwiki` can ingest, where it can run, and how cheaply it can build a wiki.** All changes are additive — existing v1.0 wikis upgrade transparently (`pip install -U` is enough; no schema migration required).
+
+### What ships
+
+#### Multi-filetype ingest
+
+`mdwiki init` and `mdwiki ingest` now accept eight filetypes via a new `Loader` registry:
+
+| Extension | Loader | Notes |
+|---|---|---|
+| `.md`, `.markdown` | `MarkdownLoader` | Passthrough (v1.0 behavior) |
+| `.txt`, `.log`, `.rst` | `TextLoader` | Wrapped in a fenced block — preserves whitespace + line structure |
+| `.py`, `.js`, `.ts`, `.go`, `.rs`, `.java`, `.rb`, `.sh`, `.sql`, … (35+ exts) | `CodeLoader` | Wrapped in a language-tagged fenced block |
+| `.csv`, `.tsv` | `CsvLoader` | Markdown table; truncates to 100 rows; pipes in cells escaped |
+| `.pdf` | `PdfLoader` | Text via `pypdfium2` (libpdfium); opt-in vision fallback for scanned PDFs |
+| `.docx` | `DocxLoader` | Headings (H1–H6), paragraphs, and tables preserved |
+| `.html`, `.htm` | `HtmlLoader` | Via `markdownify`; `<script>` / `<style>` / `<noscript>` stripped first |
+| `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif` | `ImageLoader` | **Opt-in only** (vision calls cost ~$0.10–0.50 each); enable with `[loaders.image] enabled = true` |
+
+`raw/` is now a homogeneous markdown store regardless of original filetype — every loader converts to markdown text, the chunker sees uniform input. The sidecar (`raw/.sources.json`) records `loader: <ClassName>` per source for diagnostic visibility.
+
+A new `InitResult.empty_load_skipped` counter tracks sources where the loader returned empty (e.g. scanned PDF without vision fallback enabled).
+
+#### Anthropic Batch API support
+
+`mdwiki init --bootstrap-batch` (mutually exclusive with `--bootstrap`) submits every pending source as one batch via `client.messages.batches.create`. **~50% cheaper** than the sync `--bootstrap` path, in exchange for **~1h wall-clock latency**. The CLI prints a cost estimate before submission and confirms with the user.
+
+`Provider` ABC gains `batch_complete(requests, *, poll_interval, on_status)` and `estimate_batch_cost(requests)`. The default raises `NotImplementedError` so providers without batch APIs inherit cleanly.
+
+#### OpenAI-compatible provider
+
+New `OpenAICompatibleProvider` covers any endpoint that speaks OpenAI's chat-completions wire format: vLLM, llama.cpp `--api`, OpenRouter, Together, etc. — **a single adapter, configured by `base_url`**.
+
+```toml
+[llm]
+provider = "openai-compatible"
+model = "qwen2.5-72b-instruct"
+[llm.openai_compatible]
+base_url = "http://localhost:8000/v1"
+api_key = "not-needed"   # optional; vLLM ignores it
+vision_capable = false   # set true ONLY for vision-capable models (Qwen-VL, LLaVA)
+```
+
+Vision is opt-in via `vision_capable = true` (default raises `NotImplementedError`). `batch_complete` raises `NotImplementedError` (most local servers don't offer a batch API).
+
+#### Vision OCR (opt-in)
+
+`Provider.describe_image(path)` is the new vision seam. `AnthropicProvider` implements it via Claude vision (Sonnet 4.6+ supports image content blocks). Used by:
+
+- `ImageLoader` — when `[loaders.image] enabled = true`, raster images route through `describe_image`. The model returns a heading + description + transcribed text under a `### Text` subsection.
+- `PdfLoader` vision fallback — when `[loaders.pdf] vision_fallback = true` AND text extraction returns empty, every page renders to PNG via `pypdfium2` and gets fed to `describe_image`.
+
+Both are off by default for cost.
+
+#### `mdwiki lint --fix [=full]`
+
+Two interactive remediation modes, both routing each fix through `IngestTransaction` so they're undoable via `mdwiki undo`:
+
+- **default mode** — deterministic only. `broken-ref` findings get the link replaced with bare text (preserves the link's display text as prose, drops the broken target). No LLM calls.
+- **`--fix=full`** — also re-ingests `stale` and `coverage-gap` findings via `ingest_source(force=True)`. One LLM call per re-ingest.
+
+Orphans are always left alone — fixing them requires human judgment about WHERE to add cross-refs.
+
+#### `mdwiki rebuild-log`
+
+Recovery utility for the rare `KeyboardInterrupt`-between-DB-commit-and-log-write window noted as round-2 S6 in the v1.0 review. Reads the `events` table ordered by ts, emits one line per event with a non-null `transaction_id` (lint events are excluded by design), uses the same `- <iso_ts> [<tx_id>] <summary>` format as the live append path so the regenerated file is byte-compatible.
+
+### Schema + prompt tuning
+
+End-to-end Karpathy-rubric testing on a mixed-filetype corpus surfaced a regression: v1.0's "STRONG PREFERENCE FOR UPDATE" framing produced one-bloated-concept-page wikis when the LLM saw multiple sources about overlapping topics. Two structured fixes:
+
+- **`DEFAULT_SCHEMA`** rewritten with a three-action framework (update existing concepts, REQUIRED-create entity pages for named subjects, create concept pages only for new concepts) plus an explicit "When to refuse — RARELY" section. Topical-overlap is no longer grounds for `low-quality`.
+- **`INGEST_SYSTEM_PROMPT`** balanced "license to refuse" with "EXPLICIT MANDATE to create entity pages." Quote-format rules rewritten as plain prose (no nested bullets, no backticks) after the bulleted version triggered Invalid-JSON failures.
+
+End-to-end Karpathy rubric on `~/Desktop/llm-wiki-test-v2` (13 files, 8 filetypes): **47/100 → 79/100** across 4 iterations of prompt/schema tuning.
+
+### New dependencies
+
+- `pypdf>=5.0.0` (PDF reading; kept for test fixture compat)
+- `pypdfium2>=4.30.0` (PDF text extraction + page rendering)
+- `python-docx>=1.1.0` (DOCX parsing)
+- `markdownify>=0.13.0` (HTML → markdown; pulls `beautifulsoup4` transitively)
+- `openai>=1.40.0` (OpenAI-compatible provider)
+
+### Migration
+
+v1.0 → v1.1 is a clean upgrade. Schema is forward-compatible (no breaking changes); existing wikis just gain access to new commands and loaders once the binary is upgraded. The `loader` field added to `raw/.sources.json` is additive; older sidecars without it work unchanged.
+
+### Known limitations (deferred)
+
+- **Streaming Batch API status** — `--bootstrap-batch` polls every 60s and reports progress but doesn't expose the underlying batch object
+- **Loader registry pluggable via entry_points** — third-party loaders are v1.2+
+- **Audio / video / xlsx loaders** — punted
+- **Multi-provider dispatch within one wiki** — config still names ONE provider
+- **`--verbose` flag** — first-time `init --bootstrap` is too silent; planned for v1.1.1
+
+### Stats
+
+- 387 tests (up from v1.0's 297); ruff clean
+- 8 supported filetypes (up from 1)
+- 2 provider implementations (anthropic + openai-compatible)
+- 13 commands (`init` gains `--bootstrap-batch`; new: `rebuild-log`, `lint --fix`)
+
+---
+
 ## v1.0.0 — Pivot to mdwiki (2026-04-30)
 
 **The repository now ships `mdwiki`, a Karpathy-pattern LLM-maintained wiki, replacing the legacy `markdown-consolidator` CLI.** This is a v1.0.0 release under a new package name; the legacy modules (chunker, embedder, clustering, synthesis, etc.) are now internals of `mdwiki`.

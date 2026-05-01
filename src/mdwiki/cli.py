@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import anthropic
+import openai
 
 from mdwiki import __version__
 from mdwiki.discover import WikiNotFound, find_wiki
@@ -20,14 +21,34 @@ from mdwiki.doctor import format_report, run_doctor
 from mdwiki.ingest import IngestError, ingest_many, ingest_source
 from mdwiki.init import NestedWikiError, init_wiki
 from mdwiki.lint import lint_wiki
+from mdwiki.lint_fix import lint_fix
 from mdwiki.llm import UnknownProviderError
-from mdwiki.llm.anthropic import MissingAPIKeyError
+from mdwiki.llm.anthropic import BatchTimeoutError, BatchUnexpectedStatusError, MissingAPIKeyError
 from mdwiki.query import QueryError, query_wiki
 from mdwiki.rebuild import RebuildError, rebuild_wiki
+from mdwiki.rebuild_log import rebuild_log
 from mdwiki.source import find_matching_sources, format_disambiguation, format_source_info, get_source_info
 from mdwiki.status import format_status, get_status
 from mdwiki.synthesize import SynthesisError, synthesize_auto, synthesize_topic
 from mdwiki.undo import UndoError, undo_last
+
+# Fatal API errors signal a config problem (bad key, wrong model id, unreachable
+# endpoint) — they're identical for every source so the CLI surfaces ONE friendly
+# message rather than a per-source stack trace. Both Anthropic and OpenAI-compatible
+# errors are caught everywhere a provider call can be made.
+_FATAL_ANTHROPIC_ERRORS: tuple[type[Exception], ...] = (
+    anthropic.AuthenticationError,
+    anthropic.NotFoundError,
+)
+_FATAL_OPENAI_ERRORS: tuple[type[Exception], ...] = (
+    openai.AuthenticationError,
+    openai.NotFoundError,
+    openai.APIConnectionError,
+    openai.APITimeoutError,
+    openai.RateLimitError,
+    openai.APIStatusError,
+)
+_FATAL_API_ERRORS: tuple[type[Exception], ...] = _FATAL_ANTHROPIC_ERRORS + _FATAL_OPENAI_ERRORS
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -75,10 +96,23 @@ def _build_parser() -> argparse.ArgumentParser:
         default=Path.cwd(),
         help="Folder to turn into a wiki (default: current directory).",
     )
-    init_p.add_argument(
+    bootstrap_group = init_p.add_mutually_exclusive_group()
+    bootstrap_group.add_argument(
         "--bootstrap",
         action="store_true",
         help="After init, immediately ingest every pending source (chains `ingest --pending --yes`).",
+    )
+    bootstrap_group.add_argument(
+        "--bootstrap-batch",
+        action="store_true",
+        dest="bootstrap_batch",
+        help="After init, submit every pending source to the Anthropic Batch API (~50%% cheaper, ~1h ETA).",
+    )
+    init_p.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="With --bootstrap-batch, skip the cost-estimate confirmation prompt (no effect with --bootstrap).",
     )
     init_p.set_defaults(_handler=_cmd_init)
 
@@ -91,6 +125,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     rebuild_p = subparsers.add_parser("rebuild", help="Reconstruct .mdwiki/state.db from raw/.sources.json + wiki/log.md.")
     rebuild_p.set_defaults(_handler=_cmd_rebuild)
+
+    rebuild_log_p = subparsers.add_parser(
+        "rebuild-log",
+        help="Regenerate wiki/log.md from the events table (recovery if a write was lost).",
+    )
+    rebuild_log_p.set_defaults(_handler=_cmd_rebuild_log)
 
     doctor_p = subparsers.add_parser("doctor", help="Check provider config and ping the LLM API.")
     doctor_p.set_defaults(_handler=_cmd_doctor)
@@ -110,6 +150,16 @@ def _build_parser() -> argparse.ArgumentParser:
     query_p.set_defaults(_handler=_cmd_query)
 
     lint_p = subparsers.add_parser("lint", help="Health-check the wiki: broken refs, orphans, stale pages, coverage gaps.")
+    lint_p.add_argument(
+        "--fix",
+        nargs="?",
+        const="default",
+        choices=("default", "full"),
+        default=None,
+        help="Interactively remediate findings. `--fix` (=default) handles broken-refs only; "
+        "`--fix=full` also re-ingests stale and coverage-gap sources (LLM round-trips).",
+    )
+    lint_p.add_argument("--yes", "-y", action="store_true", help="Skip per-finding prompts; apply every applicable fix.")
     lint_p.set_defaults(_handler=_cmd_lint)
 
     undo_p = subparsers.add_parser("undo", help="Roll back the last N applied transactions (file writes + DB rows).")
@@ -130,7 +180,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
-    """Handler for ``mdwiki init [--bootstrap]``."""
+    """Handler for ``mdwiki init [--bootstrap | --bootstrap-batch]``."""
     try:
         result = init_wiki(args.path)
     except NestedWikiError as exc:
@@ -138,7 +188,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
         return 1
     print(result.message)
 
-    if not args.bootstrap or result.files_registered == 0:
+    if result.files_registered == 0:
+        return 0
+
+    if getattr(args, "bootstrap_batch", False):
+        return _run_bootstrap_batch(args.path.resolve(), yes=getattr(args, "yes", False))
+
+    if not args.bootstrap:
         return 0
 
     print(f"\n--- bootstrap: ingesting {result.files_registered} pending source(s) ---\n")
@@ -153,12 +209,59 @@ def _cmd_init(args: argparse.Namespace) -> int:
     except (MissingAPIKeyError, UnknownProviderError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except (anthropic.AuthenticationError, anthropic.NotFoundError) as exc:
+    except ValueError as exc:
+        # _build_openai_compatible raises ValueError for missing required keys
+        # (e.g. base_url). UnknownProviderError is a ValueError subclass but is
+        # caught above first, so this branch is reserved for config-shape errors.
+        print(f"error: provider config invalid — {exc}", file=sys.stderr)
+        return 1
+    except _FATAL_API_ERRORS as exc:
         print(_fatal_api_error_message(exc), file=sys.stderr)
         return 1
     applied = sum(1 for r in ingest_results if r.applied)
     print(f"\nBootstrap done: {applied} of {len(ingest_results)} applied.")
     return 0
+
+
+def _run_bootstrap_batch(wiki_root: Path, *, yes: bool = False) -> int:
+    """Submit every pending source to Anthropic's Batch API (~50% off, ~1h ETA)."""
+    from mdwiki.bootstrap import bootstrap_batch
+
+    print("\n--- bootstrap-batch: building batch request ---\n")
+    try:
+        result = bootstrap_batch(
+            wiki_root,
+            yes=yes,
+            on_status=lambda status, ok, total: print(f"  [batch status: {status} — {ok}/{total} succeeded]"),
+            on_progress=lambda i, total, cid: print(f"  [{i}/{total}] applying {cid}..."),
+        )
+    except (MissingAPIKeyError, UnknownProviderError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        # _build_openai_compatible raises ValueError for missing required keys
+        # (e.g. base_url). UnknownProviderError is a ValueError subclass but is
+        # caught above first, so this branch is reserved for config-shape errors.
+        print(f"error: provider config invalid — {exc}", file=sys.stderr)
+        return 1
+    # NOTE: batch-specific RuntimeErrors must be caught BEFORE _FATAL_API_ERRORS;
+    # they're not in that tuple, but listing them first guards against future
+    # additions accidentally reclassifying them through the generic branch.
+    except (BatchTimeoutError, BatchUnexpectedStatusError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except _FATAL_API_ERRORS as exc:
+        print(_fatal_api_error_message(exc), file=sys.stderr)
+        return 1
+
+    if result.submitted == 0:
+        print("Bootstrap batch aborted (no submission).")
+        return 0
+    print(
+        f"\nBootstrap batch done: applied {result.applied} of {result.submitted} "
+        f"({result.failed} failed, {result.skipped} verdict-skip)."
+    )
+    return 0 if result.failed == 0 else 1
 
 
 def _cmd_status(_args: argparse.Namespace) -> int:
@@ -205,6 +308,18 @@ def _cmd_rebuild(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_rebuild_log(_args: argparse.Namespace) -> int:
+    """Handler for ``mdwiki rebuild-log`` — regenerate wiki/log.md from events."""
+    try:
+        wiki_root = find_wiki()
+    except WikiNotFound as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    result = rebuild_log(wiki_root)
+    print(f"Regenerated {result.log_path} ({result.lines_written} line(s) from events table).")
+    return 0
+
+
 def _cmd_ingest(args: argparse.Namespace) -> int:
     """Handler for ``mdwiki ingest <source> | --all | --pending``."""
     try:
@@ -229,7 +344,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         except (MissingAPIKeyError, UnknownProviderError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-        except (anthropic.AuthenticationError, anthropic.NotFoundError) as exc:
+        except _FATAL_API_ERRORS as exc:
             print(_fatal_api_error_message(exc), file=sys.stderr)
             return 1
         applied = sum(1 for r in results if r.applied)
@@ -251,7 +366,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     except UnknownProviderError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except (anthropic.AuthenticationError, anthropic.NotFoundError) as exc:
+    except _FATAL_API_ERRORS as exc:
         print(_fatal_api_error_message(exc), file=sys.stderr)
         return 1
     print(result.message)
@@ -276,6 +391,9 @@ def _cmd_query(args: argparse.Namespace) -> int:
     except UnknownProviderError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except _FATAL_API_ERRORS as exc:
+        print(_fatal_api_error_message(exc), file=sys.stderr)
+        return 1
 
     print(result.answer)
     if result.cited_pages:
@@ -287,13 +405,22 @@ def _cmd_query(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_lint(_args: argparse.Namespace) -> int:
-    """Handler for ``mdwiki lint``."""
+def _cmd_lint(args: argparse.Namespace) -> int:
+    """Handler for ``mdwiki lint [--fix [=full]]``."""
     try:
         wiki_root = find_wiki()
     except WikiNotFound as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+    if getattr(args, "fix", None) is not None:
+        result = lint_fix(wiki_root, mode=args.fix, yes=args.yes)
+        print(
+            f"Lint --fix={args.fix}: applied {result.fixed_count}, "
+            f"skipped {result.skipped_count}, failed {result.failed_count}."
+        )
+        return 0 if result.failed_count == 0 else 1
+
     report = lint_wiki(wiki_root)
     if not report.findings:
         print("Lint: clean — no findings.")
@@ -361,6 +488,9 @@ def _cmd_synthesize(args: argparse.Namespace) -> int:
     except UnknownProviderError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except _FATAL_API_ERRORS as exc:
+        print(_fatal_api_error_message(exc), file=sys.stderr)
+        return 1
 
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:
@@ -378,18 +508,29 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     except UnknownProviderError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except _FATAL_API_ERRORS as exc:
+        print(_fatal_api_error_message(exc), file=sys.stderr)
+        return 1
     print(format_report(report))
     return 0 if report.api_ok else 1
 
 
 def _fatal_api_error_message(exc: Exception) -> str:
-    """Render a user-friendly message for fatal Anthropic API errors.
+    """Render a user-friendly message for fatal LLM-API errors.
 
-    These errors (auth/not-found) signal a config problem: a bad API key, a
-    typo'd model id, or insufficient permissions. They're identical for every
-    source, so ``ingest_many`` propagates them rather than swallowing per-source
-    failures and the CLI prints one clear "fix your config" message.
+    These errors (auth/not-found/connection/rate-limit/timeout/status) signal a
+    config problem: bad API key, typo'd model id, unreachable endpoint, etc.
+    They're identical for every source, so ``ingest_many`` propagates them and
+    the CLI prints one clear "fix your config" message rather than dumping a
+    stack trace per source. Both Anthropic and OpenAI-compatible errors are
+    handled here so the message is symmetric across providers.
     """
+    # NOTE: openai.AuthenticationError, NotFoundError, RateLimitError all
+    # subclass openai.APIStatusError — keep the specific isinstance checks
+    # above the APIStatusError check or auth/404/429 errors will silently
+    # re-route through the generic branch and lose their tailored remediation
+    # text. Same applies to anthropic's hierarchy; specific-before-generic
+    # is the contract this function relies on.
     if isinstance(exc, anthropic.AuthenticationError):
         return (
             f"error: Anthropic API rejected the credentials ({exc}). "
@@ -400,5 +541,39 @@ def _fatal_api_error_message(exc: Exception) -> str:
             f"error: Anthropic API returned 'not found' ({exc}). "
             "Likely cause: the model id in .mdwiki/config.toml ([llm] model = ...) "
             "is misspelled or has been retired. Update it and re-run."
+        )
+    if isinstance(exc, openai.AuthenticationError):
+        return (
+            f"error: OpenAI-compatible endpoint rejected the credentials ({exc}). "
+            "Check the api_key under [llm.openai_compatible] in .mdwiki/config.toml "
+            "(or the env var your endpoint expects) and re-run."
+        )
+    if isinstance(exc, openai.NotFoundError):
+        return (
+            f"error: OpenAI-compatible endpoint returned 'not found' ({exc}). "
+            "Likely cause: the model id under [llm.openai_compatible] doesn't match "
+            "what the server is serving, or the base_url path is wrong. Update it and re-run."
+        )
+    if isinstance(exc, openai.APIConnectionError):
+        return (
+            f"error: could not reach the OpenAI-compatible endpoint ({exc}). "
+            "Verify base_url under [llm.openai_compatible] points at a running server "
+            "(e.g. vLLM, llama.cpp) and that the host is reachable."
+        )
+    if isinstance(exc, openai.APITimeoutError):
+        return (
+            f"error: OpenAI-compatible request timed out ({exc}). "
+            "The endpoint may be overloaded; retry, or raise the client timeout."
+        )
+    if isinstance(exc, openai.RateLimitError):
+        return (
+            f"error: OpenAI-compatible endpoint rate-limited the request ({exc}). "
+            "Wait and retry, or check your provider's rate-limit settings."
+        )
+    if isinstance(exc, openai.APIStatusError):
+        return (
+            f"error: OpenAI-compatible endpoint returned an API error "
+            f"(status {getattr(exc, 'status_code', '?')}): {exc}. "
+            "Check the server logs and your config under [llm.openai_compatible]."
         )
     return f"error: {exc}"

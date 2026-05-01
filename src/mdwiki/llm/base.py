@@ -2,14 +2,17 @@
 
 A ``Provider`` wraps a single LLM backend (Anthropic in v1.0.0; Qwen, Kimi, etc. in
 later releases). Every provider exposes the same surface: ``ping`` for health checks,
-``complete`` for one-shot inference. Batch and cost estimation arrive in Phase 7
-when ``init --bootstrap`` actually needs them.
+``complete`` for one-shot inference, and (since v1.1.0 Phase 5) ``describe_image`` for
+vision-based extraction. Vision is opt-in: the default implementation raises
+``NotImplementedError`` so providers without multimodal support can inherit cleanly.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 
@@ -90,3 +93,133 @@ class Provider(ABC):
         max_tokens : int, optional
             Cap on output tokens (default 1024).
         """
+
+    def describe_image(self, image_path: Path) -> str:
+        """Describe an image as markdown text via the provider's vision API.
+
+        Used by ``ImageLoader`` (Phase 5) and ``PdfLoader`` vision_fallback to extract
+        text and structural information from raster images. The default raises
+        ``NotImplementedError`` so providers without multimodal support can inherit
+        cleanly — concrete providers override only when their model handles vision.
+
+        Parameters
+        ----------
+        image_path : Path
+            Filesystem path to a raster image (png/jpg/jpeg/webp/gif).
+
+        Returns
+        -------
+        str
+            Markdown text describing the image (typically a heading + a paragraph
+            of description plus any extracted text via OCR).
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support describe_image. "
+            "Use a vision-capable provider (e.g. AnthropicProvider with claude-sonnet-4-6+) "
+            "or set [loaders.image].enabled = false in your wiki config."
+        )
+
+    def batch_complete(
+        self,
+        requests: list[BatchRequest],
+        *,
+        poll_interval: float = 60.0,
+        on_status: Callable[[str, int, int], None] | None = None,
+        on_batch_id: Callable[[str], None] | None = None,
+    ) -> list[BatchResult]:
+        """Submit a list of completion requests as a single batch (50% cheaper, ~1h ETA).
+
+        Default raises ``NotImplementedError`` — providers without batch APIs
+        (most local servers) inherit cleanly.
+
+        Parameters
+        ----------
+        requests : list[BatchRequest]
+            One request per pending source. ``custom_id`` matches results to sources.
+        poll_interval : float, optional
+            Seconds between status polls. Default 60s; tests pass 0.0 to spin fast.
+        on_status : callable, optional
+            Called as ``(status, succeeded, total)`` after each poll so the CLI can
+            report progress.
+        on_batch_id : callable, optional
+            Called once with the provider-side batch id immediately after submission,
+            so callers (e.g. ``BootstrapResult``) can surface it for diagnostics.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support batch_complete. "
+            "Use AnthropicProvider for the bootstrap-batch path, or run the sync "
+            "ingest path (`mdwiki init --bootstrap`)."
+        )
+
+    def estimate_batch_cost(self, requests: list[BatchRequest]) -> BatchCostEstimate:
+        """Return a coarse upper-bound cost estimate for the given batch.
+
+        Default uses a 4-chars-per-token heuristic over the prompt text plus
+        ``max_tokens`` per request as the output cap, then multiplies by the
+        provider-specific batch rates. Concrete providers override when more
+        accurate token counting is available.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement estimate_batch_cost."
+        )
+
+
+@dataclass(frozen=True)
+class BatchRequest:
+    """One pending completion in a batch submission.
+
+    Parameters
+    ----------
+    custom_id : str
+        Caller-chosen identifier (typically the source_id) — used to match
+        results back to the originating source.
+    system : str
+        System prompt (provider implementations should still cache this).
+    messages : list[Message]
+        Chat history, same shape as ``Provider.complete``.
+    max_tokens : int
+        Per-request output cap.
+    """
+
+    custom_id: str
+    system: str
+    messages: list[Message]
+    max_tokens: int = 16000
+
+
+@dataclass(frozen=True)
+class BatchResult:
+    """One outcome from a batch — success or failure.
+
+    Parameters
+    ----------
+    custom_id : str
+        Mirrors the ``BatchRequest.custom_id``.
+    text : str
+        Completion text. Empty when ``error`` is set.
+    error : str | None
+        Provider-side error code (e.g. ``"rate_limited"``, ``"invalid_request"``)
+        or ``None`` on success.
+    input_tokens : int
+        Prompt tokens billed for this result.
+    output_tokens : int
+        Output tokens billed for this result.
+    """
+
+    custom_id: str
+    text: str
+    error: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class BatchCostEstimate:
+    """Coarse upper-bound cost estimate for a batch submission, in USD."""
+
+    requests: int
+    input_tokens: int
+    output_tokens_max: int
+    usd_total: float
+
+

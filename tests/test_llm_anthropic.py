@@ -202,3 +202,260 @@ def test_complete_reports_cache_read_tokens(mocker: MockerFixture) -> None:
 
     assert result.cache_read_tokens == 500
     assert result.cache_creation_tokens == 0
+
+
+# ----- describe_image (Phase 5) -----
+
+
+@pytest.mark.unit
+def test_describe_image_sends_image_content_block(tmp_path, mocker: MockerFixture) -> None:
+    """``describe_image`` base64-encodes the image and sends it as an image content block."""
+    src = tmp_path / "diagram.png"
+    src.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)  # plausible PNG header + body bytes
+
+    fake_client = MagicMock()
+    fake_response = MagicMock()
+    fake_response.content = [MagicMock(type="text", text="A flowchart with three boxes connected by arrows.")]
+    fake_client.messages.create.return_value = fake_response
+
+    provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="sk-x", client=fake_client)
+    result = provider.describe_image(src)
+
+    assert "flowchart" in result.lower()
+    fake_client.messages.create.assert_called_once()
+    kwargs = fake_client.messages.create.call_args.kwargs
+    # Single user message with an image content block
+    assert kwargs["model"] == "claude-sonnet-4-6"
+    assert len(kwargs["messages"]) == 1
+    content = kwargs["messages"][0]["content"]
+    image_blocks = [b for b in content if b.get("type") == "image"]
+    assert len(image_blocks) == 1
+    assert image_blocks[0]["source"]["type"] == "base64"
+    assert image_blocks[0]["source"]["media_type"] == "image/png"
+    # Body must include text instructing the model to describe + OCR
+    text_blocks = [b for b in content if b.get("type") == "text"]
+    assert text_blocks, "describe_image must include a text instruction with the image"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("ext", "expected_media_type"),
+    [
+        (".png", "image/png"),
+        (".jpg", "image/jpeg"),
+        (".jpeg", "image/jpeg"),
+        (".webp", "image/webp"),
+        (".gif", "image/gif"),
+    ],
+)
+def test_describe_image_maps_extension_to_media_type(
+    tmp_path, mocker: MockerFixture, ext: str, expected_media_type: str
+) -> None:
+    """Each registered image extension maps to the right MIME type for the API."""
+    src = tmp_path / f"x{ext}"
+    src.write_bytes(b"binary")
+    fake_client = MagicMock()
+    fake_response = MagicMock()
+    fake_response.content = [MagicMock(type="text", text="ok")]
+    fake_client.messages.create.return_value = fake_response
+
+    provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="sk-x", client=fake_client)
+    provider.describe_image(src)
+    kwargs = fake_client.messages.create.call_args.kwargs
+    image_block = next(b for b in kwargs["messages"][0]["content"] if b.get("type") == "image")
+    assert image_block["source"]["media_type"] == expected_media_type
+
+
+# ----- batch_complete + estimate_batch_cost (Phase 6) -----
+
+
+def _build_batch_provider() -> tuple[AnthropicProvider, MagicMock]:
+    """Helper: AnthropicProvider with a mocked SDK client."""
+    fake_client = MagicMock()
+    provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="sk-x", client=fake_client)
+    return provider, fake_client
+
+
+def _make_batch_result_entry(custom_id: str, text: str, *, succeeded: bool = True) -> MagicMock:
+    """Build a fake SDK batch-result entry (succeeded or errored)."""
+    entry = MagicMock()
+    entry.custom_id = custom_id
+    if succeeded:
+        message = MagicMock()
+        message.content = [MagicMock(type="text", text=text)]
+        message.usage = MagicMock(input_tokens=100, output_tokens=50)
+        entry.result = MagicMock(type="succeeded", message=message)
+    else:
+        entry.result = MagicMock(type="errored", error=MagicMock(type="rate_limited"))
+    return entry
+
+
+@pytest.mark.unit
+def test_batch_complete_submits_one_create_call_with_each_request(mocker: MockerFixture) -> None:
+    """``batch_complete([3 requests])`` calls ``batches.create`` once with three sub-requests."""
+    from mdwiki.llm.base import BatchRequest
+
+    provider, fake_client = _build_batch_provider()
+    fake_batch = MagicMock(id="batch_123", processing_status="ended")
+    fake_client.messages.batches.create.return_value = fake_batch
+    fake_client.messages.batches.retrieve.return_value = fake_batch
+    fake_client.messages.batches.results.return_value = [
+        _make_batch_result_entry("src-a", "result-a"),
+        _make_batch_result_entry("src-b", "result-b"),
+        _make_batch_result_entry("src-c", "result-c"),
+    ]
+
+    requests = [
+        BatchRequest(custom_id=f"src-{c}", system="sys", messages=[Message(role="user", content=f"prompt-{c}")])
+        for c in ("a", "b", "c")
+    ]
+    results = provider.batch_complete(requests, poll_interval=0.0)
+
+    fake_client.messages.batches.create.assert_called_once()
+    sdk_requests = fake_client.messages.batches.create.call_args.kwargs["requests"]
+    assert len(sdk_requests) == 3
+    assert {r["custom_id"] for r in sdk_requests} == {"src-a", "src-b", "src-c"}
+    # Every sub-request gets the model + system with cache_control
+    for r in sdk_requests:
+        params = r["params"]
+        assert params["model"] == "claude-sonnet-4-6"
+        assert params["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+    assert {r.custom_id for r in results} == {"src-a", "src-b", "src-c"}
+    assert all(r.error is None for r in results)
+
+
+@pytest.mark.unit
+def test_batch_complete_polls_until_status_ended(mocker: MockerFixture) -> None:
+    """Polls until ``processing_status == 'ended'``; calls ``on_status`` each iteration."""
+    from mdwiki.llm.base import BatchRequest
+
+    provider, fake_client = _build_batch_provider()
+    fake_client.messages.batches.create.return_value = MagicMock(id="batch_x", processing_status="in_progress")
+    # First poll: still in progress; second poll: ended
+    fake_client.messages.batches.retrieve.side_effect = [
+        MagicMock(id="batch_x", processing_status="in_progress", request_counts=MagicMock(succeeded=0)),
+        MagicMock(id="batch_x", processing_status="ended", request_counts=MagicMock(succeeded=1)),
+    ]
+    fake_client.messages.batches.results.return_value = [_make_batch_result_entry("src-a", "ok")]
+
+    statuses: list[tuple[str, int, int]] = []
+    requests = [BatchRequest(custom_id="src-a", system="s", messages=[Message(role="user", content="p")])]
+    results = provider.batch_complete(
+        requests,
+        poll_interval=0.0,
+        on_status=lambda status, succeeded, total: statuses.append((status, succeeded, total)),
+    )
+
+    assert len(results) == 1
+    assert results[0].text == "ok"
+    assert statuses == [("in_progress", 0, 1), ("ended", 1, 1)]
+
+
+@pytest.mark.unit
+def test_batch_complete_decodes_errored_results(mocker: MockerFixture) -> None:
+    """A result entry with ``type='errored'`` becomes a ``BatchResult`` with ``error`` set."""
+    from mdwiki.llm.base import BatchRequest
+
+    provider, fake_client = _build_batch_provider()
+    fake_batch = MagicMock(id="batch_x", processing_status="ended")
+    fake_client.messages.batches.create.return_value = fake_batch
+    fake_client.messages.batches.retrieve.return_value = fake_batch
+    fake_client.messages.batches.results.return_value = [
+        _make_batch_result_entry("src-ok", "good"),
+        _make_batch_result_entry("src-bad", "", succeeded=False),
+    ]
+
+    requests = [
+        BatchRequest(custom_id="src-ok", system="s", messages=[Message(role="user", content="p1")]),
+        BatchRequest(custom_id="src-bad", system="s", messages=[Message(role="user", content="p2")]),
+    ]
+    results = provider.batch_complete(requests, poll_interval=0.0)
+
+    by_id = {r.custom_id: r for r in results}
+    assert by_id["src-ok"].error is None
+    assert by_id["src-ok"].text == "good"
+    assert by_id["src-bad"].error == "rate_limited"
+    assert by_id["src-bad"].text == ""
+
+
+@pytest.mark.unit
+def test_batch_complete_raises_timeout_when_deadline_elapses(mocker: MockerFixture) -> None:
+    """When the wall-clock deadline elapses while polling, raise ``BatchTimeoutError``.
+
+    Mocks ``time.monotonic`` to advance past the 24h deadline on the second call
+    so the polling loop hits the timeout branch deterministically without sleeping.
+    """
+    from mdwiki.llm.anthropic import BatchTimeoutError
+    from mdwiki.llm.base import BatchRequest
+
+    provider, fake_client = _build_batch_provider()
+    fake_client.messages.batches.create.return_value = MagicMock(
+        id="batch_timeout", processing_status="in_progress"
+    )
+    # Always in-progress — never reaches "ended", so deadline check trips.
+    fake_client.messages.batches.retrieve.return_value = MagicMock(
+        id="batch_timeout",
+        processing_status="in_progress",
+        request_counts=MagicMock(succeeded=0),
+    )
+    # First call sets ``deadline`` (start + 24h). Subsequent calls in the loop
+    # body return a value past the deadline so the timeout branch fires.
+    mocker.patch(
+        "mdwiki.llm.anthropic.time.monotonic",
+        side_effect=[0.0, 1e9, 1e9, 1e9],
+    )
+    mocker.patch("mdwiki.llm.anthropic.time.sleep", return_value=None)
+
+    requests = [BatchRequest(custom_id="src-a", system="s", messages=[Message(role="user", content="p")])]
+    with pytest.raises(BatchTimeoutError) as excinfo:
+        provider.batch_complete(requests, poll_interval=0.0)
+    assert "batch_timeout" in str(excinfo.value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status", ["canceling", "canceled", "expired", "errored"])
+def test_batch_complete_raises_on_terminal_abnormal_status(
+    mocker: MockerFixture, status: str
+) -> None:
+    """Terminal/abnormal statuses (canceling, canceled, expired, errored) raise ``BatchUnexpectedStatusError``."""
+    from mdwiki.llm.anthropic import BatchUnexpectedStatusError
+    from mdwiki.llm.base import BatchRequest
+
+    provider, fake_client = _build_batch_provider()
+    fake_client.messages.batches.create.return_value = MagicMock(
+        id="batch_abnormal", processing_status=status
+    )
+    fake_client.messages.batches.retrieve.return_value = MagicMock(
+        id="batch_abnormal",
+        processing_status=status,
+        request_counts=MagicMock(succeeded=0),
+    )
+
+    requests = [BatchRequest(custom_id="src-a", system="s", messages=[Message(role="user", content="p")])]
+    with pytest.raises(BatchUnexpectedStatusError) as excinfo:
+        provider.batch_complete(requests, poll_interval=0.0)
+    msg = str(excinfo.value)
+    assert "batch_abnormal" in msg
+    assert status in msg
+
+
+@pytest.mark.unit
+def test_estimate_batch_cost_uses_chars_per_token_heuristic() -> None:
+    """Cost estimate scales linearly with prompt char count + max_tokens × Sonnet batch rates."""
+    from mdwiki.llm.base import BatchRequest
+
+    provider, _ = _build_batch_provider()
+    requests = [
+        BatchRequest(custom_id="a", system="x" * 4000, messages=[Message(role="user", content="y" * 4000)], max_tokens=1000),
+        BatchRequest(custom_id="b", system="x" * 4000, messages=[Message(role="user", content="y" * 4000)], max_tokens=1000),
+    ]
+    estimate = provider.estimate_batch_cost(requests)
+    # 8000 chars per request / 4 = 2000 input tokens × 2 requests = 4000
+    assert estimate.requests == 2
+    assert estimate.input_tokens == 4000
+    assert estimate.output_tokens_max == 2000
+    # Batch discount = 50%; sonnet input $3/M, output $15/M
+    # input cost = 4000/1M * $3 = $0.012; output cost = 2000/1M * $15 = $0.030
+    # total before discount = $0.042; after 50% discount = $0.021
+    assert abs(estimate.usd_total - 0.021) < 1e-6

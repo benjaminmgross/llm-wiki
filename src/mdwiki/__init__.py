@@ -1,11 +1,13 @@
 """mdwiki — folder-local CLI that turns any directory of markdown into an LLM-maintained wiki.
 
-Built on Karpathy's llm-wiki pattern. v1.0.0 replaces the legacy markdown-consolidator
-CLI; legacy modules (chunker, clustering, synthesis, etc.) become internals used by
-``mdwiki init --bootstrap`` and friends.
+Built on Karpathy's llm-wiki pattern. v1.0.0 replaced the legacy markdown-consolidator
+CLI; legacy modules (chunker, clustering, synthesis, etc.) became internals. v1.1.0
+adds multi-filetype ingest (md/txt/code/csv/pdf/docx/html/image), Anthropic Batch API
+support for `init --bootstrap-batch`, an OpenAI-compatible provider for vLLM/llama.cpp/
+OpenRouter/Together, interactive `lint --fix`, and the `rebuild-log` recovery utility.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 from .chunker import MarkdownChunker, Section
 from .clustering import cluster_files

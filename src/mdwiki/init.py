@@ -10,19 +10,21 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pathspec
 import tomli_w
 
 from mdwiki.discover import WIKI_DIR_NAME, WikiNotFound, find_wiki
+from mdwiki.loaders import UnsupportedFiletypeError, build_registry
+from mdwiki.loaders.base import Loader
 from mdwiki.state import connect, init_db
 
 SOURCES_SIDECAR_NAME: str = ".sources.json"
 
-DEFAULT_CONFIG: dict[str, dict[str, str | int | float | list[str]]] = {
+DEFAULT_CONFIG: dict[str, Any] = {
     "llm": {
         "provider": "anthropic",
         "model": "claude-sonnet-4-6",
@@ -36,6 +38,12 @@ DEFAULT_CONFIG: dict[str, dict[str, str | int | float | list[str]]] = {
     },
     "exclude": {
         "globs": [],
+    },
+    # Loader-specific opt-ins (Phase 5). Both default to false because vision calls
+    # cost ~$0.10–0.50 each — users opt in explicitly per wiki by editing this file.
+    "loaders": {
+        "image": {"enabled": False},
+        "pdf": {"vision_fallback": False},
     },
 }
 
@@ -68,14 +76,33 @@ The LLM appends a footnote-style citation block at the bottom of each page secti
 [^src1]: <quote>... (raw/<hash>-<slug>.md, original: <original_path>)
 ```
 
-## When to update vs. create — STRONG PREFERENCE FOR UPDATE
+## When to update, create entity pages, or refuse
 
-**Default to UPDATING an existing candidate page over creating a new one.** A wiki that grows by accretion of new pages is just a folder of notes. The compounding value comes from refining and extending existing pages.
+**Touch breadth target: 5–15 wiki pages per source ingest** — typically a few updates, 1–3 new pages (most often entities), and 3–8 cross-refs. If your plan touches ≤2 pages, you are almost certainly under-creating; re-read the source and ask which named subjects deserve their own pages.
 
-Decision rule:
-- **Update** if any candidate page covers ≥40% of the source's topic OR if your prospective new page would link primarily to one existing page
-- **Create new page** ONLY when the source introduces a topic with no existing home, AND the topic warrants more than a paragraph anywhere
-- **A single source ingest should typically touch 5–15 wiki pages** (mostly updates, plus 1–3 new pages and 3–8 cross-refs). If you propose only 1–2 new pages and zero updates, ask yourself whether you missed a candidate.
+Three actions you must consider for every source — they are NOT mutually exclusive:
+
+1. **Update existing concept / synthesis pages** when the source extends or refines a concept the wiki already covers. Don't duplicate concepts (don't create both `concepts/first-principles.md` and `concepts/first-principles-thinking.md` — pick one).
+
+2. **Create entity pages — REQUIRED for named subjects.** When a source has 2+ substantive factual claims about a SPECIFIC named person, project, paper, system, or organization, create or update an entity page for them. This is how the wiki avoids becoming a handful of bloated concept pages. Examples:
+   - Source mentions Aristotle in passing → no entity page; cite him in the concept page.
+   - Source describes Aristotle's archai, Metaphysics, lineage from Plato → CREATE `wiki/entities/aristotle.md`.
+   - Source describes SpaceX's vertical integration, Falcon 1 timeline, Merlin engine → CREATE `wiki/entities/spacex.md`.
+   - Heuristic: if you can write 3+ sentences about a named subject from the source, that subject earns an entity page.
+
+3. **Create concept pages** ONLY when the source introduces a NEW concept with no existing home. New concept pages are the rarest of the three — most overlap is handled by updates + new entity pages, not new concepts.
+
+## When to refuse — RARELY
+
+The `low-quality` and `out-of-scope` verdicts are reserved for sources that genuinely contain no load-bearing content for THIS wiki. Topical overlap with an existing concept page is NOT grounds for refusal — it is the common case for related sources, and it warrants UPDATES + NEW ENTITY PAGES, not rejection.
+
+Refuse only when:
+- The source has zero factual claims a wiki page could cite (e.g. a utility script with no novel logic).
+- The source's subject matter is wholly outside the wiki's domain.
+
+Do NOT refuse when:
+- A primary text (e.g. Aristotle's *Metaphysics*) overlaps with existing summaries — the entity page for that thinker should still be enriched, and direct quotes from the primary should replace paraphrased citations where possible.
+- An academic paper's core thesis is mentioned in passing on another page — create an entity page for the paper, update the related concepts.
 
 ## Cross-references — REQUIRED ON CREATION
 
@@ -123,13 +150,18 @@ class InitResult:
     created : bool
         True if this call scaffolded a new wiki; False if one already existed.
     files_registered : int
-        Number of markdown sources copied to ``raw/`` and inserted into ``sources``.
+        Number of sources copied to ``raw/`` and inserted into ``sources``.
     files_skipped : int
-        Number of markdown files that were skipped (e.g. matched a ``.gitignore``).
+        Number of files that were skipped (e.g. matched a ``.gitignore``).
     dedup_skipped : int
-        Number of markdown files whose content matched an already-registered
-        source (same SHA-256). The first occurrence wins; subsequent copies
-        are skipped without overwriting the existing ``raw/`` file.
+        Number of files whose content matched an already-registered source
+        (same SHA-256). The first occurrence wins; subsequent copies are
+        skipped without overwriting the existing ``raw/`` file.
+    empty_load_skipped : int
+        Number of files for which the matched loader returned an empty string
+        (e.g. ``PdfLoader`` on a scanned/image-only PDF). No raw file is
+        written and no DB row is inserted; the loader logs a warning naming
+        the path before the skip.
     wiki_root : Path
         The directory containing the new (or pre-existing) ``.mdwiki/``.
     message : str
@@ -140,6 +172,7 @@ class InitResult:
     files_registered: int
     files_skipped: int
     dedup_skipped: int
+    empty_load_skipped: int
     wiki_root: Path
     message: str
 
@@ -172,6 +205,7 @@ def init_wiki(target: Path) -> InitResult:
             files_registered=0,
             files_skipped=0,
             dedup_skipped=0,
+            empty_load_skipped=0,
             wiki_root=target,
             message=f"Already initialized at {target}/{WIKI_DIR_NAME}/. No changes.",
         )
@@ -187,8 +221,14 @@ def init_wiki(target: Path) -> InitResult:
     (wiki_dir / "schema.md").write_text(DEFAULT_SCHEMA)
     (wiki_dir / ".gitignore").write_text(GITIGNORE_CONTENT)
 
-    registered, skipped, dedup_skipped = _register_sources(
-        target=target, raw_dir=raw_dir, db_path=wiki_dir / "state.db"
+    # Build the loader registry ONCE from the default config. Reusing this
+    # avoids the O(N) TOML re-parse cost (one parse + ancestor walk per file)
+    # the previous per-file ``get_loader_for`` path incurred. Image loading is
+    # off by default so no provider is needed here; init never invokes vision.
+    registry = build_registry(config=DEFAULT_CONFIG, provider=None)
+
+    registered, skipped, dedup_skipped, empty_load_skipped = _register_sources(
+        target=target, raw_dir=raw_dir, db_path=wiki_dir / "state.db", registry=registry
     )
 
     suffix_parts: list[str] = []
@@ -196,6 +236,8 @@ def init_wiki(target: Path) -> InitResult:
         suffix_parts.append(f"skipped {skipped} via .gitignore")
     if dedup_skipped:
         suffix_parts.append(f"skipped {dedup_skipped} duplicate-content")
+    if empty_load_skipped:
+        suffix_parts.append(f"skipped {empty_load_skipped} with empty loader output")
     suffix = f" ({'; '.join(suffix_parts)})." if suffix_parts else "."
 
     return InitResult(
@@ -203,10 +245,11 @@ def init_wiki(target: Path) -> InitResult:
         files_registered=registered,
         files_skipped=skipped,
         dedup_skipped=dedup_skipped,
+        empty_load_skipped=empty_load_skipped,
         wiki_root=target,
         message=(
             f"Initialized wiki at {target}/{WIKI_DIR_NAME}/. "
-            f"Registered {registered} markdown source(s) as pending" + suffix
+            f"Registered {registered} source(s) as pending" + suffix
         ),
     )
 
@@ -225,44 +268,64 @@ def _refuse_if_nested(target: Path) -> None:
     )
 
 
-def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[int, int, int]:
-    """Walk ``target``, register every ``.md`` file as a pending source.
+def _register_sources(
+    *,
+    target: Path,
+    raw_dir: Path,
+    db_path: Path,
+    registry: tuple[Loader, ...],
+) -> tuple[int, int, int, int]:
+    """Walk ``target``, register every loadable file as a pending source.
+
+    Parameters
+    ----------
+    registry : tuple[Loader, ...]
+        Pre-built loader registry. Required — every file's loader resolution
+        uses this in-memory registry rather than calling ``get_loader_for``,
+        which would re-parse ``.mdwiki/config.toml`` per file (O(N) TOML
+        parses for a corpus of N files).
 
     Returns
     -------
-    tuple[int, int, int]
-        ``(registered, gitignore_skipped, dedup_skipped)``.
+    tuple[int, int, int, int]
+        ``(registered, gitignore_skipped, dedup_skipped, empty_load_skipped)``.
 
     Duplicate-content files (same SHA-256 prefix → same primary key) are
     skipped via ``INSERT OR IGNORE``; the first occurrence wins, the existing
-    ``raw/<hash>-<slug>.md`` is left untouched, and a counter is bumped. Any
-    other per-row failure is logged to stderr and skipped, so one bad file
-    can't abort the whole walk.
+    ``raw/<hash>-<slug>.md`` is left untouched, and a counter is bumped. Files
+    whose loader returns an empty string (scanned PDFs, empty CSVs, etc.) are
+    counted in ``empty_load_skipped`` — no raw write, no DB row. Any other
+    per-row failure is logged to stderr and skipped, so one bad file can't
+    abort the whole walk.
     """
     import sys
 
     spec = _load_gitignore(target)
-    md_paths = sorted(_iter_markdown_files(target))
+    source_paths = sorted(_iter_loadable_files(target, registry=registry))
     registered = 0
     skipped = 0
     dedup_skipped = 0
+    empty_load_skipped = 0
     sidecar: dict[str, dict[str, str | float]] = {}
 
     with connect(db_path) as conn:
-        for md_path in md_paths:
+        for source_path in source_paths:
             try:
-                rel_posix = md_path.relative_to(target).as_posix()
+                rel_posix = source_path.relative_to(target).as_posix()
                 if spec is not None and spec.match_file(rel_posix):
                     skipped += 1
                     continue
 
-                content_bytes = md_path.read_bytes()
+                # Hash original bytes — the source's identity. Loader output is
+                # derived; if a loader changes (bug fix, format tweak), the same
+                # source still resolves to the same id.
+                content_bytes = source_path.read_bytes()
                 content_hash = hashlib.sha256(content_bytes).hexdigest()
                 short_hash = content_hash[:12]
 
                 # Pre-check by primary key: if another file with identical
                 # content has already been registered this run, skip BOTH the
-                # INSERT and the copyfile. Without this pre-check, two files
+                # INSERT and the loader call. Without this pre-check, two files
                 # sharing content but differing in stem produce two different
                 # raw/<hash>-<slug>.md filenames; the second copy lands on
                 # disk before INSERT OR IGNORE drops the row, leaving an
@@ -274,14 +337,25 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
                     dedup_skipped += 1
                     continue
 
-                slug = _slugify(md_path.stem)
+                loader = _resolve_loader(source_path, registry=registry)
+                markdown_text = loader.load_to_markdown(source_path)
+                if not markdown_text.strip():
+                    # Loader returned empty (e.g. PdfLoader on a scanned PDF,
+                    # CsvLoader on an empty CSV). The loader has already logged
+                    # a warning naming the path; surface the count via
+                    # InitResult.empty_load_skipped so the CLI summary shows it.
+                    empty_load_skipped += 1
+                    continue
+
+                slug = _slugify(source_path.stem)
                 raw_filename = f"{short_hash}-{slug}.md"
                 raw_path_abs = raw_dir / raw_filename
-                # Don't clobber an existing raw/ file when the content is the
-                # same — the first registration wins both in the DB and on disk.
+                # Don't clobber an existing raw/ file — the first registration
+                # wins both in the DB and on disk. raw/ is a homogeneous
+                # markdown store regardless of original filetype.
                 if not raw_path_abs.exists():
-                    shutil.copyfile(md_path, raw_path_abs)
-                mtime = md_path.stat().st_mtime
+                    raw_path_abs.write_text(markdown_text)
+                mtime = source_path.stat().st_mtime
 
                 conn.execute(
                     "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) VALUES (?, ?, ?, ?, ?, ?)",
@@ -292,17 +366,18 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
                     "raw_path": f"raw/{raw_filename}",
                     "content_hash": content_hash,
                     "mtime": mtime,
+                    "loader": loader.name,
                 }
                 registered += 1
             except Exception as exc:  # noqa: BLE001 — bulk-walk resilience
-                print(f"warning: failed to register {md_path}: {exc}", file=sys.stderr)
+                print(f"warning: failed to register {source_path}: {exc}", file=sys.stderr)
                 continue
         conn.commit()
 
     if sidecar:
         (raw_dir / SOURCES_SIDECAR_NAME).write_text(json.dumps(sidecar, indent=2, sort_keys=True))
 
-    return registered, skipped, dedup_skipped
+    return registered, skipped, dedup_skipped, empty_load_skipped
 
 
 # Folders we never recurse into when discovering source markdown.
@@ -312,14 +387,48 @@ def _register_sources(*, target: Path, raw_dir: Path, db_path: Path) -> tuple[in
 _EXCLUDED_DIR_NAMES: frozenset[str] = frozenset({WIKI_DIR_NAME, "wiki", "raw"})
 
 
-def _iter_markdown_files(target: Path) -> list[Path]:
-    """Return every ``.md`` file under ``target``, excluding internal/scaffold dirs.
+def _iter_loadable_files(
+    target: Path, *, registry: tuple[Loader, ...]
+) -> list[Path]:
+    """Return every file under ``target`` that some registered loader claims.
+
+    Parameters
+    ----------
+    registry : tuple[Loader, ...]
+        Pre-built loader registry. ``can_handle`` is checked directly against
+        this registry — avoiding the per-file ``get_loader_for`` call that
+        re-parses ``.mdwiki/config.toml``.
 
     Excludes ``.mdwiki/``, ``wiki/``, and ``raw/`` at any depth — those are
     mdwiki-managed locations and registering files there as user sources
-    would pollute the source table on re-init.
+    would pollute the source table on re-init. Files no loader recognizes
+    are silently dropped (this is the registry's intended filter behavior;
+    use ``mdwiki source`` afterwards to verify what was picked up).
     """
-    return [p for p in target.rglob("*.md") if _EXCLUDED_DIR_NAMES.isdisjoint(p.parts)]
+    out: list[Path] = []
+    for p in target.rglob("*"):
+        if not p.is_file():
+            continue
+        if not _EXCLUDED_DIR_NAMES.isdisjoint(p.parts):
+            continue
+        if not any(loader.can_handle(p) for loader in registry):
+            continue
+        out.append(p)
+    return out
+
+
+def _resolve_loader(path: Path, *, registry: tuple[Loader, ...]) -> Loader:
+    """Return the first loader from ``registry`` that claims ``path``.
+
+    Raises
+    ------
+    UnsupportedFiletypeError
+        No registered loader claims this path's extension.
+    """
+    for loader in registry:
+        if loader.can_handle(path):
+            return loader
+    raise UnsupportedFiletypeError(f"No loader registered for: {path}")
 
 
 def _load_gitignore(target: Path) -> pathspec.PathSpec | None:
