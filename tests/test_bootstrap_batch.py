@@ -196,6 +196,60 @@ def test_bootstrap_batch_unparseable_response_counted_as_failed(tmp_path: Path, 
 
 
 @pytest.mark.unit
+def test_bootstrap_batch_accepts_profile_specific_page_kinds(tmp_path: Path, mocker: MockerFixture) -> None:
+    """A ``framework``-profile wiki must accept ``procedure`` page kinds in batch results.
+
+    Regression: previously ``_apply_one_result`` called ``parse_plan(response_text)``
+    without ``allowed_kinds``, so every batch result that proposed a profile-
+    specific kind (``procedure``, ``meeting``, ``workstream``, etc.) was
+    rejected as "Invalid page kind" and counted as failed. The fix mirrors the
+    sync path by passing ``allowed_kinds_for_wiki(wiki_root)``.
+    """
+    (tmp_path / "framework-doc.md").write_text(
+        "# Framework Doc\n\n## Intro\n\nDescribes a checklist procedure for code review.\n"
+    )
+    init_wiki(tmp_path, profile="framework")
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        rows = conn.execute("SELECT id, original_path FROM sources").fetchall()
+    by_path = {r["original_path"]: r["id"] for r in rows}
+
+    procedure_plan = json.dumps(
+        {
+            "verdict": "ingest",
+            "rationale": "Captures the review checklist as a procedure.",
+            "updates": [],
+            "new_pages": [
+                {
+                    "path": "wiki/procedures/code-review-checklist.md",
+                    "kind": "procedure",
+                    "content": "# Code Review Checklist\n\nA standard procedure.",
+                    "claims": [
+                        {
+                            "source_section_id": "framework-doc.md/Intro",
+                            "quote": "describes a checklist procedure for code review",
+                        }
+                    ],
+                }
+            ],
+            "cross_refs": [],
+        }
+    )
+
+    mocker.patch(
+        "mdwiki.llm.anthropic.AnthropicProvider.estimate_batch_cost",
+        return_value=BatchCostEstimate(requests=1, input_tokens=1, output_tokens_max=1, usd_total=0.01),
+    )
+    mocker.patch(
+        "mdwiki.llm.anthropic.AnthropicProvider.batch_complete",
+        return_value=[BatchResult(custom_id=by_path["framework-doc.md"], text=procedure_plan)],
+    )
+
+    result = bootstrap_batch(tmp_path, yes=True, poll_interval=0.0)
+    assert result.applied == 1
+    assert result.failed == 0
+
+
+@pytest.mark.unit
 def test_cli_init_bootstrap_batch_handles_batch_timeout_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
