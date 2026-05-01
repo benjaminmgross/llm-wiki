@@ -108,6 +108,12 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="bootstrap_batch",
         help="After init, submit every pending source to the Anthropic Batch API (~50%% cheaper, ~1h ETA).",
     )
+    init_p.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="With --bootstrap-batch, skip the cost-estimate confirmation prompt.",
+    )
     init_p.set_defaults(_handler=_cmd_init)
 
     status_p = subparsers.add_parser("status", help="Show pending/ingested counts, recent events, last lint.")
@@ -186,7 +192,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         return 0
 
     if getattr(args, "bootstrap_batch", False):
-        return _run_bootstrap_batch(args.path.resolve())
+        return _run_bootstrap_batch(args.path.resolve(), yes=getattr(args, "yes", False))
 
     if not args.bootstrap:
         return 0
@@ -211,7 +217,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_bootstrap_batch(wiki_root: Path) -> int:
+def _run_bootstrap_batch(wiki_root: Path, *, yes: bool = False) -> int:
     """Submit every pending source to Anthropic's Batch API (~50% off, ~1h ETA)."""
     from mdwiki.bootstrap import bootstrap_batch
 
@@ -219,7 +225,7 @@ def _run_bootstrap_batch(wiki_root: Path) -> int:
     try:
         result = bootstrap_batch(
             wiki_root,
-            yes=False,
+            yes=yes,
             on_status=lambda status, ok, total: print(f"  [batch status: {status} — {ok}/{total} succeeded]"),
             on_progress=lambda i, total, cid: print(f"  [{i}/{total}] applying {cid}..."),
         )
