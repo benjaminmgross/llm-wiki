@@ -18,7 +18,7 @@ import pathspec
 import tomli_w
 
 from mdwiki.discover import WIKI_DIR_NAME, WikiNotFound, find_wiki
-from mdwiki.loaders import UnsupportedFiletypeError, build_registry, get_loader_for
+from mdwiki.loaders import UnsupportedFiletypeError, build_registry
 from mdwiki.loaders.base import Loader
 from mdwiki.state import connect, init_db
 
@@ -273,18 +273,17 @@ def _register_sources(
     target: Path,
     raw_dir: Path,
     db_path: Path,
-    registry: tuple[Loader, ...] | None = None,
+    registry: tuple[Loader, ...],
 ) -> tuple[int, int, int, int]:
     """Walk ``target``, register every loadable file as a pending source.
 
     Parameters
     ----------
-    registry : tuple[Loader, ...], optional
-        Pre-built loader registry. When provided, every file's loader resolution
-        uses this in-memory registry rather than calling ``get_loader_for`` —
-        which would re-parse ``.mdwiki/config.toml`` per file (O(N) TOML parses
-        for a corpus of N files). When None, falls back to ``get_loader_for``
-        for callers that haven't migrated.
+    registry : tuple[Loader, ...]
+        Pre-built loader registry. Required — every file's loader resolution
+        uses this in-memory registry rather than calling ``get_loader_for``,
+        which would re-parse ``.mdwiki/config.toml`` per file (O(N) TOML
+        parses for a corpus of N files).
 
     Returns
     -------
@@ -389,18 +388,16 @@ _EXCLUDED_DIR_NAMES: frozenset[str] = frozenset({WIKI_DIR_NAME, "wiki", "raw"})
 
 
 def _iter_loadable_files(
-    target: Path, *, registry: tuple[Loader, ...] | None = None
+    target: Path, *, registry: tuple[Loader, ...]
 ) -> list[Path]:
     """Return every file under ``target`` that some registered loader claims.
 
     Parameters
     ----------
-    registry : tuple[Loader, ...], optional
-        Pre-built loader registry. When provided, ``can_handle`` is checked
-        directly against this registry — avoiding the per-file
-        ``get_loader_for`` call that re-parses ``.mdwiki/config.toml``. When
-        None, falls back to ``get_loader_for`` (preserves backward-compat for
-        external callers).
+    registry : tuple[Loader, ...]
+        Pre-built loader registry. ``can_handle`` is checked directly against
+        this registry — avoiding the per-file ``get_loader_for`` call that
+        re-parses ``.mdwiki/config.toml``.
 
     Excludes ``.mdwiki/``, ``wiki/``, and ``raw/`` at any depth — those are
     mdwiki-managed locations and registering files there as user sources
@@ -414,32 +411,20 @@ def _iter_loadable_files(
             continue
         if not _EXCLUDED_DIR_NAMES.isdisjoint(p.parts):
             continue
-        if registry is not None:
-            if not any(loader.can_handle(p) for loader in registry):
-                continue
-        else:
-            try:
-                get_loader_for(p)
-            except UnsupportedFiletypeError:
-                continue
+        if not any(loader.can_handle(p) for loader in registry):
+            continue
         out.append(p)
     return out
 
 
-def _resolve_loader(path: Path, *, registry: tuple[Loader, ...] | None) -> Loader:
+def _resolve_loader(path: Path, *, registry: tuple[Loader, ...]) -> Loader:
     """Return the first loader from ``registry`` that claims ``path``.
-
-    Falls back to ``get_loader_for`` when no registry is supplied (preserves
-    backward-compat for callers that haven't migrated to the registry-passing
-    convention).
 
     Raises
     ------
     UnsupportedFiletypeError
         No registered loader claims this path's extension.
     """
-    if registry is None:
-        return get_loader_for(path)
     for loader in registry:
         if loader.can_handle(path):
             return loader
