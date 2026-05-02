@@ -138,6 +138,8 @@ Refresh is content-hash dedup'd against `state.db`, so re-running it is safe and
 ```bash
 # crontab — every morning at 7am, sweep the folder for new files and ingest them
 0 7 * * * cd ~/notes/research && /path/to/mdwiki refresh --bootstrap
+# Or use --bootstrap-batch for ~50% cheaper / ~1h ETA (good for nightly runs):
+0 7 * * * cd ~/notes/research && /path/to/mdwiki refresh --bootstrap-batch -y
 ```
 
 ## Command reference
