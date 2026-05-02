@@ -326,3 +326,120 @@ def test_rebuild_subcommand_succeeds(
     assert (tmp_path / ".mdwiki" / "state.db").is_file()
 
 
+@pytest.mark.unit
+def test_refresh_subcommand_picks_up_new_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Arrange
+    (tmp_path / "alpha.md").write_text("# Alpha")
+    monkeypatch.chdir(tmp_path)
+    main(["init"])
+    capsys.readouterr()
+    (tmp_path / "beta.md").write_text("# Beta")
+
+    # Act
+    exit_code = main(["refresh"])
+
+    # Assert
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Refreshed wiki" in out
+    assert "Registered 1 new source" in out
+
+
+@pytest.mark.unit
+def test_refresh_subcommand_errors_outside_wiki(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Arrange
+    monkeypatch.chdir(tmp_path)
+
+    # Act
+    exit_code = main(["refresh"])
+
+    # Assert
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "mdwiki init" in err
+
+
+@pytest.mark.unit
+def test_refresh_subcommand_errors_on_corrupt_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A corrupt .mdwiki/config.toml must produce a clean error, not a TOMLDecodeError traceback."""
+    # Arrange — init a wiki, then corrupt config.toml
+    (tmp_path / "alpha.md").write_text("# Alpha")
+    monkeypatch.chdir(tmp_path)
+    main(["init"])
+    capsys.readouterr()
+    (tmp_path / ".mdwiki" / "config.toml").write_text("not [valid toml")
+
+    # Act
+    exit_code = main(["refresh"])
+
+    # Assert — exit 1, message names config.toml
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "config.toml" in err
+
+
+@pytest.mark.unit
+def test_refresh_bootstrap_chains_ingest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mocker,  # type: ignore[no-untyped-def]
+) -> None:
+    """refresh --bootstrap should rescan AND iterate over pending sources."""
+    import json
+
+    from mdwiki.llm.base import CompleteResult
+
+    # Arrange — init an empty folder, then drop a new source so refresh has work to do
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    main(["init"])
+    capsys.readouterr()
+    (tmp_path / "beta.md").write_text(
+        "# Beta\n\n## body\n\nThis paper introduces attention sinks for long contexts.\n"
+    )
+
+    plan = json.dumps({
+        "verdict": "ingest",
+        "rationale": "x",
+        "updates": [],
+        "new_pages": [{
+            "path": "wiki/concepts/sinks.md",
+            "kind": "concept",
+            "content": "# Sinks\n\nbody",
+            "claims": [{
+                "source_section_id": "beta.md/body",
+                "quote": "this paper introduces attention sinks for long contexts",
+            }],
+        }],
+        "cross_refs": [],
+    })
+    mocker.patch(
+        "mdwiki.llm.anthropic.AnthropicProvider.complete",
+        return_value=CompleteResult(text=plan, input_tokens=10, output_tokens=10),
+    )
+
+    # Act
+    exit_code = main(["refresh", "--bootstrap"])
+
+    # Assert
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Bootstrap done" in out
+    assert "1 of 1" in out
+    assert (tmp_path / "wiki" / "concepts" / "sinks.md").exists()
+

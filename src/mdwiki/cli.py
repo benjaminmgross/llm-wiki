@@ -311,6 +311,8 @@ def _run_bootstrap_batch(wiki_root: Path, *, yes: bool = False) -> int:
 
 def _cmd_refresh(args: argparse.Namespace) -> int:
     """Handler for ``mdwiki refresh [--bootstrap | --bootstrap-batch]``."""
+    import tomllib
+
     try:
         wiki_root = find_wiki()
     except WikiNotFound as exc:
@@ -321,6 +323,12 @@ def _cmd_refresh(args: argparse.Namespace) -> int:
         result = refresh_wiki(wiki_root)
     except SidecarCorruptError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except tomllib.TOMLDecodeError as exc:
+        print(
+            f"error: .mdwiki/config.toml is unreadable ({exc}); fix the syntax and re-run.",
+            file=sys.stderr,
+        )
         return 1
     except (FileNotFoundError, OSError) as exc:
         print(f"error: failed to read wiki config — {exc}", file=sys.stderr)
