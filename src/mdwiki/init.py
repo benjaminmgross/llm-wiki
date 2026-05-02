@@ -141,6 +141,16 @@ class NestedWikiError(Exception):
     """Raised when ``init_wiki`` is called inside a folder whose parent already has a wiki."""
 
 
+class SidecarCorruptError(Exception):
+    """Raised when ``raw/.sources.json`` is present but cannot be parsed as JSON.
+
+    A silent fall-through to an empty dict would clobber the existing sidecar on
+    the next write — exactly the data-loss the merge fix was meant to prevent.
+    Surfacing the corruption forces the user to restore from git or rebuild
+    ``raw/`` before re-running init / refresh.
+    """
+
+
 @dataclass(frozen=True)
 class InitResult:
     """The outcome of an ``init_wiki`` call.
@@ -324,7 +334,26 @@ def _register_sources(
     skipped = 0
     dedup_skipped = 0
     empty_load_skipped = 0
-    sidecar: dict[str, dict[str, str | float]] = {}
+    # Seed the sidecar with prior entries so a re-invocation (e.g. via
+    # `mdwiki refresh`) accumulates rather than clobbers. On a fresh init the
+    # file does not yet exist and the dict starts empty — byte-equivalent.
+    sidecar_path = raw_dir / SOURCES_SIDECAR_NAME
+    sidecar: dict[str, dict[str, str | float]]
+    if sidecar_path.is_file():
+        try:
+            sidecar = json.loads(sidecar_path.read_text())
+        except json.JSONDecodeError as exc:
+            # Re-raise as a typed exception so the CLI handlers can print a
+            # remediation hint (restore from git / re-run with a fresh raw/)
+            # instead of dumping a traceback. Crucially, do NOT fall through
+            # to an empty dict — that would clobber the corrupt-but-recoverable
+            # sidecar on the next write.
+            raise SidecarCorruptError(
+                f"raw/{SOURCES_SIDECAR_NAME} is not valid JSON ({exc}). "
+                "Restore it from version control, or delete raw/ and re-run init."
+            ) from exc
+    else:
+        sidecar = {}
 
     with connect(db_path) as conn:
         for source_path in source_paths:

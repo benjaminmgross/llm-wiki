@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import tomllib
 from pathlib import Path
 
 import pytest
 
-from mdwiki.init import NestedWikiError, init_wiki
+from mdwiki.init import NestedWikiError, SidecarCorruptError, _register_sources, init_wiki
+from mdwiki.loaders import build_registry
 from mdwiki.state import connect
 
 
@@ -264,3 +267,66 @@ def test_init_skips_pre_existing_wiki_and_raw_dirs(tmp_path: Path) -> None:
         rows = conn.execute("SELECT original_path FROM sources").fetchall()
     paths = [row["original_path"] for row in rows]
     assert paths == ["real-source.md"]
+
+
+@pytest.mark.unit
+def test_refresh_cli_errors_on_corrupt_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A truncated raw/.sources.json must surface as a clean error, not a JSONDecodeError traceback.
+
+    The CLI must catch SidecarCorruptError and print a remediation hint;
+    silent fall-through to an empty dict would clobber the salvageable
+    sidecar on the next write.
+    """
+    # Arrange — init a wiki, then corrupt its sidecar
+    from mdwiki.cli import main
+
+    (tmp_path / "alpha.md").write_text("# Alpha")
+    monkeypatch.chdir(tmp_path)
+    main(["init"])
+    capsys.readouterr()
+    (tmp_path / "raw" / ".sources.json").write_text("{not valid")
+
+    # Act — refresh with a corrupt sidecar
+    exit_code = main(["refresh"])
+
+    # Assert — clean error message + nonzero exit
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert ".sources.json" in err
+
+
+@pytest.mark.unit
+def test_register_sources_merges_existing_sidecar(tmp_path: Path) -> None:
+    """A second _register_sources call must not clobber the first run's sidecar.
+
+    The sidecar at raw/.sources.json is the source of truth for ``mdwiki rebuild``.
+    Refresh re-invokes ``_register_sources`` against an existing wiki; without
+    a merge step, the second write overwrites the first batch's entries.
+    """
+    # Arrange — first init registers alpha.md
+    (tmp_path / "alpha.md").write_text("# Alpha")
+    init_wiki(tmp_path)
+    sidecar_path = tmp_path / "raw" / ".sources.json"
+    first_sidecar = json.loads(sidecar_path.read_text())
+    assert len(first_sidecar) == 1
+
+    # Act — drop a new file, then re-run _register_sources directly (mimics refresh)
+    (tmp_path / "beta.md").write_text("# Beta")
+    config = tomllib.loads((tmp_path / ".mdwiki" / "config.toml").read_text())
+    registry = build_registry(config=config, provider=None)
+    _register_sources(
+        target=tmp_path,
+        raw_dir=tmp_path / "raw",
+        db_path=tmp_path / ".mdwiki" / "state.db",
+        registry=registry,
+    )
+
+    # Assert — sidecar contains BOTH alpha and beta entries
+    merged_sidecar = json.loads(sidecar_path.read_text())
+    assert len(merged_sidecar) == 2
+    assert set(merged_sidecar.keys()) >= set(first_sidecar.keys())

@@ -19,16 +19,17 @@ from mdwiki import __version__
 from mdwiki.discover import WikiNotFound, find_wiki
 from mdwiki.doctor import format_report, run_doctor
 from mdwiki.ingest import IngestError, ingest_many, ingest_source
-from mdwiki.init import NestedWikiError, init_wiki
+from mdwiki.init import NestedWikiError, SidecarCorruptError, init_wiki
 from mdwiki.lint import lint_wiki
 from mdwiki.lint_fix import lint_fix
 from mdwiki.llm import UnknownProviderError
 from mdwiki.llm.anthropic import BatchTimeoutError, BatchUnexpectedStatusError, MissingAPIKeyError
 from mdwiki.profiles import UnknownProfileError, list_profile_names
-from mdwiki.skill import WikiNotFoundForSkill, run_skill
 from mdwiki.query import QueryError, query_wiki
 from mdwiki.rebuild import RebuildError, rebuild_wiki
 from mdwiki.rebuild_log import rebuild_log
+from mdwiki.refresh import refresh_wiki
+from mdwiki.skill import WikiNotFoundForSkill, run_skill
 from mdwiki.source import find_matching_sources, format_disambiguation, format_source_info, get_source_info
 from mdwiki.status import format_status, get_status
 from mdwiki.synthesize import SynthesisError, synthesize_auto, synthesize_topic
@@ -124,6 +125,30 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     init_p.set_defaults(_handler=_cmd_init)
 
+    refresh_p = subparsers.add_parser(
+        "refresh",
+        help="Re-scan an initialized wiki for newly-added sources and register them as pending.",
+    )
+    refresh_bootstrap_group = refresh_p.add_mutually_exclusive_group()
+    refresh_bootstrap_group.add_argument(
+        "--bootstrap",
+        action="store_true",
+        help="After refresh, immediately ingest every pending source (chains `ingest --pending --yes`).",
+    )
+    refresh_bootstrap_group.add_argument(
+        "--bootstrap-batch",
+        action="store_true",
+        dest="bootstrap_batch",
+        help="After refresh, submit every pending source to the Anthropic Batch API (~50%% cheaper, ~1h ETA).",
+    )
+    refresh_p.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="With --bootstrap-batch, skip the cost-estimate confirmation prompt (no effect with --bootstrap).",
+    )
+    refresh_p.set_defaults(_handler=_cmd_refresh)
+
     status_p = subparsers.add_parser("status", help="Show pending/ingested counts, recent events, last lint.")
     status_p.set_defaults(_handler=_cmd_status)
 
@@ -198,6 +223,9 @@ def _cmd_init(args: argparse.Namespace) -> int:
     try:
         result = init_wiki(args.path, profile=args.profile)
     except NestedWikiError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except SidecarCorruptError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except UnknownProfileError as exc:
@@ -279,6 +307,56 @@ def _run_bootstrap_batch(wiki_root: Path, *, yes: bool = False) -> int:
         f"({result.failed} failed, {result.skipped} verdict-skip)."
     )
     return 0 if result.failed == 0 else 1
+
+
+def _cmd_refresh(args: argparse.Namespace) -> int:
+    """Handler for ``mdwiki refresh [--bootstrap | --bootstrap-batch]``."""
+    try:
+        wiki_root = find_wiki()
+    except WikiNotFound as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        result = refresh_wiki(wiki_root)
+    except SidecarCorruptError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except (FileNotFoundError, OSError) as exc:
+        print(f"error: failed to read wiki config — {exc}", file=sys.stderr)
+        return 1
+    print(result.message)
+
+    if result.files_registered == 0:
+        return 0
+
+    if getattr(args, "bootstrap_batch", False):
+        return _run_bootstrap_batch(wiki_root, yes=getattr(args, "yes", False))
+
+    if not args.bootstrap:
+        return 0
+
+    print(f"\n--- bootstrap: ingesting {result.files_registered} pending source(s) ---\n")
+    try:
+        ingest_results = ingest_many(
+            wiki_root,
+            scope="pending",
+            yes=True,
+            on_progress=lambda i, total, path: print(f"[{i}/{total}] {path}"),
+            on_failure=lambda path, exc: print(f"  ! failed: {path}: {exc}", file=sys.stderr),
+        )
+    except (MissingAPIKeyError, UnknownProviderError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"error: provider config invalid — {exc}", file=sys.stderr)
+        return 1
+    except _FATAL_API_ERRORS as exc:
+        print(_fatal_api_error_message(exc), file=sys.stderr)
+        return 1
+    applied = sum(1 for r in ingest_results if r.applied)
+    print(f"\nBootstrap done: {applied} of {len(ingest_results)} applied.")
+    return 0
 
 
 def _cmd_status(_args: argparse.Namespace) -> int:
