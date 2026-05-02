@@ -11,7 +11,7 @@ fallback chunker tiers, transcripts-aware quote-anchor mode, page version chain
 quality primitives (rejections, cost_ledger, [unverified-quote] lint).
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 from .chunker import MarkdownChunker, Section
 from .clustering import cluster_files
