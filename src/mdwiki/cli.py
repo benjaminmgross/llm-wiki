@@ -236,36 +236,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
     if result.files_registered == 0:
         return 0
 
-    if getattr(args, "bootstrap_batch", False):
-        return _run_bootstrap_batch(args.path.resolve(), yes=getattr(args, "yes", False))
+    if args.bootstrap_batch:
+        return _run_bootstrap_batch(args.path.resolve(), yes=args.yes)
 
     if not args.bootstrap:
         return 0
 
-    print(f"\n--- bootstrap: ingesting {result.files_registered} pending source(s) ---\n")
-    try:
-        ingest_results = ingest_many(
-            args.path.resolve(),
-            scope="pending",
-            yes=True,
-            on_progress=lambda i, total, path: print(f"[{i}/{total}] {path}"),
-            on_failure=lambda path, exc: print(f"  ! failed: {path}: {exc}", file=sys.stderr),
-        )
-    except (MissingAPIKeyError, UnknownProviderError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except ValueError as exc:
-        # _build_openai_compatible raises ValueError for missing required keys
-        # (e.g. base_url). UnknownProviderError is a ValueError subclass but is
-        # caught above first, so this branch is reserved for config-shape errors.
-        print(f"error: provider config invalid — {exc}", file=sys.stderr)
-        return 1
-    except _FATAL_API_ERRORS as exc:
-        print(_fatal_api_error_message(exc), file=sys.stderr)
-        return 1
-    applied = sum(1 for r in ingest_results if r.applied)
-    print(f"\nBootstrap done: {applied} of {len(ingest_results)} applied.")
-    return 0
+    return _run_bootstrap_sync(args.path.resolve(), files_registered=result.files_registered)
 
 
 def _run_bootstrap_batch(wiki_root: Path, *, yes: bool = False) -> int:
@@ -309,6 +286,47 @@ def _run_bootstrap_batch(wiki_root: Path, *, yes: bool = False) -> int:
     return 0 if result.failed == 0 else 1
 
 
+def _run_bootstrap_sync(wiki_root: Path, *, files_registered: int) -> int:
+    """Chain ``ingest_many(scope='pending', yes=True)`` after init or refresh.
+
+    Parameters
+    ----------
+    wiki_root : Path
+        Resolved wiki root passed to ``ingest_many``.
+    files_registered : int
+        Count printed in the banner; informational only.
+
+    Returns
+    -------
+    int
+        ``0`` on success; ``1`` on a provider/auth/config/transport failure.
+    """
+    print(f"\n--- bootstrap: ingesting {files_registered} pending source(s) ---\n")
+    try:
+        ingest_results = ingest_many(
+            wiki_root,
+            scope="pending",
+            yes=True,
+            on_progress=lambda i, total, path: print(f"[{i}/{total}] {path}"),
+            on_failure=lambda path, exc: print(f"  ! failed: {path}: {exc}", file=sys.stderr),
+        )
+    except (MissingAPIKeyError, UnknownProviderError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        # _build_openai_compatible raises ValueError for missing required keys
+        # (e.g. base_url). UnknownProviderError is a ValueError subclass but is
+        # caught above first, so this branch is reserved for config-shape errors.
+        print(f"error: provider config invalid — {exc}", file=sys.stderr)
+        return 1
+    except _FATAL_API_ERRORS as exc:
+        print(_fatal_api_error_message(exc), file=sys.stderr)
+        return 1
+    applied = sum(1 for r in ingest_results if r.applied)
+    print(f"\nBootstrap done: {applied} of {len(ingest_results)} applied.")
+    return 0
+
+
 def _cmd_refresh(args: argparse.Namespace) -> int:
     """Handler for ``mdwiki refresh [--bootstrap | --bootstrap-batch]``."""
     import tomllib
@@ -338,33 +356,13 @@ def _cmd_refresh(args: argparse.Namespace) -> int:
     if result.files_registered == 0:
         return 0
 
-    if getattr(args, "bootstrap_batch", False):
-        return _run_bootstrap_batch(wiki_root, yes=getattr(args, "yes", False))
+    if args.bootstrap_batch:
+        return _run_bootstrap_batch(wiki_root, yes=args.yes)
 
     if not args.bootstrap:
         return 0
 
-    print(f"\n--- bootstrap: ingesting {result.files_registered} pending source(s) ---\n")
-    try:
-        ingest_results = ingest_many(
-            wiki_root,
-            scope="pending",
-            yes=True,
-            on_progress=lambda i, total, path: print(f"[{i}/{total}] {path}"),
-            on_failure=lambda path, exc: print(f"  ! failed: {path}: {exc}", file=sys.stderr),
-        )
-    except (MissingAPIKeyError, UnknownProviderError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except ValueError as exc:
-        print(f"error: provider config invalid — {exc}", file=sys.stderr)
-        return 1
-    except _FATAL_API_ERRORS as exc:
-        print(_fatal_api_error_message(exc), file=sys.stderr)
-        return 1
-    applied = sum(1 for r in ingest_results if r.applied)
-    print(f"\nBootstrap done: {applied} of {len(ingest_results)} applied.")
-    return 0
+    return _run_bootstrap_sync(wiki_root, files_registered=result.files_registered)
 
 
 def _cmd_status(_args: argparse.Namespace) -> int:
