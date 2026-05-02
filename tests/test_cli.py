@@ -350,6 +350,31 @@ def test_refresh_subcommand_picks_up_new_files(
 
 
 @pytest.mark.unit
+def test_refresh_subcommand_accepts_explicit_path(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """refresh accepts a positional path arg; the wiki is located via that path, not cwd.
+
+    Deliberately does NOT use ``monkeypatch.chdir`` — if a future refactor drops
+    ``args.path`` and falls back to cwd, this test must fail.
+    """
+    # Arrange — init a wiki, then drop a new file. cwd is NOT the wiki.
+    (tmp_path / "alpha.md").write_text("# Alpha")
+    main(["init", str(tmp_path)])
+    capsys.readouterr()
+    (tmp_path / "beta.md").write_text("# Beta")
+
+    # Act — call refresh from outside the wiki, passing the path explicitly
+    exit_code = main(["refresh", str(tmp_path)])
+
+    # Assert
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Registered 1 new source" in out
+
+
+@pytest.mark.unit
 def test_refresh_subcommand_no_new_files_returns_zero(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
