@@ -7,7 +7,12 @@
 
 Built on [Karpathy's llm-wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). The wiki is a *persistent, compounding artifact* — each ingest doesn't just file the source, it weaves into existing pages, adds cross-references, and may produce synthesis writeups across what you already have. Sources are immutable. Pages are LLM-owned. You ask questions and curate; the LLM does the bookkeeping.
 
-**v1.2.0 highlights (new):**
+**v1.3.0 highlights (new):**
+
+- **`mdwiki refresh`** — re-scan an initialized wiki for newly-added files and register them as pending. Pair with `--bootstrap` for one-shot refreshes (`mdwiki refresh --bootstrap`); ideal for daily cron / scheduled-agent workflows. Content-hash dedup means previously-registered files are skipped automatically.
+- **Sidecar merge fix** — `_register_sources` now merges with the existing `raw/.sources.json` instead of overwriting, so `mdwiki rebuild` continues to work correctly after a refresh.
+
+**v1.2.0 highlights:**
 
 - **Corpus-aware profiles** — `mdwiki init --profile=initiative|transcripts|framework|working-dir`. Each profile pre-bakes a tuned `schema.md` + `config.toml` overlay tailored to its corpus shape. `working-dir` is the legacy default.
 - **`initiative` profile** — workhorse for project / strategy / cross-functional folders. Page kinds `decision` / `status` / `workstream` / `owner`.
@@ -49,25 +54,29 @@ alias mdwiki=~/path/to/markdown-consolidator/.venv/bin/mdwiki
 
 ## Quickstart
 
-Point it at any folder of markdown:
+Point it at any folder of mixed sources:
 
 ```bash
-cd ~/notes/research          # any folder with .md files
-mdwiki init                  # scaffold .mdwiki/, register sources, ingest nothing yet
-mdwiki status                # see "412 pending sources"
-mdwiki doctor                # verify provider + API ping
-mdwiki ingest one-file.md    # interactive single-source ingest
-mdwiki ingest --pending      # bulk ingest everything that's still pending
+cd ~/notes/research                  # any folder with .md / .pdf / .docx / .csv / .txt / code
+mdwiki init --profile=working-dir    # scaffold .mdwiki/, register sources, ingest nothing yet
+                                     # profiles: working-dir | initiative | transcripts | framework
+mdwiki status                        # see "412 pending sources"
+mdwiki doctor                        # verify provider + API ping
+mdwiki ingest one-file.md            # interactive single-source ingest
+mdwiki ingest --pending              # bulk ingest everything that's still pending
+mdwiki refresh                       # later: pick up files added since init
+mdwiki refresh --bootstrap           # ...and immediately ingest them (good for cron)
 mdwiki query "what did I conclude about transformer attention sinks?"
 mdwiki synthesize "fine-tuning vs RAG decision framework"
-mdwiki lint                  # broken refs, orphans, stale pages, coverage gaps
-mdwiki undo                  # roll back the last transaction
+mdwiki lint                          # broken refs, orphans, stale pages, coverage gaps
+mdwiki undo                          # roll back the last transaction
 ```
 
 Or skip the steps and bootstrap in one shot:
 
 ```bash
-mdwiki init --bootstrap      # init + ingest every pending source with --yes
+mdwiki init --bootstrap                          # init + ingest every pending source with --yes
+mdwiki init --profile=initiative --bootstrap     # same, with a corpus-aware profile
 ```
 
 ## What gets created
@@ -95,11 +104,48 @@ your-folder/
 
 The folder *is* the wiki. Move it, copy it, share it — `mdwiki` re-discovers itself by walking up for `.mdwiki/` (like git).
 
+## Profiles (corpus-aware seed schemas)
+
+`mdwiki init --profile=<name>` picks a tuned `schema.md` + `config.toml` overlay tailored to your folder's shape. The profile is baked at init time; once initialized, the schema is yours to edit and the profile name is no longer authoritative.
+
+| Profile | Best for | Page kinds added |
+|---|---|---|
+| `working-dir` (default) | Generic notes, mixed-topic working folders | `entity` / `concept` / `synthesis` only |
+| `initiative` | Project / strategy / cross-functional folders (capital-raise, market-expansion, vc-scheduling-style) | `decision` / `status` / `workstream` / `owner` |
+| `transcripts` | Meeting / call / interview corpora (`.vtt`, `.srt`, Fathom-style markdown). Speaker-turn-aware chunker; mandatory `person` entity per speaker | `meeting` / `decision` / `commitment` / `blocker` |
+| `framework` | "How-we-do-X" folders — procedure / template / assessment / learning taxonomy | `procedure` / `template` / `assessment` / `learning` |
+
+```bash
+mdwiki init --profile=initiative ~/dev/projects/capital-raise
+mdwiki init --profile=transcripts ~/recordings/team-meetings
+```
+
+Profile schema files live at `src/mdwiki/profiles/<name>/schema.md` if you want to read or fork one before init.
+
+## Keeping a wiki current — `mdwiki refresh`
+
+`mdwiki init` registers every loadable file *that exists at init time*. New files dropped into the folder afterwards are invisible to the wiki until you re-run discovery. That's what `refresh` does:
+
+```bash
+cd ~/notes/research
+# ... drop new files into the folder ...
+mdwiki refresh                       # registers anything new as pending
+mdwiki refresh --bootstrap           # ...and immediately ingests them (no prompts)
+```
+
+Refresh is content-hash dedup'd against `state.db`, so re-running it is safe and idempotent. Unchanged files are skipped; only genuinely new files become pending. Refresh adds; it never removes. If you delete a source file, the `raw/` copy and the wiki pages it produced stay; run `mdwiki lint` to flag the resulting orphans / coverage gaps. This makes `mdwiki refresh --bootstrap` the right one-liner for a daily cron or a scheduled-agent loop:
+
+```bash
+# crontab — every morning at 7am, sweep the folder for new files and ingest them
+0 7 * * * cd ~/notes/research && /path/to/mdwiki refresh --bootstrap
+```
+
 ## Command reference
 
 | Command | Purpose |
 |---|---|
-| `mdwiki init [path] [--bootstrap \| --bootstrap-batch]` | Scaffold `.mdwiki/`, register every loadable file as pending. `--bootstrap` chains sync `ingest --pending --yes`; `--bootstrap-batch` submits every pending source via Anthropic's Batch API (~50% cheaper, ~1h ETA) |
+| `mdwiki init [path] [--profile=<name>] [--bootstrap \| --bootstrap-batch]` | Scaffold `.mdwiki/`, register every loadable file as pending. `--profile` selects a corpus-aware seed schema (default: `working-dir`). `--bootstrap` chains sync `ingest --pending --yes`; `--bootstrap-batch` submits every pending source via Anthropic's Batch API (~50% cheaper, ~1h ETA) |
+| `mdwiki refresh [--bootstrap \| --bootstrap-batch]` | Re-scan an initialized wiki for newly-added files; register new ones as pending. `--bootstrap` chains a sync ingest; `--bootstrap-batch` uses the Batch API. Ideal for daily cron / scheduled-agent workflows |
 | `mdwiki status` | Pending/ingested counts, page counts by kind, recent events, last lint |
 | `mdwiki source <hash-prefix>` | Inspect one registered source — original path, raw path, dependent pages |
 | `mdwiki rebuild` | Restore the `sources` table from `raw/.sources.json` after `state.db` deletion |
