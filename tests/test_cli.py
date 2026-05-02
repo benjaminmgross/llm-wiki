@@ -435,6 +435,35 @@ def test_refresh_subcommand_errors_on_corrupt_config(
 
 
 @pytest.mark.unit
+def test_refresh_subcommand_errors_on_corrupt_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A truncated raw/.sources.json must surface as a clean error, not a JSONDecodeError traceback.
+
+    The CLI must catch SidecarCorruptError and print a remediation hint;
+    silent fall-through to an empty dict would clobber the salvageable
+    sidecar on the next write.
+    """
+    # Arrange — init a wiki, then corrupt its sidecar
+    (tmp_path / "alpha.md").write_text("# Alpha")
+    monkeypatch.chdir(tmp_path)
+    main(["init"])
+    capsys.readouterr()
+    (tmp_path / "raw" / ".sources.json").write_text("{not valid")
+
+    # Act — refresh with a corrupt sidecar
+    exit_code = main(["refresh"])
+
+    # Assert — clean error message + nonzero exit
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert ".sources.json" in err
+
+
+@pytest.mark.unit
 def test_refresh_bootstrap_batch_chains_submission(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
