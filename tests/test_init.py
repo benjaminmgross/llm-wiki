@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from mdwiki.init import NestedWikiError, SidecarCorruptError, _register_sources, init_wiki
+from mdwiki.init import NestedWikiError, _register_sources, init_wiki
 from mdwiki.loaders import build_registry
 from mdwiki.state import connect
 
