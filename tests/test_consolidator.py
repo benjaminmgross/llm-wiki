@@ -11,7 +11,7 @@ import pytest
 def test_version():
     """Test that version is accessible."""
     from mdwiki import __version__
-    assert __version__ == "1.2.0"
+    assert __version__ == "1.3.0"
 
 
 def test_inventory_empty_directory():
