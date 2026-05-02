@@ -437,6 +437,38 @@ def test_refresh_bootstrap_batch_chains_submission(
 
 
 @pytest.mark.unit
+def test_refresh_bootstrap_chains_when_no_new_files_but_pending_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mocker,  # type: ignore[no-untyped-def]
+) -> None:
+    """refresh --bootstrap must reach the ingest path even when no NEW files were registered.
+
+    A prior crashed bootstrap can leave pending rows in state.db. ``refresh
+    --bootstrap`` is the user's recovery one-liner; silently no-op-ing
+    when ``files_registered == 0`` would drop their intent.
+    """
+    # Arrange — init a wiki (registers alpha.md as pending). Refresh will register 0 new.
+    (tmp_path / "alpha.md").write_text("# Alpha")
+    monkeypatch.chdir(tmp_path)
+    main(["init"])
+    capsys.readouterr()
+    sync_mock = mocker.patch("mdwiki.cli._run_bootstrap_sync", return_value=0)
+
+    # Act — refresh sees no new files but the user explicitly asked for --bootstrap
+    exit_code = main(["refresh", "--bootstrap"])
+
+    # Assert — bootstrap-sync chain still fired with files_registered=0
+    assert exit_code == 0
+    sync_mock.assert_called_once()
+    call_kwargs = sync_mock.call_args.kwargs
+    assert call_kwargs == {"files_registered": 0}
+    (positional_root,) = sync_mock.call_args.args
+    assert positional_root == tmp_path.resolve()
+
+
+@pytest.mark.unit
 def test_refresh_bootstrap_chains_ingest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -360,16 +360,20 @@ def _cmd_refresh(args: argparse.Namespace) -> int:
         return 1
     print(result.message)
 
-    if result.files_registered == 0:
-        return 0
-
+    # NOTE: unlike _cmd_init, refresh does NOT short-circuit on
+    # ``files_registered == 0``. ``--bootstrap`` / ``--bootstrap-batch`` mean
+    # "ingest pending sources", and a wiki may carry pending rows from a prior
+    # crashed bootstrap run even when the current refresh registered nothing
+    # new. Skipping the chain there would silently drop the user's recovery
+    # intent. Both ``ingest_many(scope='pending')`` and ``bootstrap_batch``
+    # handle the empty-pending case gracefully (no-op + exit 0).
     if args.bootstrap_batch:
         return _run_bootstrap_batch(wiki_root, yes=args.yes)
 
-    if not args.bootstrap:
-        return 0
+    if args.bootstrap:
+        return _run_bootstrap_sync(wiki_root, files_registered=result.files_registered)
 
-    return _run_bootstrap_sync(wiki_root, files_registered=result.files_registered)
+    return 0
 
 
 def _cmd_status(_args: argparse.Namespace) -> int:
