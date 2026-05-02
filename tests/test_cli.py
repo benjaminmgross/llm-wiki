@@ -77,6 +77,36 @@ def test_init_bootstrap_chains_ingest(
 
 
 @pytest.mark.unit
+def test_init_subcommand_errors_on_corrupt_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A pre-existing corrupt raw/.sources.json on a fresh init must error cleanly.
+
+    Reachable in the wild: a user follows the README's `mdwiki rebuild` recovery
+    flow (delete .mdwiki/, keep raw/) but raw/.sources.json got truncated.
+    Init's _register_sources reads any pre-existing sidecar; the CLI must
+    surface SidecarCorruptError, not a raw traceback.
+    """
+    # Arrange — pre-create raw/ with a corrupt sidecar; do NOT create .mdwiki/
+    (tmp_path / "alpha.md").write_text("# Alpha")
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / ".sources.json").write_text("{not valid")
+    monkeypatch.chdir(tmp_path)
+
+    # Act — init runs the full path because .mdwiki/ does not exist
+    exit_code = main(["init"])
+
+    # Assert — clean error message + nonzero exit
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert ".sources.json" in err
+
+
+@pytest.mark.unit
 def test_init_subcommand_idempotent_message_on_second_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
