@@ -393,6 +393,33 @@ def test_refresh_subcommand_errors_on_corrupt_config(
 
 
 @pytest.mark.unit
+def test_refresh_bootstrap_batch_chains_submission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mocker,  # type: ignore[no-untyped-def]
+) -> None:
+    """refresh --bootstrap-batch should rescan and route through _run_bootstrap_batch."""
+    # Arrange — init a wiki, drop a new file so refresh registers something
+    monkeypatch.chdir(tmp_path)
+    main(["init"])
+    capsys.readouterr()
+    (tmp_path / "beta.md").write_text("# Beta")
+    batch_mock = mocker.patch("mdwiki.cli._run_bootstrap_batch", return_value=0)
+
+    # Act
+    exit_code = main(["refresh", "--bootstrap-batch", "--yes"])
+
+    # Assert — _run_bootstrap_batch was called with the resolved wiki root + yes=True
+    assert exit_code == 0
+    batch_mock.assert_called_once()
+    call_kwargs = batch_mock.call_args.kwargs
+    assert call_kwargs == {"yes": True}
+    (positional_root,) = batch_mock.call_args.args
+    assert positional_root == tmp_path.resolve()
+
+
+@pytest.mark.unit
 def test_refresh_bootstrap_chains_ingest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
