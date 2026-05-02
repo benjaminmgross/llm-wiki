@@ -350,6 +350,23 @@ def test_refresh_subcommand_picks_up_new_files(
 
 
 @pytest.mark.unit
+def test_refresh_subcommand_no_new_files_returns_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "alpha.md").write_text("# Alpha")
+    monkeypatch.chdir(tmp_path)
+    main(["init"])
+    capsys.readouterr()
+    exit_code = main(["refresh"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Registered 0 new source" in out
+    assert "already-registered" in out
+
+
+@pytest.mark.unit
 def test_refresh_subcommand_errors_outside_wiki(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
