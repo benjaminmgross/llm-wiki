@@ -129,6 +129,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "refresh",
         help="Re-scan an initialized wiki for newly-added sources and register them as pending.",
     )
+    refresh_p.add_argument(
+        "path",
+        nargs="?",
+        type=Path,
+        default=Path.cwd(),
+        help="Folder inside the wiki tree (default: current directory). The wiki is located by walking up for .mdwiki/.",
+    )
     refresh_bootstrap_group = refresh_p.add_mutually_exclusive_group()
     refresh_bootstrap_group.add_argument(
         "--bootstrap",
@@ -328,11 +335,11 @@ def _run_bootstrap_sync(wiki_root: Path, *, files_registered: int) -> int:
 
 
 def _cmd_refresh(args: argparse.Namespace) -> int:
-    """Handler for ``mdwiki refresh [--bootstrap | --bootstrap-batch]``."""
+    """Handler for ``mdwiki refresh [path] [--bootstrap | --bootstrap-batch]``."""
     import tomllib
 
     try:
-        wiki_root = find_wiki()
+        wiki_root = find_wiki(args.path)
     except WikiNotFound as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

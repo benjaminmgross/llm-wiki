@@ -145,7 +145,7 @@ Refresh is content-hash dedup'd against `state.db`, so re-running it is safe and
 | Command | Purpose |
 |---|---|
 | `mdwiki init [path] [--profile=<name>] [--bootstrap \| --bootstrap-batch]` | Scaffold `.mdwiki/`, register every loadable file as pending. `--profile` selects a corpus-aware seed schema (default: `working-dir`). `--bootstrap` chains sync `ingest --pending --yes`; `--bootstrap-batch` submits every pending source via Anthropic's Batch API (~50% cheaper, ~1h ETA) |
-| `mdwiki refresh [--bootstrap \| --bootstrap-batch]` | Re-scan an initialized wiki for newly-added files; register new ones as pending. `--bootstrap` chains a sync ingest; `--bootstrap-batch` uses the Batch API. Ideal for daily cron / scheduled-agent workflows |
+| `mdwiki refresh [path] [--bootstrap \| --bootstrap-batch]` | Re-scan an initialized wiki for newly-added files; register new ones as pending. `path` defaults to the current directory and may point anywhere inside the wiki tree. `--bootstrap` chains a sync ingest; `--bootstrap-batch` uses the Batch API. Ideal for daily cron / scheduled-agent workflows |
 | `mdwiki status` | Pending/ingested counts, page counts by kind, recent events, last lint |
 | `mdwiki source <hash-prefix>` | Inspect one registered source — original path, raw path, dependent pages |
 | `mdwiki rebuild` | Restore the `sources` table from `raw/.sources.json` after `state.db` deletion |
