@@ -10,6 +10,7 @@ the LLM doesn't fail validation over an incidental capital. Quotes shorter than
 from __future__ import annotations
 
 import re
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -196,8 +197,6 @@ def min_quote_words_for_wiki(wiki_root: Path) -> int:
     int
         Minimum word count to pass to ``verify_plan``. Always >= 1.
     """
-    import tomllib
-
     config_path = wiki_root / ".mdwiki" / "config.toml"
     if not config_path.is_file():
         return MIN_QUOTE_WORDS
