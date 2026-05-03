@@ -211,6 +211,8 @@ class AnthropicProvider(Provider):
             If ``stop_reason`` is ``"max_tokens"`` — the response is truncated and
             cannot be safely parsed as JSON. Caller should retry with a higher cap.
         """
+        if tools is None and tool_choice is not None:
+            raise ValueError("tool_choice requires tools to be set")
         stream_kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
@@ -331,6 +333,8 @@ class AnthropicProvider(Provider):
         """
         sdk_requests = []
         for req in requests:
+            if req.tools is None and req.tool_choice is not None:
+                raise ValueError("tool_choice requires tools to be set")
             params: dict[str, Any] = {
                 "model": self.model,
                 "max_tokens": req.max_tokens,

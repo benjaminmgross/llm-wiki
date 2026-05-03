@@ -233,6 +233,43 @@ def test_complete_with_tools_handles_non_dict_tool_input_gracefully() -> None:
     assert result.tool_input is None
 
 
+@pytest.mark.unit
+def test_complete_raises_when_tool_choice_set_without_tools() -> None:
+    """A caller passing ``tool_choice`` but no ``tools`` is silently dropped today.
+
+    The Anthropic SDK requires ``tools`` whenever ``tool_choice`` is set; if
+    we silently drop ``tool_choice`` the caller's intent (force-decode through
+    a tool) is lost without warning. Raising surfaces the misuse loudly.
+    """
+    fake_client = MagicMock()
+    provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="sk-x", client=fake_client)
+    with pytest.raises(ValueError, match="tool_choice requires tools"):
+        provider.complete(
+            system="sys",
+            messages=[Message(role="user", content="hi")],
+            tools=None,
+            tool_choice=INGEST_TOOL_CHOICE,
+        )
+
+
+@pytest.mark.unit
+def test_batch_complete_raises_when_tool_choice_set_without_tools() -> None:
+    """Same guardrail as ``complete`` — applies to per-request batch params too."""
+    fake_client = MagicMock()
+    provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="sk-x", client=fake_client)
+    requests = [
+        BatchRequest(
+            custom_id="src-1",
+            system="sys",
+            messages=[Message(role="user", content="hi")],
+            tools=None,
+            tool_choice=INGEST_TOOL_CHOICE,
+        )
+    ]
+    with pytest.raises(ValueError, match="tool_choice requires tools"):
+        provider.batch_complete(requests, poll_interval=0.0)
+
+
 # ---------- AnthropicProvider.batch_complete with tools ----------
 
 
