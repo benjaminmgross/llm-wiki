@@ -33,6 +33,20 @@ def test_system_prompt_specifies_json_schema() -> None:
 
 
 @pytest.mark.unit
+def test_system_prompt_split_marker_appears_exactly_once() -> None:
+    """Guard the load-bearing split marker used by ``INGEST_SYSTEM_PROMPT_TOOL_USE``.
+
+    The tool-use variant is built by splitting ``INGEST_SYSTEM_PROMPT`` on the
+    string ``"Output ONLY a valid JSON object matching this schema"`` and
+    keeping the head. If a future edit adds or removes that phrase, the split
+    silently produces wrong output (either the JSON spec leaks into the
+    tool-use prompt, or the head is empty). This assertion makes the marker's
+    uniqueness an explicit invariant.
+    """
+    assert INGEST_SYSTEM_PROMPT.count("Output ONLY a valid JSON object matching this schema") == 1
+
+
+@pytest.mark.unit
 def test_user_prompt_includes_source_with_section_ids() -> None:
     prompt = build_ingest_user_prompt(
         source_path="ai/foo.md",
