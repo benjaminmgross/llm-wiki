@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from mdwiki.prompts import INGEST_SYSTEM_PROMPT, build_ingest_user_prompt
+from mdwiki.prompts import (
+    INGEST_SYSTEM_PROMPT,
+    INGEST_SYSTEM_PROMPT_HEAD,
+    INGEST_SYSTEM_PROMPT_TOOL_USE,
+    build_ingest_user_prompt,
+)
 
 
 @pytest.mark.unit
@@ -33,17 +38,18 @@ def test_system_prompt_specifies_json_schema() -> None:
 
 
 @pytest.mark.unit
-def test_system_prompt_split_marker_appears_exactly_once() -> None:
-    """Guard the load-bearing split marker used by ``INGEST_SYSTEM_PROMPT_TOOL_USE``.
+def test_both_ingest_prompts_share_head_verbatim() -> None:
+    """Guard that JSON-output and tool-use variants share an identical prose head.
 
-    The tool-use variant is built by splitting ``INGEST_SYSTEM_PROMPT`` on the
-    string ``"Output ONLY a valid JSON object matching this schema"`` and
-    keeping the head. If a future edit adds or removes that phrase, the split
-    silently produces wrong output (either the JSON spec leaks into the
-    tool-use prompt, or the head is empty). This assertion makes the marker's
-    uniqueness an explicit invariant.
+    Both prompts are composed from ``INGEST_SYSTEM_PROMPT_HEAD`` plus their
+    own tail (JSON spec vs tool-use directive). If a future edit drifts the
+    head between variants — by editing only one composed string, or by
+    inserting variant-specific guidance in the head — the two providers will
+    silently diverge in behavior. Asserting both prompts start with the head
+    verbatim makes the shared-head contract explicit.
     """
-    assert INGEST_SYSTEM_PROMPT.count("Output ONLY a valid JSON object matching this schema") == 1
+    assert INGEST_SYSTEM_PROMPT.startswith(INGEST_SYSTEM_PROMPT_HEAD)
+    assert INGEST_SYSTEM_PROMPT_TOOL_USE.startswith(INGEST_SYSTEM_PROMPT_HEAD)
 
 
 @pytest.mark.unit

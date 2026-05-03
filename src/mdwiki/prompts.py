@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from typing import Any
 
-INGEST_SYSTEM_PROMPT: str = """\
+# Prose-guidance head: shared verbatim by both the JSON-output and tool-use
+# variants. Ends right before the output-format spec so each variant can append
+# its own spec block without overlap. Keep this string self-contained — never
+# reference output format here; that lives in the per-variant tail blocks.
+INGEST_SYSTEM_PROMPT_HEAD: str = """\
 You are a wiki maintainer. Your job is to weave a new source into an existing
 wiki WITHOUT producing slop AND WITHOUT under-building it.
 
@@ -62,6 +66,12 @@ For an UPDATE, ``content`` is the COMPLETE revised page content — the entire
 page body as you want it stored. mdwiki replaces the whole file with this
 text. Preserve everything you don't intend to change. Do NOT send a
 diff or section fragment.
+"""
+
+# Inline JSON-shape spec used by providers without constrained decoding. The
+# model's only source of output structure is this block, so the spec must be
+# explicit and complete. Composed onto ``INGEST_SYSTEM_PROMPT_HEAD`` below.
+INGEST_SYSTEM_PROMPT_JSON_SPEC: str = """\
 
 Output ONLY a valid JSON object matching this schema (no preamble, no commentary,
 no markdown fencing):
@@ -77,23 +87,24 @@ no markdown fencing):
 If verdict is anything other than "ingest", updates/new_pages/cross_refs MUST be empty.
 """
 
-# Tool-use variant. Used when the provider supports constrained-decoding
+# Tool-use tail. Used when the provider supports constrained-decoding
 # ``tool_use`` (Anthropic). Drops the inline JSON-shape spec — that spec was
 # the model's only source of structure for free-form text responses, but with
 # tool_use the schema lives in the tool definition (``ingest_tool.py``) and
 # duplicating it in the prompt invites the model to reason about both shapes
 # simultaneously, producing wrong-typed fields like ``updates: "<text>"``.
-INGEST_SYSTEM_PROMPT_TOOL_USE: str = INGEST_SYSTEM_PROMPT.split(
-    "Output ONLY a valid JSON object matching this schema", 1
-)[0].rstrip() + (
-    "\n\n"
-    "Submit your plan by calling the ``submit_plan`` tool. Its input_schema is\n"
-    "the source of truth for required fields and types — do not emit JSON in\n"
-    "your text response. The tool's ``verdict`` accepts only ``ingest``,\n"
-    "``low-quality``, ``out-of-scope``, or ``duplicate-of:<wiki/page/path.md>``.\n"
-    "If verdict is anything other than ``ingest``, ``updates`` / ``new_pages`` /\n"
-    "``cross_refs`` MUST be empty arrays.\n"
-)
+INGEST_SYSTEM_PROMPT_TOOL_TAIL: str = """\
+
+Submit your plan by calling the ``submit_plan`` tool. Its input_schema is
+the source of truth for required fields and types — do not emit JSON in
+your text response. The tool's ``verdict`` accepts only ``ingest``,
+``low-quality``, ``out-of-scope``, or ``duplicate-of:<wiki/page/path.md>``.
+If verdict is anything other than ``ingest``, ``updates`` / ``new_pages`` /
+``cross_refs`` MUST be empty arrays.
+"""
+
+INGEST_SYSTEM_PROMPT: str = INGEST_SYSTEM_PROMPT_HEAD + INGEST_SYSTEM_PROMPT_JSON_SPEC
+INGEST_SYSTEM_PROMPT_TOOL_USE: str = INGEST_SYSTEM_PROMPT_HEAD + INGEST_SYSTEM_PROMPT_TOOL_TAIL
 
 
 def build_ingest_user_prompt(
