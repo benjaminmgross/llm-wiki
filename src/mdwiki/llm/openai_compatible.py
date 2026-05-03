@@ -189,7 +189,13 @@ class OpenAICompatibleProvider(Provider):
             If ``finish_reason == "length"`` — mirrors the Anthropic ``stop_reason
             == "max_tokens"`` check. The output is truncated and likely invalid
             JSON; caller should retry with a higher ``--max-tokens``.
+        ValueError
+            If ``tool_choice`` is set without ``tools``. Mirrors the
+            ``AnthropicProvider`` guard so the misuse surfaces loudly here too,
+            even though both args are otherwise dropped on this path.
         """
+        if tools is None and tool_choice is not None:
+            raise ValueError("tool_choice requires tools to be set")
         del tools, tool_choice  # not yet wired for openai-compatible — see docstring
         sdk_messages = [{"role": "system", "content": system}] + [
             {"role": m.role, "content": m.content} for m in messages
