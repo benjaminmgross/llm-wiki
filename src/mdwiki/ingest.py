@@ -134,7 +134,7 @@ def ingest_source(
         raise IngestError(str(exc)) from exc
 
     try:
-        if use_tool and response.tool_input is not None:
+        if response.tool_input is not None:
             plan = parse_plan_dict(response.tool_input, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
         else:
             plan = parse_plan(response.text, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
