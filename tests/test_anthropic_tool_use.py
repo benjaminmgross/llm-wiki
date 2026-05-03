@@ -192,9 +192,11 @@ def test_verdict_has_pattern_constraint_excluding_invented_values() -> None:
     assert "pattern" in verdict
     pat = re.compile(verdict["pattern"])
     for good in ("ingest", "low-quality", "out-of-scope", "duplicate-of:wiki/foo.md"):
-        assert pat.match(good), f"{good!r} should match the verdict pattern"
-    for bad in ("empty", "skip", "needs-review", "Ingest", "duplicate-of:"):
-        assert not pat.match(bad), f"{bad!r} must not match the verdict pattern"
+        assert pat.fullmatch(good), f"{good!r} should match the verdict pattern"
+    # Use fullmatch so trailing newlines/junk are rejected — re.match would
+    # accept "ingest\n" because $ in the pattern matches before a final newline.
+    for bad in ("empty", "skip", "needs-review", "Ingest", "duplicate-of:", "ingest\n"):
+        assert not pat.fullmatch(bad), f"{bad!r} must not match the verdict pattern"
 
 
 @pytest.mark.unit
