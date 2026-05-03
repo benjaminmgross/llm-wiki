@@ -11,6 +11,13 @@ The schema is an authoring contract, not the source of truth. The source of
 truth remains the ``Plan`` dataclass + ``parse_plan_dict`` validation; this
 schema is the upstream guard that keeps invalid shapes from ever reaching
 the parser. Keep them in sync — when the ``Plan`` shape changes, update both.
+
+``additionalProperties: False`` is set on every object schema below as an
+intentional silent-drift guard: if the model emits a key we don't expect
+(``"notes"``, ``"draft"``, etc.), constrained decoding rejects it instead of
+quietly dropping it. If Anthropic's tool format ever adds optional metadata
+keys the model is expected to set, we'll need to relax this — for now the
+guard is more valuable than the forward-compat headroom.
 """
 
 from __future__ import annotations
