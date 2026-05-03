@@ -154,6 +154,13 @@ def _normalize(text: str, *, mode: str = "default") -> str:
     content); then Unicode punctuation fold (curly quotes -> straight,
     em/en-dashes -> hyphen); finally collapse remaining punctuation to
     spaces and squeeze whitespace.
+
+    The space-padded markdown substitutions (``" \\1 "``) also apply when
+    this function is called on section ids (``verify_plan`` normalizes both
+    section_ids and the cited source_section_id through here). That's safe
+    because section ids are derived from headings, where intra-word emphasis
+    butted against adjacent text is rare; the doubled-space output is
+    collapsed by the trailing whitespace squeeze.
     """
     out = text
     if mode == "transcripts":
