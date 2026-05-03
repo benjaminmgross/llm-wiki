@@ -34,9 +34,11 @@ from mdwiki.llm.base import (
     Message,
     Provider,
 )
-from mdwiki.plan import PlanValidationError, allowed_kinds_for_wiki, parse_plan
+from mdwiki.ingest_tool import INGEST_TOOL_CHOICE, INGEST_TOOL_DEFINITION
+from mdwiki.plan import PlanValidationError, allowed_kinds_for_wiki, parse_plan, parse_plan_dict
+from mdwiki.prompts import INGEST_SYSTEM_PROMPT_TOOL_USE
 from mdwiki.prompts import INGEST_SYSTEM_PROMPT, build_ingest_user_prompt
-from mdwiki.quote import quote_normalize_mode_for_wiki, verify_plan
+from mdwiki.quote import min_quote_words_for_wiki, quote_normalize_mode_for_wiki, verify_plan
 from mdwiki.state import connect
 from mdwiki.transaction import IngestTransaction
 
@@ -123,10 +125,17 @@ def bootstrap_batch(
             batch_id="",
         )
 
+    # Anthropic supports constrained-decoding ``tool_use``; route every batch
+    # request through the ingest tool so each response is structurally
+    # guaranteed to parse. Other providers fall back to free-form JSON.
+    use_tool = provider.name == "anthropic"
+
     requests: list[BatchRequest] = []
     contexts: dict[str, _RequestContext] = {}
     for source_row in pending:
-        request, context = _prepare_request(wiki_root=wiki_root, source_row=source_row, embedder=embedder)
+        request, context = _prepare_request(
+            wiki_root=wiki_root, source_row=source_row, embedder=embedder, use_tool=use_tool
+        )
         requests.append(request)
         contexts[source_row["id"]] = context
 
@@ -172,6 +181,7 @@ def bootstrap_batch(
             embedder=embedder,
             response_text=result.text,
             context=context,
+            tool_input=result.tool_input,
         )
         if outcome == "applied":
             applied += 1
@@ -204,8 +214,14 @@ def _prepare_request(
     wiki_root: Path,
     source_row: dict[str, Any],
     embedder: Embedder,
+    use_tool: bool,
 ) -> tuple[BatchRequest, _RequestContext]:
-    """Build one ``BatchRequest`` + capture the context needed for post-batch apply."""
+    """Build one ``BatchRequest`` + capture the context needed for post-batch apply.
+
+    When ``use_tool`` is true (Anthropic provider), the request carries the
+    ingest ``tool_use`` schema so each batch entry returns a structurally
+    valid plan in ``BatchResult.tool_input``.
+    """
     raw_path = wiki_root / source_row["raw_path"]
     chunker = MarkdownChunker(min_section_words=1)
     sections = _chunk_or_whole(raw_path, source_path=source_row["original_path"], chunker=chunker)
@@ -226,9 +242,11 @@ def _prepare_request(
     )
     request = BatchRequest(
         custom_id=source_row["id"],
-        system=INGEST_SYSTEM_PROMPT,
+        system=INGEST_SYSTEM_PROMPT_TOOL_USE if use_tool else INGEST_SYSTEM_PROMPT,
         messages=[Message(role="user", content=user_prompt)],
         max_tokens=16000,
+        tools=[INGEST_TOOL_DEFINITION] if use_tool else None,
+        tool_choice=INGEST_TOOL_CHOICE if use_tool else None,
     )
     context = _RequestContext(source_row=source_row, source_text=source_text, section_ids=section_ids)
     return request, context
@@ -240,15 +258,24 @@ def _apply_one_result(
     embedder: Embedder,
     response_text: str,
     context: _RequestContext,
+    tool_input: dict[str, Any] | None = None,
 ) -> str:
-    """Parse, verify, and apply one batch result. Returns ``"applied"|"skipped"|"failed"``."""
+    """Parse, verify, and apply one batch result. Returns ``"applied"|"skipped"|"failed"``.
+
+    When ``tool_input`` is present (Anthropic ``tool_use`` path), the parsed
+    plan is taken directly from the SDK-exposed dict. Otherwise the legacy
+    free-form text path is used.
+    """
     try:
         # Mirror the sync ingest path: pass profile-aware allowed_kinds so
         # batch results that propose profile-specific page kinds (framework's
         # ``procedure``/``template``, transcripts' ``meeting``/``decision``,
         # initiative's ``workstream``/``owner``, etc.) parse instead of being
         # rejected as "Invalid page kind".
-        plan = parse_plan(response_text, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
+        if tool_input is not None:
+            plan = parse_plan_dict(tool_input, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
+        else:
+            plan = parse_plan(response_text, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
     except PlanValidationError:
         return "failed"
 
@@ -257,6 +284,7 @@ def _apply_one_result(
         source_text=context.source_text,
         section_ids=context.section_ids,
         mode=quote_normalize_mode_for_wiki(wiki_root),
+        min_quote_words=min_quote_words_for_wiki(wiki_root),
     )
     if not verification.valid:
         return "failed"

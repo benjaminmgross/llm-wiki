@@ -138,6 +138,11 @@ def parse_plan(raw_json: str, *, allowed_kinds: frozenset[str] | None = None) ->
     or surrounding it with prose preamble/postamble — extracts the outermost
     ``{...}`` block before parsing.
 
+    Use this entry point for *text* responses (legacy, also used by the
+    cluster-verdict path in ``synthesize.py``). For ``tool_use`` responses
+    where the SDK already exposes a parsed dict, prefer ``parse_plan_dict``
+    to skip the redundant string round-trip.
+
     Parameters
     ----------
     raw_json : str
@@ -154,8 +159,6 @@ def parse_plan(raw_json: str, *, allowed_kinds: frozenset[str] | None = None) ->
     PlanValidationError
         If the JSON is malformed or any required structure is missing or invalid.
     """
-    if allowed_kinds is None:
-        allowed_kinds = VALID_KINDS
     cleaned = _extract_json_object(raw_json)
     try:
         payload: Any = json.loads(cleaned)
@@ -163,6 +166,32 @@ def parse_plan(raw_json: str, *, allowed_kinds: frozenset[str] | None = None) ->
         raise PlanValidationError(f"Invalid JSON: {exc}") from exc
     if not isinstance(payload, dict):
         raise PlanValidationError(f"Expected JSON object, got {type(payload).__name__}.")
+    return parse_plan_dict(payload, allowed_kinds=allowed_kinds)
+
+
+def parse_plan_dict(payload: dict[str, Any], *, allowed_kinds: frozenset[str] | None = None) -> Plan:
+    """Validate and shape an already-parsed Plan payload into the typed dataclass.
+
+    Used on the ``tool_use`` ingest path where the Anthropic SDK exposes the
+    model's tool input as a parsed dict (constrained-decoding guarantees the
+    JSON shape; we still validate field types and the verdict/non-empty
+    invariants here).
+
+    Parameters
+    ----------
+    payload : dict
+        Already-parsed JSON object — either the SDK-exposed ``tool_use.input``
+        or the result of ``json.loads`` upstream.
+    allowed_kinds : frozenset[str], optional
+        See ``parse_plan``.
+
+    Raises
+    ------
+    PlanValidationError
+        Same conditions as ``parse_plan``, minus the JSON-decode case.
+    """
+    if allowed_kinds is None:
+        allowed_kinds = VALID_KINDS
 
     verdict = _require(payload, "verdict", str)
     _validate_verdict(verdict)

@@ -42,6 +42,7 @@ def verify_plan(
     source_text: str,
     section_ids: set[str],
     mode: str = "default",
+    min_quote_words: int = MIN_QUOTE_WORDS,
 ) -> QuoteVerificationResult:
     """Check every claim against the source.
 
@@ -65,6 +66,12 @@ def verify_plan(
         the source has speaker attribution prepended. Section-id normalization
         always uses ``"default"`` — section ids are headings, not transcript
         lines.
+    min_quote_words : int, default MIN_QUOTE_WORDS
+        Minimum word count for a quote anchor. Sparse-text corpora (HTML
+        decks, slide exports) may need a lower floor since the LLM cannot
+        produce 4-word verbatim spans against bullet fragments. Reads from
+        ``[ingest].min_quote_words`` in the wiki's config via
+        ``min_quote_words_for_wiki``. Hard floor enforced upstream.
     """
     normalized_source = _normalize(source_text, mode=mode)
     normalized_section_ids = {_normalize(sid) for sid in section_ids}
@@ -74,9 +81,9 @@ def verify_plan(
         if _normalize(claim.source_section_id) not in normalized_section_ids:
             errors.append(ClaimError(claim=claim, message=f"unknown source_section_id: {claim.source_section_id!r}"))
             continue
-        if len(claim.quote.split()) < MIN_QUOTE_WORDS:
+        if len(claim.quote.split()) < min_quote_words:
             errors.append(
-                ClaimError(claim=claim, message=f"quote too short ({len(claim.quote.split())} words; minimum {MIN_QUOTE_WORDS})")
+                ClaimError(claim=claim, message=f"quote too short ({len(claim.quote.split())} words; minimum {min_quote_words})")
             )
             continue
         if _normalize(claim.quote, mode=mode) not in normalized_source:
@@ -151,12 +158,57 @@ def _normalize(text: str, *, mode: str = "default") -> str:
     if mode == "transcripts":
         out = _TIMESTAMP_RE.sub(" ", out)
         out = _SPEAKER_PREFIX_RE.sub("", out)
-    out = _MD_LINK_RE.sub(r"\1", out)
-    out = _MD_INLINE_CODE_RE.sub(r"\1", out)
-    out = _MD_EMPHASIS_RE.sub(r"\2", out)
+    # Substitute with surrounding spaces so the captured content keeps its word
+    # boundaries when the markdown delimiter abuts adjacent prose. Empirical
+    # case from luxe-give HTML decks: ``**1.7x revenue growth**3.6x`` — a bare
+    # substitution would yield ``1.7x revenue growth3.6x`` (no space), and the
+    # LLM's natural quote ``1.7x revenue growth 3.6x`` would never substring-
+    # match. The trailing whitespace collapse normalizes the doubled spaces.
+    out = _MD_LINK_RE.sub(r" \1 ", out)
+    out = _MD_INLINE_CODE_RE.sub(r" \1 ", out)
+    out = _MD_EMPHASIS_RE.sub(r" \2 ", out)
     out = out.translate(_UNICODE_PUNCT_FOLDS)
     out = _NON_ALNUM_RE.sub(" ", out)
     return _WHITESPACE_RE.sub(" ", out).strip().lower()
+
+
+def min_quote_words_for_wiki(wiki_root: Path) -> int:
+    """Return the wiki's configured minimum quote-word count.
+
+    Reads ``.mdwiki/config.toml`` looking for ``[ingest].min_quote_words``.
+    Returns ``MIN_QUOTE_WORDS`` when the config doesn't declare a value, the
+    file is missing, the value isn't a positive integer, or the value is
+    less than 1 (the hard floor — a 0-word minimum would disable the check
+    entirely).
+
+    Sparse-text corpora (HTML decks, slide exports) may need a lower floor
+    than the default 4 since the LLM cannot produce 4-word verbatim spans
+    against bullet fragments. Mirrors the structure of
+    ``quote_normalize_mode_for_wiki``.
+
+    Parameters
+    ----------
+    wiki_root : Path
+        Directory containing ``.mdwiki/config.toml``.
+
+    Returns
+    -------
+    int
+        Minimum word count to pass to ``verify_plan``. Always >= 1.
+    """
+    import tomllib
+
+    config_path = wiki_root / ".mdwiki" / "config.toml"
+    if not config_path.is_file():
+        return MIN_QUOTE_WORDS
+    try:
+        config = tomllib.loads(config_path.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return MIN_QUOTE_WORDS
+    declared = config.get("ingest", {}).get("min_quote_words")
+    if not isinstance(declared, int) or isinstance(declared, bool) or declared < 1:
+        return MIN_QUOTE_WORDS
+    return declared
 
 
 def quote_normalize_mode_for_wiki(wiki_root: Path) -> str:

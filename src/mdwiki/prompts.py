@@ -77,6 +77,24 @@ no markdown fencing):
 If verdict is anything other than "ingest", updates/new_pages/cross_refs MUST be empty.
 """
 
+# Tool-use variant. Used when the provider supports constrained-decoding
+# ``tool_use`` (Anthropic). Drops the inline JSON-shape spec — that spec was
+# the model's only source of structure for free-form text responses, but with
+# tool_use the schema lives in the tool definition (``ingest_tool.py``) and
+# duplicating it in the prompt invites the model to reason about both shapes
+# simultaneously, producing wrong-typed fields like ``updates: "<text>"``.
+INGEST_SYSTEM_PROMPT_TOOL_USE: str = INGEST_SYSTEM_PROMPT.split(
+    "Output ONLY a valid JSON object matching this schema", 1
+)[0].rstrip() + (
+    "\n\n"
+    "Submit your plan by calling the ``submit_plan`` tool. Its input_schema is\n"
+    "the source of truth for required fields and types — do not emit JSON in\n"
+    "your text response. The tool's ``verdict`` accepts only ``ingest``,\n"
+    "``low-quality``, ``out-of-scope``, or ``duplicate-of:<wiki/page/path.md>``.\n"
+    "If verdict is anything other than ``ingest``, ``updates`` / ``new_pages`` /\n"
+    "``cross_refs`` MUST be empty arrays.\n"
+)
+
 
 def build_ingest_user_prompt(
     *,

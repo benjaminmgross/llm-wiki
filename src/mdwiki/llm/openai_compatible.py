@@ -172,8 +172,16 @@ class OpenAICompatibleProvider(Provider):
         system: str,
         messages: list[Message],
         max_tokens: int = 1024,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: dict[str, Any] | None = None,
     ) -> CompleteResult:
         """Translate to OpenAI's chat-completions format and call the endpoint.
+
+        ``tools`` and ``tool_choice`` are accepted for interface compatibility
+        with ``AnthropicProvider`` but are silently ignored — OpenAI's
+        function-calling shape differs enough that a clean implementation
+        warrants its own design pass. Callers that pass tools and rely on
+        constrained decoding must use ``AnthropicProvider``.
 
         Raises
         ------
@@ -182,6 +190,7 @@ class OpenAICompatibleProvider(Provider):
             == "max_tokens"`` check. The output is truncated and likely invalid
             JSON; caller should retry with a higher ``--max-tokens``.
         """
+        del tools, tool_choice  # not yet wired for openai-compatible — see docstring
         sdk_messages = [{"role": "system", "content": system}] + [
             {"role": m.role, "content": m.content} for m in messages
         ]

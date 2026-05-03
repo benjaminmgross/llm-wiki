@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 
 @dataclass(frozen=True)
@@ -34,13 +34,20 @@ class Message:
 
 @dataclass(frozen=True)
 class CompleteResult:
-    """The outcome of one ``complete()`` call — surface metrics needed for cost tracking."""
+    """The outcome of one ``complete()`` call — surface metrics needed for cost tracking.
+
+    ``tool_input`` is populated when the call was made with ``tools`` and the
+    model responded via ``tool_use`` (constrained-decoding mode). Callers that
+    pass tools should read ``tool_input`` instead of ``text`` — the schema
+    guarantees a parsed dict matching the tool's ``input_schema``.
+    """
 
     text: str
     input_tokens: int
     output_tokens: int
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
+    tool_input: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +88,8 @@ class Provider(ABC):
         system: str,
         messages: list[Message],
         max_tokens: int = 1024,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: dict[str, Any] | None = None,
     ) -> CompleteResult:
         """Produce a single completion for the given system prompt and message history.
 
@@ -92,6 +101,18 @@ class Provider(ABC):
             Chat history; must alternate ``user`` / ``assistant`` and start with ``user``.
         max_tokens : int, optional
             Cap on output tokens (default 1024).
+        tools : list[dict], optional
+            Tool definitions in Anthropic's wire format. When provided alongside
+            ``tool_choice``, the provider engages constrained decoding so the
+            response payload is structurally guaranteed to conform to the tool's
+            ``input_schema``. Result is exposed in ``CompleteResult.tool_input``.
+            Providers without constrained-decoding support may ignore this
+            argument and fall back to free-form text generation; callers should
+            not assume tool support except on ``AnthropicProvider``.
+        tool_choice : dict, optional
+            Forces the model to call a specific tool when set, e.g.
+            ``{"type": "tool", "name": "submit_plan"}``. Ignored when ``tools``
+            is None.
         """
 
     def describe_image(self, image_path: Path) -> str:
@@ -179,12 +200,17 @@ class BatchRequest:
         Chat history, same shape as ``Provider.complete``.
     max_tokens : int
         Per-request output cap.
+    tools, tool_choice : optional
+        Same semantics as ``Provider.complete`` — forwarded to the underlying
+        provider's batch params so each request engages constrained decoding.
     """
 
     custom_id: str
     system: str
     messages: list[Message]
     max_tokens: int = 16000
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -196,7 +222,8 @@ class BatchResult:
     custom_id : str
         Mirrors the ``BatchRequest.custom_id``.
     text : str
-        Completion text. Empty when ``error`` is set.
+        Completion text. Empty when ``error`` is set or the response was a
+        ``tool_use`` (in which case ``tool_input`` holds the parsed payload).
     error : str | None
         Provider-side error code (e.g. ``"rate_limited"``, ``"invalid_request"``)
         or ``None`` on success.
@@ -204,6 +231,10 @@ class BatchResult:
         Prompt tokens billed for this result.
     output_tokens : int
         Output tokens billed for this result.
+    tool_input : dict | None
+        Parsed payload from a ``tool_use`` response; populated when the
+        originating ``BatchRequest`` carried ``tools`` and the model chose to
+        call one. ``None`` for free-form text responses.
     """
 
     custom_id: str
@@ -211,6 +242,7 @@ class BatchResult:
     error: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
+    tool_input: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

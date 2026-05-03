@@ -17,6 +17,7 @@ import os
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import anthropic
 import httpx
@@ -189,11 +190,20 @@ class AnthropicProvider(Provider):
         system: str,
         messages: list[Message],
         max_tokens: int = 1024,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: dict[str, Any] | None = None,
     ) -> CompleteResult:
         """Issue a single completion request with prompt caching on the system prompt.
 
         Streams the response so high ``max_tokens`` requests don't risk SDK HTTP
         timeouts, then collects the final message via the SDK helper.
+
+        When ``tools`` is provided, engages constrained decoding — the model's
+        output is structurally guaranteed to conform to the chosen tool's
+        ``input_schema``. The parsed payload is exposed in
+        ``CompleteResult.tool_input``; ``CompleteResult.text`` holds any
+        free-form text the model also emitted (typically empty when
+        ``tool_choice`` forces a specific tool).
 
         Raises
         ------
@@ -201,12 +211,17 @@ class AnthropicProvider(Provider):
             If ``stop_reason`` is ``"max_tokens"`` — the response is truncated and
             cannot be safely parsed as JSON. Caller should retry with a higher cap.
         """
-        with self._client.messages.stream(
-            model=self.model,
-            max_tokens=max_tokens,
-            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": m.role, "content": m.content} for m in messages],
-        ) as stream:
+        stream_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+        }
+        if tools is not None:
+            stream_kwargs["tools"] = tools
+            if tool_choice is not None:
+                stream_kwargs["tool_choice"] = tool_choice
+        with self._client.messages.stream(**stream_kwargs) as stream:
             response = stream.get_final_message()
 
         if getattr(response, "stop_reason", None) == "max_tokens":
@@ -215,6 +230,17 @@ class AnthropicProvider(Provider):
                 f"Re-run with a higher --max-tokens (or trim the source if it's enormous)."
             )
         text = next((block.text for block in response.content if getattr(block, "type", None) == "text"), "")
+        tool_input: dict[str, Any] | None = None
+        if tools is not None:
+            tool_block = next(
+                (block for block in response.content if getattr(block, "type", None) == "tool_use"),
+                None,
+            )
+            if tool_block is not None:
+                # SDK exposes the parsed tool input as the ``input`` attribute (already a dict).
+                raw_input = getattr(tool_block, "input", None)
+                if isinstance(raw_input, dict):
+                    tool_input = raw_input
         usage = response.usage
         return CompleteResult(
             text=text,
@@ -222,6 +248,7 @@ class AnthropicProvider(Provider):
             output_tokens=getattr(usage, "output_tokens", 0) or 0,
             cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
             cache_creation_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            tool_input=tool_input,
         )
 
 
@@ -302,20 +329,21 @@ class AnthropicProvider(Provider):
         how to surface them (typically: leave the source as ``pending`` and
         log a warning).
         """
-        sdk_requests = [
-            {
-                "custom_id": req.custom_id,
-                "params": {
-                    "model": self.model,
-                    "max_tokens": req.max_tokens,
-                    "system": [
-                        {"type": "text", "text": req.system, "cache_control": {"type": "ephemeral"}}
-                    ],
-                    "messages": [{"role": m.role, "content": m.content} for m in req.messages],
-                },
+        sdk_requests = []
+        for req in requests:
+            params: dict[str, Any] = {
+                "model": self.model,
+                "max_tokens": req.max_tokens,
+                "system": [
+                    {"type": "text", "text": req.system, "cache_control": {"type": "ephemeral"}}
+                ],
+                "messages": [{"role": m.role, "content": m.content} for m in req.messages],
             }
-            for req in requests
-        ]
+            if req.tools is not None:
+                params["tools"] = req.tools
+                if req.tool_choice is not None:
+                    params["tool_choice"] = req.tool_choice
+            sdk_requests.append({"custom_id": req.custom_id, "params": params})
         batch = self._client.messages.batches.create(requests=sdk_requests)
         batch_id = batch.id
         if on_batch_id is not None:
@@ -362,6 +390,12 @@ def _decode_batch_entry(entry: object) -> BatchResult:
         message = getattr(result_obj, "message", None)
         content_blocks = getattr(message, "content", []) or []
         text = next((b.text for b in content_blocks if getattr(b, "type", None) == "text"), "")
+        tool_input: dict[str, Any] | None = None
+        tool_block = next((b for b in content_blocks if getattr(b, "type", None) == "tool_use"), None)
+        if tool_block is not None:
+            raw_input = getattr(tool_block, "input", None)
+            if isinstance(raw_input, dict):
+                tool_input = raw_input
         usage = getattr(message, "usage", None)
         return BatchResult(
             custom_id=custom_id,
@@ -369,6 +403,7 @@ def _decode_batch_entry(entry: object) -> BatchResult:
             error=None,
             input_tokens=getattr(usage, "input_tokens", 0) or 0,
             output_tokens=getattr(usage, "output_tokens", 0) or 0,
+            tool_input=tool_input,
         )
     # errored / canceled / expired: surface the type as the error code
     error_obj = getattr(result_obj, "error", None)
