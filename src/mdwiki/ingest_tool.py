@@ -24,8 +24,8 @@ from __future__ import annotations
 
 from typing import Any
 
-# Tool name is referenced from ``ingest.py`` and ``bootstrap.py`` via
-# ``INGEST_TOOL_CHOICE``; do not rename without updating both.
+# ``INGEST_TOOL_CHOICE.name`` and ``INGEST_TOOL_DEFINITION.name`` both derive
+# from this constant; tests guard the round-trip.
 INGEST_TOOL_NAME: str = "submit_plan"
 
 _CLAIM_SCHEMA: dict[str, Any] = {
