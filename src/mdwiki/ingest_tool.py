@@ -56,6 +56,7 @@ _UPDATE_SCHEMA: dict[str, Any] = {
         "claims": {
             "type": "array",
             "items": _CLAIM_SCHEMA,
+            "minItems": 1,
             "description": "Source-anchored claims supporting this update; one per substantive assertion.",
         },
     },
@@ -84,6 +85,7 @@ _NEW_PAGE_SCHEMA: dict[str, Any] = {
         "claims": {
             "type": "array",
             "items": _CLAIM_SCHEMA,
+            "minItems": 1,
         },
     },
 }
