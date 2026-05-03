@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from mdwiki.prompts import INGEST_SYSTEM_PROMPT, build_ingest_user_prompt
+from mdwiki.prompts import (
+    INGEST_SYSTEM_PROMPT,
+    INGEST_SYSTEM_PROMPT_HEAD,
+    INGEST_SYSTEM_PROMPT_TOOL_USE,
+    build_ingest_user_prompt,
+)
 
 
 @pytest.mark.unit
@@ -30,6 +35,21 @@ def test_system_prompt_specifies_json_schema() -> None:
     assert "updates" in prompt
     assert "new_pages" in prompt
     assert "cross_refs" in prompt
+
+
+@pytest.mark.unit
+def test_both_ingest_prompts_share_head_verbatim() -> None:
+    """Guard that JSON-output and tool-use variants share an identical prose head.
+
+    Both prompts are composed from ``INGEST_SYSTEM_PROMPT_HEAD`` plus their
+    own tail (JSON spec vs tool-use directive). If a future edit drifts the
+    head between variants — by editing only one composed string, or by
+    inserting variant-specific guidance in the head — the two providers will
+    silently diverge in behavior. Asserting both prompts start with the head
+    verbatim makes the shared-head contract explicit.
+    """
+    assert INGEST_SYSTEM_PROMPT.startswith(INGEST_SYSTEM_PROMPT_HEAD)
+    assert INGEST_SYSTEM_PROMPT_TOOL_USE.startswith(INGEST_SYSTEM_PROMPT_HEAD)
 
 
 @pytest.mark.unit

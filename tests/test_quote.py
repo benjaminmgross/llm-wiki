@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from mdwiki.plan import Claim, NewPage, Plan, Update
-from mdwiki.quote import QuoteVerificationResult, verify_plan
+from mdwiki.quote import MIN_QUOTE_WORDS, QuoteVerificationResult, min_quote_words_for_wiki, verify_plan
 
 
 def _plan(*, updates: tuple[Update, ...] = (), new_pages: tuple[NewPage, ...] = ()) -> Plan:
@@ -241,3 +243,124 @@ def test_normalization_still_rejects_real_hallucinations() -> None:
     )
     result = verify_plan(plan, source_text=source_text, section_ids=section_ids)
     assert result.valid is False
+
+
+@pytest.mark.unit
+def test_min_quote_words_param_lowered_accepts_short_quote() -> None:
+    """Passing ``min_quote_words=2`` lets a 2-word quote pass that the default 4 would reject."""
+    source_text = "the quick brown fox jumps over the lazy dog"
+    section_ids = {"sec-1"}
+    plan = _plan(updates=(_update(Claim(source_section_id="sec-1", quote="quick brown")),))
+    default_result = verify_plan(plan, source_text=source_text, section_ids=section_ids)
+    assert default_result.valid is False
+    assert "minimum 4" in default_result.errors[0].message
+    relaxed_result = verify_plan(plan, source_text=source_text, section_ids=section_ids, min_quote_words=2)
+    assert relaxed_result.valid is True
+
+
+@pytest.mark.unit
+def test_min_quote_words_param_raised_rejects_otherwise_valid_quote() -> None:
+    """Passing a higher ``min_quote_words`` rejects a quote that the default would accept."""
+    source_text = "the quick brown fox jumps over the lazy dog"
+    section_ids = {"sec-1"}
+    plan = _plan(updates=(_update(Claim(source_section_id="sec-1", quote="quick brown fox jumps")),))
+    default_result = verify_plan(plan, source_text=source_text, section_ids=section_ids)
+    assert default_result.valid is True
+    strict_result = verify_plan(plan, source_text=source_text, section_ids=section_ids, min_quote_words=8)
+    assert strict_result.valid is False
+    assert "minimum 8" in strict_result.errors[0].message
+
+
+@pytest.mark.unit
+def test_min_quote_words_for_wiki_default_when_no_config(tmp_path: Path) -> None:
+    """No ``.mdwiki/config.toml`` → returns the module default."""
+    assert min_quote_words_for_wiki(tmp_path) == MIN_QUOTE_WORDS
+
+
+@pytest.mark.unit
+def test_min_quote_words_for_wiki_default_when_key_absent(tmp_path: Path) -> None:
+    """``[ingest]`` section without ``min_quote_words`` → default."""
+    (tmp_path / ".mdwiki").mkdir()
+    (tmp_path / ".mdwiki" / "config.toml").write_text("[ingest]\ncandidate_top_k = 8\n")
+    assert min_quote_words_for_wiki(tmp_path) == MIN_QUOTE_WORDS
+
+
+@pytest.mark.unit
+def test_min_quote_words_for_wiki_reads_explicit_value(tmp_path: Path) -> None:
+    """A valid ``[ingest].min_quote_words`` is honored."""
+    (tmp_path / ".mdwiki").mkdir()
+    (tmp_path / ".mdwiki" / "config.toml").write_text("[ingest]\nmin_quote_words = 2\n")
+    assert min_quote_words_for_wiki(tmp_path) == 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_value", ["2", 0, -3, 1.5, True, False, None])
+def test_min_quote_words_for_wiki_falls_back_on_invalid_value(tmp_path: Path, bad_value: object) -> None:
+    """Non-positive integers, booleans (which are ints in Python), strings, floats → default."""
+    (tmp_path / ".mdwiki").mkdir()
+    if bad_value is None:
+        body = "[ingest]\n"  # key absent
+    elif isinstance(bad_value, str):
+        body = f'[ingest]\nmin_quote_words = "{bad_value}"\n'
+    elif isinstance(bad_value, bool):
+        body = f"[ingest]\nmin_quote_words = {str(bad_value).lower()}\n"
+    else:
+        body = f"[ingest]\nmin_quote_words = {bad_value}\n"
+    (tmp_path / ".mdwiki" / "config.toml").write_text(body)
+    assert min_quote_words_for_wiki(tmp_path) == MIN_QUOTE_WORDS
+
+
+@pytest.mark.unit
+def test_emphasis_adjacent_to_text_preserves_word_boundary() -> None:
+    """``**foo**bar`` must not collapse to ``foobar`` after normalization.
+
+    Regression for the luxe-give bug: markdownified HTML stat tiles like
+    ``**1.7x revenue growth**3.6x 3-year TSR`` lost the boundary between
+    ``growth`` and ``3.6x``, breaking substring match against the LLM's
+    naturally-spaced quote.
+    """
+    source_text = "**1.7x revenue growth**3.6x 3-year TSR"
+    section_ids = {"sec-1"}
+    plan = _plan(
+        updates=(
+            _update(Claim(source_section_id="sec-1", quote="1.7x revenue growth 3.6x 3-year TSR")),
+        )
+    )
+    result = verify_plan(plan, source_text=source_text, section_ids=section_ids)
+    assert result.valid is True
+
+
+@pytest.mark.unit
+def test_inline_code_adjacent_to_text_preserves_word_boundary() -> None:
+    """`` `code`bar `` must not collapse to ``codebar`` after normalization."""
+    source_text = "Run `discipline()`then continue with rest of pipeline today"
+    section_ids = {"sec-1"}
+    plan = _plan(
+        updates=(
+            _update(Claim(source_section_id="sec-1", quote="run discipline then continue with rest of pipeline today")),
+        )
+    )
+    result = verify_plan(plan, source_text=source_text, section_ids=section_ids)
+    assert result.valid is True
+
+
+@pytest.mark.unit
+def test_link_adjacent_to_text_preserves_word_boundary() -> None:
+    """``[text](url)foo`` must not collapse to ``textfoo`` after normalization."""
+    source_text = "see [docs](https://example.com)now for the latest deployment instructions today"
+    section_ids = {"sec-1"}
+    plan = _plan(
+        updates=(
+            _update(Claim(source_section_id="sec-1", quote="see docs now for the latest deployment instructions today")),
+        )
+    )
+    result = verify_plan(plan, source_text=source_text, section_ids=section_ids)
+    assert result.valid is True
+
+
+@pytest.mark.unit
+def test_min_quote_words_for_wiki_handles_malformed_toml(tmp_path: Path) -> None:
+    """A corrupt config file falls back to the default rather than raising."""
+    (tmp_path / ".mdwiki").mkdir()
+    (tmp_path / ".mdwiki" / "config.toml").write_text("this is not valid = toml [[[")
+    assert min_quote_words_for_wiki(tmp_path) == MIN_QUOTE_WORDS

@@ -195,6 +195,23 @@ def test_batch_complete_raises_not_implemented() -> None:
 
 
 @pytest.mark.unit
+def test_complete_raises_when_tool_choice_set_without_tools() -> None:
+    """Mirror the AnthropicProvider guard — passing ``tool_choice`` without ``tools``
+    is almost certainly a caller bug. Even though this provider drops both args
+    on the OpenAI-compatible path today, silently dropping the inconsistency
+    masks the misuse; raising surfaces it loudly.
+    """
+    provider, _ = _build_provider_with_mocked_client()
+    with pytest.raises(ValueError, match="tool_choice requires tools"):
+        provider.complete(
+            system="sys",
+            messages=[Message(role="user", content="hi")],
+            tools=None,
+            tool_choice={"type": "tool", "name": "submit_plan"},
+        )
+
+
+@pytest.mark.unit
 def test_constructor_accepts_optional_api_key() -> None:
     """vLLM doesn't require an API key — provider must accept None / empty."""
     fake_client = MagicMock()

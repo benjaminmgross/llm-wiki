@@ -22,9 +22,11 @@ from mdwiki.index import build_index
 from mdwiki.llm import build_provider_from_config
 from mdwiki.llm.anthropic import OutputTruncatedError
 from mdwiki.llm.base import Message, Provider
-from mdwiki.plan import Plan, PlanValidationError, allowed_kinds_for_wiki, parse_plan
+from mdwiki.ingest_tool import INGEST_TOOL_CHOICE, INGEST_TOOL_DEFINITION
+from mdwiki.plan import Plan, PlanValidationError, allowed_kinds_for_wiki, parse_plan, parse_plan_dict
+from mdwiki.prompts import INGEST_SYSTEM_PROMPT_TOOL_USE
 from mdwiki.prompts import INGEST_SYSTEM_PROMPT, build_ingest_user_prompt
-from mdwiki.quote import quote_normalize_mode_for_wiki, verify_plan
+from mdwiki.quote import min_quote_words_for_wiki, quote_normalize_mode_for_wiki, verify_plan
 from mdwiki.state import connect
 from mdwiki.transaction import IngestTransaction
 
@@ -115,17 +117,27 @@ def ingest_source(
         recent_log_entries=recent_log,
     )
 
+    # Anthropic supports constrained-decoding ``tool_use``; route the ingest
+    # plan through it so the response payload is structurally guaranteed to
+    # parse. Other providers fall back to free-form JSON in response text.
+    use_tool = provider.name == "anthropic"
+    system_prompt = INGEST_SYSTEM_PROMPT_TOOL_USE if use_tool else INGEST_SYSTEM_PROMPT
     try:
         response = provider.complete(
-            system=INGEST_SYSTEM_PROMPT,
+            system=system_prompt,
             messages=[Message(role="user", content=user_prompt)],
             max_tokens=max_tokens,
+            tools=[INGEST_TOOL_DEFINITION] if use_tool else None,
+            tool_choice=INGEST_TOOL_CHOICE if use_tool else None,
         )
     except OutputTruncatedError as exc:
         raise IngestError(str(exc)) from exc
 
     try:
-        plan = parse_plan(response.text, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
+        if response.tool_input is not None:
+            plan = parse_plan_dict(response.tool_input, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
+        else:
+            plan = parse_plan(response.text, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
     except PlanValidationError as exc:
         raise IngestError(f"LLM returned an unparseable plan: {exc}") from exc
 
@@ -134,6 +146,7 @@ def ingest_source(
         source_text=source_text,
         section_ids=section_ids,
         mode=quote_normalize_mode_for_wiki(wiki_root),
+        min_quote_words=min_quote_words_for_wiki(wiki_root),
     )
     if not verification.valid:
         details = "\n  ".join(err.message for err in verification.errors)
