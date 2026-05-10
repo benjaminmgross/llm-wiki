@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import anthropic
+import httpx
 
 from mdwiki.chunker import MarkdownChunker
 from mdwiki.discover import WIKI_DIR_NAME
@@ -263,16 +264,19 @@ def ingest_many(
             anthropic.RateLimitError,
             anthropic.APIConnectionError,
             anthropic.InternalServerError,
+            httpx.TimeoutException,
         ) as exc:
             # IngestError covers logical, per-source failures (bad quotes,
-            # parse errors). The three anthropic subclasses cover SDK-level
-            # transients that the SDK's max_retries already exhausted — surface
-            # and continue rather than aborting the whole bulk run on one bad
-            # source. AuthenticationError, NotFoundError, PermissionDeniedError,
-            # and BadRequestError are NOT caught here: those signal a config
-            # problem (bad key, wrong model id, lacking permission, malformed
-            # request) that will fail every subsequent source identically — we
-            # let them propagate so the CLI can print one clear error and exit.
+            # parse errors). The Anthropic subclasses cover SDK-level
+            # transients that the SDK's max_retries already exhausted. Raw
+            # httpx timeouts can still escape SDK streaming while consuming a
+            # single response, so treat them as per-source failures too.
+            # AuthenticationError, NotFoundError, PermissionDeniedError, and
+            # BadRequestError are NOT caught here: those signal config or
+            # request-shape problems (bad key, wrong model id, lacking
+            # permission, malformed request) that will fail every subsequent
+            # source identically — we let them propagate so the CLI can print
+            # one clear error and exit.
             if on_failure is not None:
                 on_failure(original_path, exc)
             results.append(

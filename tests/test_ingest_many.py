@@ -126,6 +126,46 @@ def test_ingest_many_failure_does_not_abort_loop(wiki_with_three_pending: Path, 
 
 
 @pytest.mark.unit
+def test_ingest_many_httpx_timeout_does_not_abort_loop(
+    wiki_with_three_pending: Path, mocker: MockerFixture
+) -> None:
+    counter = {"calls": 0}
+
+    def fake_complete(**_kw):  # type: ignore[no-untyped-def]
+        counter["calls"] += 1
+        if counter["calls"] == 2:
+            raise httpx.ReadTimeout("read timed out")
+        return CompleteResult(
+            text=_plan_for(
+                page_path=f"wiki/concepts/timeout-p-{counter['calls']}.md",
+                section_id="a.md/Intro" if counter["calls"] == 1 else "c.md/Intro",
+            ),
+            input_tokens=10,
+            output_tokens=10,
+        )
+
+    complete_mock = mocker.patch("mdwiki.llm.anthropic.AnthropicProvider.complete", side_effect=fake_complete)
+    failures: list[tuple[str, Exception]] = []
+
+    results = ingest_many(
+        wiki_with_three_pending,
+        scope="pending",
+        yes=True,
+        on_failure=lambda path, exc: failures.append((path, exc)),
+    )
+
+    assert len(results) == 3
+    assert len([r for r in results if r.applied]) == 2
+    failed = [r for r in results if not r.applied]
+    assert len(failed) == 1
+    assert "read timed out" in failed[0].message
+    assert len(failures) == 1
+    assert failures[0][0] == "b.md"
+    assert isinstance(failures[0][1], httpx.ReadTimeout)
+    assert complete_mock.call_count == 3
+
+
+@pytest.mark.unit
 def test_ingest_many_progress_callback_receives_each_step(wiki_with_three_pending: Path, mocker: MockerFixture) -> None:
     plans = iter(
         [_plan_for(page_path=f"wiki/concepts/p{i}.md", section_id=f"{n}.md/Intro") for i, n in enumerate("abc")]
