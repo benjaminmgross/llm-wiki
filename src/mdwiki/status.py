@@ -1,8 +1,4 @@
-"""Read-only summary of wiki state — pure data + a formatter for the CLI.
-
-Counts come straight from ``state.db``; no walking, no LLM, no filesystem cost
-beyond the sqlite query.
-"""
+"""Read-only summary of wiki state — pure data + a formatter for the CLI."""
 
 from __future__ import annotations
 
@@ -11,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from mdwiki.discover import WIKI_DIR_NAME
+from mdwiki.page_kinds import iter_wiki_page_paths
 from mdwiki.state import connect
 
 
@@ -30,6 +27,9 @@ class StatusReport:
     pending: int
     ingested: int
     pages_total: int
+    disk_pages_total: int = 0
+    pages_with_embeddings: int = 0
+    drift_warnings: tuple[str, ...] = ()
     pages_by_kind: dict[str, int] = field(default_factory=dict)
     events_total: int = 0
     last_lint_ts: float | None = None
@@ -52,6 +52,9 @@ def get_status(wiki_root: Path, *, recent_event_limit: int = 5) -> StatusReport:
         ingested = conn.execute("SELECT COUNT(*) AS c FROM sources WHERE status = 'ingested'").fetchone()["c"]
 
         pages_total = conn.execute("SELECT COUNT(*) AS c FROM pages").fetchone()["c"]
+        pages_with_embeddings = conn.execute(
+            "SELECT COUNT(*) AS c FROM pages WHERE embedding IS NOT NULL"
+        ).fetchone()["c"]
         kind_rows = conn.execute("SELECT kind, COUNT(*) AS c FROM pages GROUP BY kind").fetchall()
         pages_by_kind = {row["kind"]: row["c"] for row in kind_rows}
 
@@ -65,10 +68,22 @@ def get_status(wiki_root: Path, *, recent_event_limit: int = 5) -> StatusReport:
         ).fetchall()
         recent_events = tuple(EventRow(ts=r["ts"], kind=r["kind"], summary=r["summary"]) for r in recent_rows)
 
+    disk_pages_total = len(iter_wiki_page_paths(wiki_root))
+    drift_warnings = tuple(
+        _build_drift_warnings(
+            disk_pages_total=disk_pages_total,
+            pages_total=pages_total,
+            pages_with_embeddings=pages_with_embeddings,
+        )
+    )
+
     return StatusReport(
         pending=pending,
         ingested=ingested,
         pages_total=pages_total,
+        disk_pages_total=disk_pages_total,
+        pages_with_embeddings=pages_with_embeddings,
+        drift_warnings=drift_warnings,
         pages_by_kind=pages_by_kind,
         events_total=events_total,
         last_lint_ts=last_lint_ts,
@@ -84,6 +99,7 @@ def format_status(report: StatusReport, *, wiki_root: Path) -> str:
 
     kind_str = ", ".join(f"{k}: {v}" for k, v in sorted(report.pages_by_kind.items())) or "—"
     lines.append(f"Wiki pages: {report.pages_total}  ({kind_str})")
+    lines.append(f"Disk pages: {report.disk_pages_total}; page embeddings: {report.pages_with_embeddings}")
 
     lines.append(f"Events:     {report.events_total}")
 
@@ -99,8 +115,36 @@ def format_status(report: StatusReport, *, wiki_root: Path) -> str:
     else:
         lines.append("Recent events: (none)")
 
+    if report.drift_warnings:
+        lines.append("")
+        lines.extend(report.drift_warnings)
+
     return "\n".join(lines)
 
 
 def _fmt_ts(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%SZ")
+
+
+def _build_drift_warnings(
+    *,
+    disk_pages_total: int,
+    pages_total: int,
+    pages_with_embeddings: int,
+) -> list[str]:
+    warnings: list[str] = []
+    if disk_pages_total > 0 and pages_total == 0:
+        warnings.append("WARNING: wiki files exist on disk, but state.db has no page rows.")
+        warnings.append("Run `mdwiki rebuild --pages` before ingesting.")
+        return warnings
+    if disk_pages_total != pages_total:
+        warnings.append(
+            f"WARNING: wiki page count drift: {disk_pages_total} markdown page(s) on disk, "
+            f"but {pages_total} page row(s) in state.db. Run `mdwiki rebuild --pages`."
+        )
+    if pages_total > 0 and pages_with_embeddings < pages_total:
+        warnings.append(
+            f"WARNING: {pages_total - pages_with_embeddings} page row(s) have no embedding. "
+            "Run `mdwiki rebuild --pages` before ingesting."
+        )
+    return warnings

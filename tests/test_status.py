@@ -92,6 +92,39 @@ def test_format_status_renders_human_readable(populated_wiki: Path) -> None:
 
 
 @pytest.mark.unit
+def test_status_warns_when_disk_pages_exist_but_state_has_no_pages(populated_wiki: Path) -> None:
+    (populated_wiki / "wiki" / "concepts").mkdir(parents=True)
+    (populated_wiki / "wiki" / "concepts" / "drift.md").write_text("# Drift\n\nExists only on disk.")
+
+    report = get_status(populated_wiki)
+    out = format_status(report, wiki_root=populated_wiki)
+
+    assert report.disk_pages_total == 1
+    assert report.pages_total == 0
+    assert "WARNING: wiki files exist on disk, but state.db has no page rows." in out
+    assert "Run `mdwiki rebuild --pages` before ingesting." in out
+
+
+@pytest.mark.unit
+def test_status_warns_on_material_page_count_mismatch(populated_wiki: Path) -> None:
+    (populated_wiki / "wiki" / "concepts").mkdir(parents=True)
+    (populated_wiki / "wiki" / "concepts" / "one.md").write_text("# One\n\nOn disk.")
+    (populated_wiki / "wiki" / "concepts" / "two.md").write_text("# Two\n\nOn disk.")
+    with connect(populated_wiki / ".mdwiki" / "state.db") as conn:
+        conn.execute(
+            "INSERT INTO pages (path, kind, last_touched_at) VALUES (?, ?, ?)",
+            ("wiki/concepts/one.md", "concept", time.time()),
+        )
+
+    report = get_status(populated_wiki)
+    out = format_status(report, wiki_root=populated_wiki)
+
+    assert report.disk_pages_total == 2
+    assert report.pages_total == 1
+    assert "WARNING: wiki page count drift" in out
+
+
+@pytest.mark.unit
 def test_format_status_with_events_lists_them(populated_wiki: Path) -> None:
     db_path = populated_wiki / ".mdwiki" / "state.db"
     with connect(db_path) as conn:

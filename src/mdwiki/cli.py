@@ -24,6 +24,7 @@ from mdwiki.lint import lint_wiki
 from mdwiki.lint_fix import lint_fix
 from mdwiki.llm import UnknownProviderError
 from mdwiki.llm.anthropic import BatchTimeoutError, BatchUnexpectedStatusError, MissingAPIKeyError
+from mdwiki.page_index import rebuild_page_index
 from mdwiki.profiles import UnknownProfileError, list_profile_names
 from mdwiki.query import QueryError, query_wiki
 from mdwiki.rebuild import RebuildError, rebuild_wiki
@@ -164,6 +165,11 @@ def _build_parser() -> argparse.ArgumentParser:
     source_p.set_defaults(_handler=_cmd_source)
 
     rebuild_p = subparsers.add_parser("rebuild", help="Reconstruct .mdwiki/state.db from raw/.sources.json + wiki/log.md.")
+    rebuild_p.add_argument(
+        "--pages",
+        action="store_true",
+        help="Rebuild the pages table and embeddings from existing wiki/*.md files.",
+    )
     rebuild_p.set_defaults(_handler=_cmd_rebuild)
 
     rebuild_log_p = subparsers.add_parser(
@@ -406,8 +412,22 @@ def _cmd_source(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_rebuild(_args: argparse.Namespace) -> int:
+def _cmd_rebuild(args: argparse.Namespace) -> int:
     """Handler for ``mdwiki rebuild``."""
+    if args.pages:
+        try:
+            wiki_root = find_wiki()
+        except WikiNotFound as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        result = rebuild_page_index(wiki_root)
+        print(
+            "Page index rebuilt: "
+            f"{result.added} added, {result.updated} updated, {result.pruned} pruned, "
+            f"{result.skipped} skipped, {result.embedded} embedded."
+        )
+        return 0
+
     try:
         result = rebuild_wiki()
     except WikiNotFound as exc:

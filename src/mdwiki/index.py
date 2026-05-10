@@ -12,11 +12,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-PAGE_KIND_FOLDERS: list[tuple[str, str]] = [
-    ("Entities", "entities"),
-    ("Concepts", "concepts"),
-    ("Syntheses", "syntheses"),
-]
+from mdwiki.page_kinds import page_kind_folders_for_wiki
 
 
 def regenerate_index(wiki_root: Path) -> None:
@@ -37,7 +33,7 @@ def build_index(wiki_root: Path) -> str:
         "",
     ]
 
-    for heading, folder in PAGE_KIND_FOLDERS:
+    for _kind, heading, folder in page_kind_folders_for_wiki(wiki_root):
         lines.append(f"## {heading}")
         lines.append("")
         entries = _collect_pages(wiki_root, folder)

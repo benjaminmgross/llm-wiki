@@ -11,6 +11,7 @@ from pytest_mock import MockerFixture
 from mdwiki.ingest import IngestError, ingest_source
 from mdwiki.init import init_wiki
 from mdwiki.llm.base import CompleteResult
+from mdwiki.page_index import rebuild_page_index
 from mdwiki.state import connect
 
 
@@ -52,6 +53,11 @@ def _mock_provider(mocker: MockerFixture, plan_json: str) -> None:
         "mdwiki.llm.anthropic.AnthropicProvider.complete",
         return_value=CompleteResult(text=plan_json, input_tokens=100, output_tokens=50),
     )
+
+
+class StubEmbedder:
+    def embed_text(self, text: str) -> list[float]:
+        return [float("attention" in text.lower()), 0.0, 0.0]
 
 
 @pytest.fixture(autouse=True)
@@ -217,6 +223,55 @@ def test_ingest_does_not_apply_when_user_rejects(wiki_with_one_source: Path, moc
 
 
 @pytest.mark.unit
+def test_ingest_rejects_new_page_path_that_exists_on_disk(wiki_with_one_source: Path, mocker: MockerFixture) -> None:
+    target = wiki_with_one_source / "wiki" / "concepts" / "attention-sinks.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Existing\n\nDo not overwrite.")
+    _mock_provider(mocker, _good_plan_json())
+
+    with pytest.raises(IngestError) as excinfo:
+        ingest_source(wiki_with_one_source, "ai.md", yes=True, embedder=StubEmbedder())
+
+    assert "already exists" in str(excinfo.value)
+    assert "must return an update" in str(excinfo.value)
+    assert target.read_text() == "# Existing\n\nDo not overwrite."
+
+
+@pytest.mark.unit
+def test_page_index_rebuild_restores_existing_pages_as_ingest_candidates(
+    wiki_with_one_source: Path,
+    mocker: MockerFixture,
+) -> None:
+    existing = wiki_with_one_source / "wiki" / "concepts" / "attention-sinks.md"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("# Attention Sinks\n\nExisting page about attention sinks.")
+    captured: dict[str, str] = {}
+
+    def fake_complete(*, system: str, messages: list, **kwargs):  # type: ignore[no-untyped-def]
+        captured["prompt"] = messages[0].content
+        return CompleteResult(
+            text=json.dumps(
+                {
+                    "verdict": "low-quality",
+                    "rationale": "prompt inspection only",
+                    "updates": [],
+                    "new_pages": [],
+                    "cross_refs": [],
+                }
+            ),
+            input_tokens=10,
+            output_tokens=10,
+        )
+
+    mocker.patch("mdwiki.llm.anthropic.AnthropicProvider.complete", side_effect=fake_complete)
+    rebuild_page_index(wiki_with_one_source, embedder=StubEmbedder())
+
+    ingest_source(wiki_with_one_source, "ai.md", yes=True, embedder=StubEmbedder())
+
+    assert "wiki/concepts/attention-sinks.md" in captured["prompt"]
+
+
+@pytest.mark.unit
 def test_ingest_applies_writes_wiki_file(wiki_with_one_source: Path, mocker: MockerFixture) -> None:
     _mock_provider(mocker, _good_plan_json())
     ingest_source(wiki_with_one_source, "ai.md", yes=True)
@@ -227,6 +282,8 @@ def test_ingest_applies_writes_wiki_file(wiki_with_one_source: Path, mocker: Moc
 
 @pytest.mark.unit
 def test_ingest_marks_source_ingested_in_db(wiki_with_one_source: Path, mocker: MockerFixture) -> None:
+    import json
+
     _mock_provider(mocker, _good_plan_json())
     ingest_source(wiki_with_one_source, "ai.md", yes=True)
 
@@ -235,6 +292,11 @@ def test_ingest_marks_source_ingested_in_db(wiki_with_one_source: Path, mocker: 
         row = conn.execute("SELECT status, ingested_at FROM sources WHERE original_path='ai.md'").fetchone()
     assert row["status"] == "ingested"
     assert row["ingested_at"] is not None
+
+    sidecar = json.loads((wiki_with_one_source / "raw" / ".sources.json").read_text())
+    source_meta = next(meta for meta in sidecar.values() if meta["original_path"] == "ai.md")
+    assert source_meta["status"] == "ingested"
+    assert source_meta["ingested_at"] is not None
 
 
 @pytest.mark.unit

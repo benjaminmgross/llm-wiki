@@ -72,6 +72,30 @@ def test_build_index_groups_pages_by_kind(wiki: Path) -> None:
 
 
 @pytest.mark.unit
+def test_build_index_includes_initiative_profile_folders(tmp_path: Path) -> None:
+    init_wiki(tmp_path, profile="initiative")
+    (tmp_path / "wiki" / "decisions").mkdir(parents=True)
+    (tmp_path / "wiki" / "status").mkdir(parents=True)
+    (tmp_path / "wiki" / "workstreams").mkdir(parents=True)
+    (tmp_path / "wiki" / "owners").mkdir(parents=True)
+    (tmp_path / "wiki" / "decisions" / "pricing.md").write_text("# Pricing Decision\n\nPricing changed.")
+    (tmp_path / "wiki" / "status" / "pipeline.md").write_text("# Pipeline Status\n\nPipeline moved.")
+    (tmp_path / "wiki" / "workstreams" / "fundraise.md").write_text("# Fundraise\n\nFundraise stream.")
+    (tmp_path / "wiki" / "owners" / "ops.md").write_text("# Ops\n\nOps owns execution.")
+
+    text = build_index(tmp_path)
+
+    assert "## Decisions" in text
+    assert "## Status" in text
+    assert "## Workstreams" in text
+    assert "## Owners" in text
+    assert "Pricing Decision" in text
+    assert "Pipeline Status" in text
+    assert "Fundraise" in text
+    assert "Ops" in text
+
+
+@pytest.mark.unit
 def test_build_index_marks_empty_sections(wiki: Path) -> None:
     (wiki / "wiki" / "entities").mkdir(parents=True)
     (wiki / "wiki" / "entities" / "alice.md").write_text("# Alice\n\nbio")

@@ -57,8 +57,16 @@ def test_user_prompt_includes_source_with_section_ids() -> None:
     prompt = build_ingest_user_prompt(
         source_path="ai/foo.md",
         sections=[
-            {"section_id": "foo.md/Intro", "heading": "Intro", "content": "Some intro text."},
-            {"section_id": "foo.md/Body", "heading": "Body", "content": "Body content."},
+            {
+                "section_id": "foo.md/Intro",
+                "heading": "Intro",
+                "content": "Some intro text with enough words for quoting.",
+            },
+            {
+                "section_id": "foo.md/Body",
+                "heading": "Body",
+                "content": "Body content with enough words for quoting.",
+            },
         ],
         candidate_pages=[],
         schema_text="<schema content>",
@@ -67,8 +75,29 @@ def test_user_prompt_includes_source_with_section_ids() -> None:
     assert "ai/foo.md" in prompt
     assert "foo.md/Intro" in prompt
     assert "foo.md/Body" in prompt
-    assert "Some intro text." in prompt
+    assert "Some intro text with enough words for quoting." in prompt
     assert "<schema content>" in prompt
+
+
+@pytest.mark.unit
+def test_user_prompt_includes_verified_quote_bank() -> None:
+    prompt = build_ingest_user_prompt(
+        source_path="ai/foo.md",
+        sections=[
+            {
+                "section_id": "foo.md/Intro",
+                "heading": "Intro",
+                "content": "- **Exact source bullet:** copy this quote without paraphrasing\n```mermaid\nskip this",
+            },
+        ],
+        candidate_pages=[],
+        schema_text="schema",
+        recent_log_entries=[],
+    )
+    assert "Verified quote bank" in prompt
+    assert "section_id: foo.md/Intro" in prompt
+    assert "quote: - **Exact source bullet:** copy this quote without paraphrasing" in prompt
+    assert "quote: ```mermaid" not in prompt
 
 
 @pytest.mark.unit

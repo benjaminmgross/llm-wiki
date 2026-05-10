@@ -16,8 +16,8 @@ from pytest_mock import MockerFixture
 from mdwiki.ingest import ingest_source
 from mdwiki.init import init_wiki
 from mdwiki.llm.base import CompleteResult
-from mdwiki.quote import _normalize, quote_normalize_mode_for_wiki, verify_plan
 from mdwiki.plan import parse_plan
+from mdwiki.quote import _normalize, quote_normalize_mode_for_wiki, verify_plan
 
 
 @pytest.mark.unit
