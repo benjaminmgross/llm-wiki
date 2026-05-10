@@ -121,6 +121,22 @@ def test_undo_restores_source_to_pending(wiki_with_one_ingested: Path) -> None:
 
 
 @pytest.mark.unit
+def test_undo_restores_source_sidecar_to_pending(wiki_with_one_ingested: Path) -> None:
+    sidecar_path = wiki_with_one_ingested / "raw" / ".sources.json"
+    sidecar_before = json.loads(sidecar_path.read_text())
+    source_meta_before = next(meta for meta in sidecar_before.values() if meta["original_path"] == "ai.md")
+    assert source_meta_before["status"] == "ingested"
+    assert source_meta_before["ingested_at"] is not None
+
+    undo_last(wiki_with_one_ingested, n=1)
+
+    sidecar_after = json.loads(sidecar_path.read_text())
+    source_meta_after = next(meta for meta in sidecar_after.values() if meta["original_path"] == "ai.md")
+    assert source_meta_after["status"] == "pending"
+    assert source_meta_after["ingested_at"] is None
+
+
+@pytest.mark.unit
 def test_undo_marks_transaction_unapplied(wiki_with_one_ingested: Path) -> None:
     db_path = wiki_with_one_ingested / ".mdwiki" / "state.db"
     undo_last(wiki_with_one_ingested, n=1)

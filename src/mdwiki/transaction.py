@@ -271,6 +271,15 @@ class IngestTransaction:
         # table can be replayed to log.md later).
         self._conn.commit()
         self._committed = True
+        if self._source_id is not None:
+            try:
+                _mark_sidecar_ingested(self._wiki_root, self._source_id, now)
+            except OSError as exc:
+                print(
+                    f"warning: source status committed to DB but raw/.sources.json update failed: {exc} "
+                    f"(source_id={self._source_id}; rebuild may mark this source pending)",
+                    file=sys.stderr,
+                )
 
         log_path = self._wiki_root / "wiki" / "log.md"
         try:
@@ -321,3 +330,30 @@ def _is_wiki_page(rel: Path) -> bool:
     if name in {"log.md", "index.md"}:
         return False
     return True
+
+
+def _mark_sidecar_ingested(wiki_root: Path, source_id: str, ingested_at: float) -> None:
+    """Mirror source ingest status into the tracked raw sidecar for DB rebuild."""
+    sidecar_path = wiki_root / "raw" / ".sources.json"
+    if not sidecar_path.is_file():
+        return
+
+    sidecar = json.loads(sidecar_path.read_text())
+    meta = sidecar.get(source_id)
+    if not isinstance(meta, dict):
+        return
+
+    meta["status"] = "ingested"
+    meta["ingested_at"] = ingested_at
+    tmp_path = sidecar_path.with_name(f"{sidecar_path.name}.tmp-{source_id}")
+    try:
+        tmp_path.write_text(json.dumps(sidecar, indent=2, sort_keys=True))
+        import os
+
+        os.replace(tmp_path, sidecar_path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass

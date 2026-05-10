@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pytest_mock import MockerFixture
 
 from mdwiki import __version__
 from mdwiki.cli import main
@@ -357,6 +358,34 @@ def test_rebuild_subcommand_succeeds(
 
 
 @pytest.mark.unit
+def test_rebuild_pages_subcommand_populates_page_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mocker: MockerFixture,
+) -> None:
+    _seed_wiki(tmp_path)
+    capsys.readouterr()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "wiki" / "concepts").mkdir(parents=True)
+    (tmp_path / "wiki" / "concepts" / "existing.md").write_text("# Existing\n\nBody.")
+    fake_embedder = mocker.Mock()
+    fake_embedder.embed_text.return_value = [1.0, 0.0, 0.0]
+    mocker.patch("mdwiki.page_index.get_default_embedder", return_value=fake_embedder)
+
+    exit_code = main(["rebuild", "--pages"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "page index rebuilt" in out.lower()
+    from mdwiki.state import connect
+
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        count = conn.execute("SELECT COUNT(*) AS c FROM pages").fetchone()["c"]
+    assert count == 1
+
+
+@pytest.mark.unit
 def test_refresh_subcommand_picks_up_new_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -602,4 +631,3 @@ def test_refresh_bootstrap_chains_ingest(
     assert "Bootstrap done" in out
     assert "1 of 1" in out
     assert (tmp_path / "wiki" / "concepts" / "sinks.md").exists()
-

@@ -73,6 +73,7 @@ def undo_last(wiki_root: Path, n: int = 1) -> UndoResult:
             conn.rollback()
             raise
 
+    _sync_source_sidecar_from_db(wiki_root=wiki_root)
     _append_undo_markers(wiki_root=wiki_root, tx_ids=undone_ids)
 
     return UndoResult(
@@ -142,3 +143,41 @@ def _append_undo_markers(*, wiki_root: Path, tx_ids: list[str]) -> None:
     with log_path.open("a") as fh:
         for tx_id in tx_ids:
             fh.write(f"- {now_iso} [undo] reverted {tx_id}\n")
+
+
+def _sync_source_sidecar_from_db(*, wiki_root: Path) -> None:
+    """Keep tracked source recovery metadata consistent after undo."""
+    sidecar_path = wiki_root / "raw" / ".sources.json"
+    if not sidecar_path.is_file():
+        return
+
+    sidecar = json.loads(sidecar_path.read_text())
+    db_path = wiki_root / WIKI_DIR_NAME / "state.db"
+    with connect(db_path) as conn:
+        rows = conn.execute("SELECT id, status, ingested_at FROM sources").fetchall()
+
+    changed = False
+    for row in rows:
+        meta = sidecar.get(row["id"])
+        if not isinstance(meta, dict):
+            continue
+        if meta.get("status") != row["status"] or meta.get("ingested_at") != row["ingested_at"]:
+            meta["status"] = row["status"]
+            meta["ingested_at"] = row["ingested_at"]
+            changed = True
+
+    if not changed:
+        return
+
+    tmp_path = sidecar_path.with_name(f"{sidecar_path.name}.tmp-undo")
+    try:
+        tmp_path.write_text(json.dumps(sidecar, indent=2, sort_keys=True))
+        import os
+
+        os.replace(tmp_path, sidecar_path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass

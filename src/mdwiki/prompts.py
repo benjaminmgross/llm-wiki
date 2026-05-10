@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+MAX_QUOTE_BANK_LINES: int = 120
+
 # Prose-guidance head: shared verbatim by both the JSON-output and tool-use
 # variants. Ends right before the output-format spec so each variant can append
 # its own spec block without overlap. Keep this string self-contained — never
@@ -19,7 +21,14 @@ You are a wiki maintainer. Your job is to weave a new source into an existing
 wiki WITHOUT producing slop AND WITHOUT under-building it.
 
 Be skeptical, but not paralyzed. The schema gives concrete touch-breadth targets
-(5–15 wiki pages per ingest, typically) — read the schema before deciding.
+for strong hosted models; for smaller/local models, a smaller VALID plan is
+better than an ambitious invalid plan. Prefer 1–4 high-confidence page touches
+with verified quotes over 5–15 page touches with any paraphrased quote.
+When working from a long source, cap yourself at:
+- at most 1 update
+- at most 2 new_pages
+- at most 1 claim per touched page
+This cap is mandatory unless the user explicitly asks for exhaustive ingest.
 
 You have explicit license to refuse — sparingly:
 - Refuse to write speculative content not present in the source.
@@ -57,10 +66,24 @@ ellipsis, no joining of non-adjacent passages. If you need to cite two
 separate parts of the source, write two separate claims, one per quote.
 Quotes must be at least 4 words long; ideal length is 5 to 15 words.
 
+STRICT LOCAL-MODEL QUOTE RULE:
+- The `quote` field is evidence text only, not your claim.
+- Do not turn source facts into a sentence. For example, if the source row says
+  `CEO | Lino Maldonado | Ex-VP Wyndham`, the quote may be
+  `Lino Maldonado | Ex-VP Wyndham`, but MUST NOT be
+  `Lino Maldonado is Ex-VP Wyndham`.
+- Use short copied spans from the source exactly as printed, including table
+  wording and punctuation.
+- The safest quote is one exact source line, one exact table cell, or one exact
+  bullet phrase. Never merge multiple bullets, rows, or sentences into one
+  quote. Never remove markdown markers from inside the copied span.
+- If you cannot find a copied span that supports a page, omit that page.
+
 mdwiki greps the source for each quote (whitespace and case are normalized).
-If any quote is missing, fabricated, contains an ellipsis, or violates the
-length minimum, the entire plan is REJECTED. When uncertain, drop the
-questionable claim — fewer verified claims always beat more unverified ones.
+If any quote is missing, fabricated, contains an ellipsis, joins separate
+source spans, or violates the length minimum, the entire plan is REJECTED.
+When uncertain, drop the questionable claim — one verified claim beats many
+unverified claims.
 
 For an UPDATE, ``content`` is the COMPLETE revised page content — the entire
 page body as you want it stored. mdwiki replaces the whole file with this
@@ -153,6 +176,16 @@ def build_ingest_user_prompt(
         parts.append("(no candidate pages — the wiki has no existing pages similar to this source)")
     parts.append("")
 
+    quote_bank = _quote_bank_for_sections(sections)
+    parts.append("# Verified quote bank (copy `quote` values from here when possible)")
+    if quote_bank:
+        for item in quote_bank:
+            parts.append(f"- section_id: {item['section_id']}")
+            parts.append(f"  quote: {item['quote']}")
+    else:
+        parts.append("(no quote-bank excerpts were generated; copy exact spans from the source below)")
+    parts.append("")
+
     parts.append(f"# New source to ingest: {source_path}")
     if sections:
         for section in sections:
@@ -164,9 +197,41 @@ def build_ingest_user_prompt(
         parts.append("(this source has no H2-bounded sections; treat the entire file body as one section with section_id matching the path)")
     parts.append("")
 
-    parts.append("Build the JSON plan now.")
+    parts.append(
+        "Build the JSON plan now. Keep it small: at most 1 update, at most 2 new_pages, "
+        "and at most 1 claim per touched page. Every quote must be copied from one exact "
+        "source line, table cell, or bullet phrase; do not combine source spans."
+    )
 
     return "\n".join(parts)
+
+
+def _quote_bank_for_sections(sections: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Extract source lines likely to work as verbatim quote anchors."""
+    bank: list[dict[str, str]] = []
+    for section in sections:
+        section_id = str(section["section_id"])
+        for raw_line in str(section["content"]).splitlines():
+            line = raw_line.strip()
+            if not _looks_like_quote_bank_line(line):
+                continue
+            bank.append({"section_id": section_id, "quote": line})
+            if len(bank) >= MAX_QUOTE_BANK_LINES:
+                return bank
+    return bank
+
+
+def _looks_like_quote_bank_line(line: str) -> bool:
+    if not line:
+        return False
+    if line.startswith(("```", "%%", "graph ", "style ", "subgraph ", "end")):
+        return False
+    if line in {"---", "|---|", "| --- |"}:
+        return False
+    words = [word for word in line.replace("|", " ").split() if word.strip("-*`")]
+    if len(words) < 4:
+        return False
+    return True
 
 
 QUERY_SYSTEM_PROMPT: str = """\

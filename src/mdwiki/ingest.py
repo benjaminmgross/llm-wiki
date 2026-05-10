@@ -19,13 +19,13 @@ from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.embedder import Embedder, get_default_embedder
 from mdwiki.embeddings import deserialize, find_top_k, serialize
 from mdwiki.index import build_index
+from mdwiki.ingest_tool import INGEST_TOOL_CHOICE, INGEST_TOOL_DEFINITION
 from mdwiki.llm import build_provider_from_config
 from mdwiki.llm.anthropic import OutputTruncatedError
 from mdwiki.llm.base import Message, Provider
-from mdwiki.ingest_tool import INGEST_TOOL_CHOICE, INGEST_TOOL_DEFINITION
+from mdwiki.page_kinds import infer_kind_from_page_path
 from mdwiki.plan import Plan, PlanValidationError, allowed_kinds_for_wiki, parse_plan, parse_plan_dict
-from mdwiki.prompts import INGEST_SYSTEM_PROMPT_TOOL_USE
-from mdwiki.prompts import INGEST_SYSTEM_PROMPT, build_ingest_user_prompt
+from mdwiki.prompts import INGEST_SYSTEM_PROMPT, INGEST_SYSTEM_PROMPT_TOOL_USE, build_ingest_user_prompt
 from mdwiki.quote import min_quote_words_for_wiki, quote_normalize_mode_for_wiki, verify_plan
 from mdwiki.state import connect
 from mdwiki.transaction import IngestTransaction
@@ -140,6 +140,8 @@ def ingest_source(
             plan = parse_plan(response.text, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
     except PlanValidationError as exc:
         raise IngestError(f"LLM returned an unparseable plan: {exc}") from exc
+
+    _reject_existing_new_page_paths(wiki_root=wiki_root, plan=plan)
 
     verification = verify_plan(
         plan,
@@ -443,13 +445,21 @@ def _find_candidate_pages(*, wiki_root: Path, section_vectors: list[list[float]]
 
 
 def _infer_kind(page_path: str) -> str:
-    if "/entities/" in page_path:
-        return "entity"
-    if "/concepts/" in page_path:
-        return "concept"
-    if "/syntheses/" in page_path:
-        return "synthesis"
-    return "concept"
+    return infer_kind_from_page_path(page_path) or "concept"
+
+
+def _reject_existing_new_page_paths(*, wiki_root: Path, plan: Plan) -> None:
+    """Reject LLM plans that call an existing file a new page."""
+    seen: set[str] = set()
+    for new_page in plan.new_pages:
+        if new_page.path in seen:
+            raise IngestError(f"LLM proposed duplicate new page {new_page.path}.")
+        seen.add(new_page.path)
+        if (wiki_root / new_page.path).exists():
+            raise IngestError(
+                f"LLM proposed new page {new_page.path}, but that file already exists. "
+                "The model must return an update for existing pages."
+            )
 
 
 def _terminal_confirm(plan: Plan) -> bool:
@@ -462,5 +472,3 @@ def _terminal_confirm(plan: Plan) -> bool:
         print(f"  ~ update: {update.page} ({len(update.claims)} claim(s))")
     answer = input("\nApply? [y/N] ").strip().lower()
     return answer == "y"
-
-
