@@ -60,6 +60,7 @@ def ingest_source(
     max_tokens: int = 16000,
     embedder: Embedder | None = None,
     force: bool = False,
+    plan_retries: int = 1,
 ) -> IngestResult:
     """Run the full ingest pipeline for one source.
 
@@ -82,6 +83,9 @@ def ingest_source(
         Re-run ingest even if the source is already marked ``ingested``. Used
         by ``ingest_many(scope="all")`` to give ``--all`` true re-process
         semantics. Default ``False`` — already-ingested sources short-circuit.
+    plan_retries : int, optional
+        Number of corrective retries after recoverable LLM plan validation
+        failures. Defaults to one retry.
 
     Raises
     ------
@@ -123,26 +127,50 @@ def ingest_source(
     # parse. Other providers fall back to free-form JSON in response text.
     use_tool = provider.name == "anthropic"
     system_prompt = INGEST_SYSTEM_PROMPT_TOOL_USE if use_tool else INGEST_SYSTEM_PROMPT
-    try:
-        response = provider.complete(
-            system=system_prompt,
-            messages=[Message(role="user", content=user_prompt)],
-            max_tokens=max_tokens,
-            tools=[INGEST_TOOL_DEFINITION] if use_tool else None,
-            tool_choice=INGEST_TOOL_CHOICE if use_tool else None,
-        )
-    except OutputTruncatedError as exc:
-        raise IngestError(str(exc)) from exc
+    messages = [Message(role="user", content=user_prompt)]
+    plan: Plan | None = None
+    last_plan_error: IngestError | None = None
+    for attempt in range(plan_retries + 1):
+        try:
+            response = provider.complete(
+                system=system_prompt,
+                messages=messages,
+                max_tokens=max_tokens,
+                tools=[INGEST_TOOL_DEFINITION] if use_tool else None,
+                tool_choice=INGEST_TOOL_CHOICE if use_tool else None,
+            )
+        except OutputTruncatedError as exc:
+            raise IngestError(str(exc)) from exc
 
-    try:
-        if response.tool_input is not None:
-            plan = parse_plan_dict(response.tool_input, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
+        try:
+            if response.tool_input is not None:
+                candidate_plan = parse_plan_dict(response.tool_input, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
+            else:
+                candidate_plan = parse_plan(response.text, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
+            _reject_existing_new_page_paths(wiki_root=wiki_root, plan=candidate_plan)
+        except PlanValidationError as exc:
+            last_plan_error = IngestError(f"LLM returned an unparseable plan: {exc}")
+        except IngestError as exc:
+            if not _is_recoverable_plan_error(exc):
+                raise
+            last_plan_error = exc
         else:
-            plan = parse_plan(response.text, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
-    except PlanValidationError as exc:
-        raise IngestError(f"LLM returned an unparseable plan: {exc}") from exc
+            plan = candidate_plan
+            break
 
-    _reject_existing_new_page_paths(wiki_root=wiki_root, plan=plan)
+        if last_plan_error is None:
+            raise IngestError("LLM returned an invalid ingest plan.")
+        if attempt >= plan_retries:
+            raise last_plan_error
+
+        messages = [
+            Message(role="user", content=user_prompt),
+            Message(role="assistant", content=_response_summary_for_retry(response)),
+            Message(role="user", content=_build_plan_retry_prompt(wiki_root=wiki_root, error=last_plan_error)),
+        ]
+
+    if plan is None:
+        raise last_plan_error or IngestError("LLM did not return an ingest plan.")
 
     verification = verify_plan(
         plan,
@@ -464,6 +492,61 @@ def _reject_existing_new_page_paths(*, wiki_root: Path, plan: Plan) -> None:
                 f"LLM proposed new page {new_page.path}, but that file already exists. "
                 "The model must return an update for existing pages."
             )
+
+
+def _is_recoverable_plan_error(exc: IngestError) -> bool:
+    message = str(exc)
+    return "LLM proposed new page" in message and "already exists" in message
+
+
+def _response_summary_for_retry(response: Any) -> str:
+    if response.tool_input is not None:
+        return f"The previous submit_plan tool input was rejected:\n{response.tool_input!r}"
+    text = response.text.strip()
+    if len(text) > 4000:
+        text = text[:4000] + "\n...[truncated]..."
+    return f"The previous plan response was rejected:\n{text}"
+
+
+def _build_plan_retry_prompt(*, wiki_root: Path, error: IngestError) -> str:
+    error_text = str(error)
+    parts = [
+        "Validation failed for the previous ingest plan.",
+        "",
+        f"Error: {error_text}",
+        "",
+        "Return a complete corrected plan now.",
+        "- `updates`, `new_pages`, and `cross_refs` must be arrays, even when empty.",
+        "- If a target wiki page already exists, use `updates[]`, not `new_pages[]`.",
+        "- For every `updates[]` entry, `content` must be the COMPLETE revised page content.",
+        "- Preserve existing page content unless the source justifies changing it.",
+        "- Keep all quotes copied verbatim from the current source.",
+    ]
+    conflicts = _existing_new_page_conflicts_from_error(wiki_root=wiki_root, error_text=error_text)
+    if conflicts:
+        parts.append("")
+        parts.append("# Existing page content for paths you must update instead of recreate")
+        for path, content in conflicts:
+            parts.append(f"## {path}")
+            parts.append(content)
+    return "\n".join(parts)
+
+
+def _existing_new_page_conflicts_from_error(*, wiki_root: Path, error_text: str) -> list[tuple[str, str]]:
+    marker = "LLM proposed new page "
+    if marker not in error_text:
+        return []
+    rest = error_text.split(marker, 1)[1]
+    path = rest.split(",", 1)[0].strip()
+    if not path.startswith("wiki/"):
+        return []
+    full_path = wiki_root / path
+    if not full_path.is_file():
+        return []
+    content = full_path.read_text()
+    if len(content) > 8000:
+        content = content[:8000] + "\n...[truncated]..."
+    return [(path, content)]
 
 
 def _terminal_confirm(plan: Plan) -> bool:

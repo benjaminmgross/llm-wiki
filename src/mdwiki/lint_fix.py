@@ -62,6 +62,7 @@ def lint_fix(
     mode: LintFixMode = "default",
     yes: bool = False,
     confirm: Callable[[LintFinding], bool] | None = None,
+    max_consecutive_failures: int | None = 5,
 ) -> LintFixResult:
     """Walk lint findings and apply per-kind fixes interactively.
 
@@ -77,6 +78,11 @@ def lint_fix(
     confirm : callable, optional
         Called with each ``LintFinding`` when ``yes`` is False; return True to apply.
         Default is a terminal y/N prompt.
+    max_consecutive_failures : int, optional
+        Stop after this many applicable fixes fail in a row. This prevents
+        ``--fix=full --yes`` from spending through a large backlog when every
+        LLM-backed re-ingest is failing for the same systemic reason. ``None``
+        disables the circuit breaker.
     """
     chooser = confirm or _terminal_confirm
     findings = lint_wiki(wiki_root).findings
@@ -84,12 +90,15 @@ def lint_fix(
     fixed = 0
     skipped = 0
     failed = 0
-    for finding in findings:
+    consecutive_failures = 0
+    for index, finding in enumerate(findings):
         if not _is_applicable(finding, mode=mode):
             skipped += 1
+            consecutive_failures = 0
             continue
         if not yes and not chooser(finding):
             skipped += 1
+            consecutive_failures = 0
             continue
         try:
             handled = _dispatch(finding, wiki_root=wiki_root, mode=mode)
@@ -102,11 +111,24 @@ def lint_fix(
                 "lint-fix failed for %s on %s", finding.kind, finding.page_path
             )
             failed += 1
+            consecutive_failures += 1
+            if max_consecutive_failures is not None and consecutive_failures >= max_consecutive_failures:
+                remaining_findings = findings[index + 1 :]
+                remaining_applicable = sum(1 for remaining in remaining_findings if _is_applicable(remaining, mode=mode))
+                skipped += len(remaining_findings)
+                print(
+                    f"  ! stopping lint-fix after {consecutive_failures} consecutive failures; "
+                    f"skipping {remaining_applicable} remaining applicable finding(s).",
+                    file=sys.stderr,
+                )
+                break
             continue
         if handled:
             fixed += 1
+            consecutive_failures = 0
         else:
             skipped += 1
+            consecutive_failures = 0
 
     return LintFixResult(fixed_count=fixed, skipped_count=skipped, failed_count=failed)
 

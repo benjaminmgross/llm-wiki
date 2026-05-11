@@ -25,27 +25,45 @@ def wiki_with_one_source(tmp_path: Path) -> Path:
 
 
 def _good_plan_json() -> str:
-    return json.dumps(
-        {
-            "verdict": "ingest",
-            "rationale": "One core concept, worth a new page.",
-            "updates": [],
-            "new_pages": [
-                {
-                    "path": "wiki/concepts/attention-sinks.md",
-                    "kind": "concept",
-                    "content": "# Attention Sinks\n\nA technique for long-context attention.",
-                    "claims": [
-                        {
-                            "source_section_id": "ai.md/Intro",
-                            "quote": "this paper introduces attention sinks for long contexts",
-                        }
-                    ],
-                }
-            ],
-            "cross_refs": [],
-        }
-    )
+    return json.dumps(_good_plan_dict())
+
+
+def _good_plan_dict() -> dict:
+    return {
+        "verdict": "ingest",
+        "rationale": "One core concept, worth a new page.",
+        "updates": [],
+        "new_pages": [
+            {
+                "path": "wiki/concepts/attention-sinks.md",
+                "kind": "concept",
+                "content": "# Attention Sinks\n\nA technique for long-context attention.",
+                "claims": [
+                    {
+                        "source_section_id": "ai.md/Intro",
+                        "quote": "this paper introduces attention sinks for long contexts",
+                    }
+                ],
+            }
+        ],
+        "cross_refs": [],
+    }
+
+
+class SequencedProvider:
+    name = "anthropic"
+
+    def __init__(self, results: list[CompleteResult]) -> None:
+        self.results = results
+        self.messages: list[list] = []
+
+    def complete(self, *, messages: list, **_kwargs) -> CompleteResult:  # type: ignore[no-untyped-def]
+        self.messages.append(messages)
+        return self.results.pop(0)
+
+
+def _tool_result(payload: dict) -> CompleteResult:
+    return CompleteResult(text="", input_tokens=10, output_tokens=10, tool_input=payload)
 
 
 def _mock_provider(mocker: MockerFixture, plan_json: str) -> None:
@@ -223,18 +241,57 @@ def test_ingest_does_not_apply_when_user_rejects(wiki_with_one_source: Path, moc
 
 
 @pytest.mark.unit
-def test_ingest_rejects_new_page_path_that_exists_on_disk(wiki_with_one_source: Path, mocker: MockerFixture) -> None:
+def test_ingest_retries_when_new_page_path_exists_on_disk(wiki_with_one_source: Path) -> None:
     target = wiki_with_one_source / "wiki" / "concepts" / "attention-sinks.md"
     target.parent.mkdir(parents=True)
     target.write_text("# Existing\n\nDo not overwrite.")
-    _mock_provider(mocker, _good_plan_json())
 
-    with pytest.raises(IngestError) as excinfo:
-        ingest_source(wiki_with_one_source, "ai.md", yes=True, embedder=StubEmbedder())
+    corrected = {
+        "verdict": "ingest",
+        "rationale": "Update the existing page instead of creating it.",
+        "updates": [
+            {
+                "page": "wiki/concepts/attention-sinks.md",
+                "content": "# Existing\n\nDo not overwrite.\n\nAdds attention sinks for long contexts.",
+                "claims": [
+                    {
+                        "source_section_id": "ai.md/Intro",
+                        "quote": "this paper introduces attention sinks for long contexts",
+                    }
+                ],
+            }
+        ],
+        "new_pages": [],
+        "cross_refs": [],
+    }
+    provider = SequencedProvider([_tool_result(_good_plan_dict()), _tool_result(corrected)])
 
-    assert "already exists" in str(excinfo.value)
-    assert "must return an update" in str(excinfo.value)
-    assert target.read_text() == "# Existing\n\nDo not overwrite."
+    result = ingest_source(wiki_with_one_source, "ai.md", yes=True, embedder=StubEmbedder(), provider=provider)
+
+    assert result.applied is True
+    assert len(provider.messages) == 2
+    assert "Validation failed" in provider.messages[1][2].content
+    assert "wiki/concepts/attention-sinks.md" in provider.messages[1][2].content
+    assert "Adds attention sinks" in target.read_text()
+
+
+@pytest.mark.unit
+def test_ingest_retries_when_tool_plan_has_wrong_typed_fields(wiki_with_one_source: Path) -> None:
+    bad_payload = {
+        "verdict": "ingest",
+        "rationale": "Malformed tool payload.",
+        "updates": "update wiki/concepts/attention-sinks.md",
+        "new_pages": [],
+        "cross_refs": [],
+    }
+    provider = SequencedProvider([_tool_result(bad_payload), _tool_result(_good_plan_dict())])
+
+    result = ingest_source(wiki_with_one_source, "ai.md", yes=True, embedder=StubEmbedder(), provider=provider)
+
+    assert result.applied is True
+    assert len(provider.messages) == 2
+    assert "updates" in provider.messages[1][2].content
+    assert (wiki_with_one_source / "wiki" / "concepts" / "attention-sinks.md").is_file()
 
 
 @pytest.mark.unit
