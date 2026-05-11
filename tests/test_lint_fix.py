@@ -160,6 +160,33 @@ def test_lint_fix_full_mode_re_ingests_stale(tmp_path: Path, mocker: MockerFixtu
 
 
 @pytest.mark.unit
+def test_lint_fix_full_mode_stops_after_consecutive_failures(tmp_path: Path, mocker: MockerFixture) -> None:
+    """Full mode should not spend through an entire backlog after repeated LLM failures."""
+    init_wiki(tmp_path)
+    _add_page(tmp_path, path="wiki/concepts/orphan-after-break.md", content="# Orphan\n\nNobody links here.\n")
+    db_path = tmp_path / ".mdwiki" / "state.db"
+    with connect(db_path) as conn:
+        for index in range(3):
+            source_id = f"src-{index}"
+            original_path = f"doc-{index}.md"
+            conn.execute(
+                "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (source_id, original_path, f"raw/{source_id}.md", f"{index}" * 64, 1000.0, "ingested"),
+            )
+        conn.commit()
+
+    mock_ingest = mocker.patch("mdwiki.lint_fix.ingest_source", side_effect=RuntimeError("same LLM failure"))
+
+    result = lint_fix(tmp_path, mode="full", yes=True, max_consecutive_failures=2)
+
+    assert mock_ingest.call_count == 2
+    assert result.fixed_count == 0
+    assert result.failed_count == 2
+    assert result.skipped_count == 2
+
+
+@pytest.mark.unit
 def test_lint_fix_returns_zero_when_no_findings(tmp_path: Path) -> None:
     """Clean wiki → fixed_count == 0, skipped_count == 0."""
     init_wiki(tmp_path)
