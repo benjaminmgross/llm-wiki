@@ -51,18 +51,22 @@ def test_init_bootstrap_chains_ingest(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
 
-    plan = json.dumps({
-        "verdict": "ingest",
-        "rationale": "x",
-        "updates": [],
-        "new_pages": [{
-            "path": "wiki/concepts/x.md",
-            "kind": "concept",
-            "content": "# X\n\nbody",
-            "claims": [{"source_section_id": "a.md/intro", "quote": "this paper introduces attention sinks for long contexts"}],
-        }],
-        "cross_refs": [],
-    })
+    plan = json.dumps(
+        {
+            "verdict": "ingest",
+            "rationale": "x",
+            "updates": [],
+            "new_pages": [
+                {
+                    "path": "wiki/concepts/x.md",
+                    "kind": "concept",
+                    "content": "# X\n\nbody",
+                    "claims": [{"source_section_id": "a.md/intro", "quote": "this paper introduces attention sinks for long contexts"}],
+                }
+            ],
+            "cross_refs": [],
+        }
+    )
     mocker.patch(
         "mdwiki.llm.anthropic.AnthropicProvider.complete",
         return_value=CompleteResult(text=plan, input_tokens=10, output_tokens=10),
@@ -75,6 +79,42 @@ def test_init_bootstrap_chains_ingest(
     assert "Bootstrap done" in out
     assert "1 of 1" in out
     assert (tmp_path / "wiki" / "concepts" / "x.md").exists()
+
+
+@pytest.mark.unit
+def test_init_bootstrap_returns_nonzero_on_partial_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
+) -> None:
+    from mdwiki.ingest import IngestResult
+
+    (tmp_path / "a.md").write_text("# A")
+    monkeypatch.chdir(tmp_path)
+    mocker.patch(
+        "mdwiki.cli.ingest_many",
+        return_value=[IngestResult(source_id="abc", applied=False, message="failed: bad source")],
+    )
+
+    assert main(["init", "--bootstrap"]) == 1
+
+
+@pytest.mark.unit
+def test_ingest_pending_returns_nonzero_on_partial_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
+) -> None:
+    from mdwiki.ingest import IngestResult
+
+    monkeypatch.chdir(tmp_path)
+    assert main(["init"]) == 0
+    mocker.patch(
+        "mdwiki.cli.ingest_many",
+        return_value=[IngestResult(source_id="abc", applied=False, message="failed: bad source")],
+    )
+
+    assert main(["ingest", "--pending"]) == 1
 
 
 @pytest.mark.unit
@@ -249,13 +289,11 @@ def test_source_subcommand_disambiguates_on_multiple_matches(
     monkeypatch.chdir(tmp_path)
     with connect(tmp_path / ".mdwiki" / "state.db") as conn:
         conn.execute(
-            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) VALUES (?, ?, ?, ?, ?, ?)",
             ("aaaa11112222", "fake-1.md", "raw/fake-1.md", "a" * 64, 1.0, "pending"),
         )
         conn.execute(
-            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) VALUES (?, ?, ?, ?, ?, ?)",
             ("aaaa33334444", "fake-2.md", "raw/fake-2.md", "a" * 64, 1.0, "pending"),
         )
         conn.commit()
@@ -598,25 +636,29 @@ def test_refresh_bootstrap_chains_ingest(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     main(["init"])
     capsys.readouterr()
-    (tmp_path / "beta.md").write_text(
-        "# Beta\n\n## body\n\nThis paper introduces attention sinks for long contexts.\n"
-    )
+    (tmp_path / "beta.md").write_text("# Beta\n\n## body\n\nThis paper introduces attention sinks for long contexts.\n")
 
-    plan = json.dumps({
-        "verdict": "ingest",
-        "rationale": "x",
-        "updates": [],
-        "new_pages": [{
-            "path": "wiki/concepts/sinks.md",
-            "kind": "concept",
-            "content": "# Sinks\n\nbody",
-            "claims": [{
-                "source_section_id": "beta.md/body",
-                "quote": "this paper introduces attention sinks for long contexts",
-            }],
-        }],
-        "cross_refs": [],
-    })
+    plan = json.dumps(
+        {
+            "verdict": "ingest",
+            "rationale": "x",
+            "updates": [],
+            "new_pages": [
+                {
+                    "path": "wiki/concepts/sinks.md",
+                    "kind": "concept",
+                    "content": "# Sinks\n\nbody",
+                    "claims": [
+                        {
+                            "source_section_id": "beta.md/body",
+                            "quote": "this paper introduces attention sinks for long contexts",
+                        }
+                    ],
+                }
+            ],
+            "cross_refs": [],
+        }
+    )
     mocker.patch(
         "mdwiki.llm.anthropic.AnthropicProvider.complete",
         return_value=CompleteResult(text=plan, input_tokens=10, output_tokens=10),
@@ -631,3 +673,114 @@ def test_refresh_bootstrap_chains_ingest(
     assert "Bootstrap done" in out
     assert "1 of 1" in out
     assert (tmp_path / "wiki" / "concepts" / "sinks.md").exists()
+
+
+@pytest.mark.unit
+def test_refresh_help_describes_provider_aware_bootstrap_batch(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = main(["refresh", "--help"])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "configured provider" in " ".join(out.split())
+    assert "Anthropic Batch API" not in out
+
+
+def test_cli_help_describes_failed_source_status_and_retry(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["--help"]) == 0
+    top_level_help = " ".join(capsys.readouterr().out.split())
+    assert "pending/failed/ingested counts" in top_level_help
+
+    assert main(["ingest", "--help"]) == 0
+    ingest_help = " ".join(capsys.readouterr().out.split())
+    assert "pending or failed" in ingest_help
+
+
+@pytest.mark.integration
+def test_refresh_bootstrap_batch_openai_compatible_fallback_keeps_initiative_wiki_coherent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mocker: MockerFixture,
+) -> None:
+    import json
+
+    from mdwiki.init import init_wiki
+    from mdwiki.llm.base import CompleteResult
+    from mdwiki.state import connect
+    from mdwiki.status import get_status
+
+    class StubEmbedder:
+        def embed_text(self, _text: str) -> list[float]:
+            return [1.0, 0.0, 0.0]
+
+    (tmp_path / "capital.md").write_text(
+        "# Capital Raise\n\n## Intro\n\nThe team is coordinating investor outreach for the capital raise.\n"
+    )
+    init_wiki(tmp_path, profile="initiative")
+    config_path = tmp_path / ".mdwiki" / "config.toml"
+    config_path.write_text(
+        config_path.read_text().replace(
+            'provider = "anthropic"\nmodel = "claude-sonnet-4-6"',
+            'provider = "openai-compatible"\n'
+            'model = "local-initiative-model"\n\n'
+            "[llm.openai_compatible]\n"
+            'base_url = "http://localhost:8000/v1"',
+        )
+    )
+    plan = json.dumps(
+        {
+            "verdict": "ingest",
+            "rationale": "Tracks the investor outreach workstream.",
+            "updates": [],
+            "new_pages": [
+                {
+                    "path": "wiki/workstreams/investor-outreach.md",
+                    "kind": "workstream",
+                    "content": "# Investor Outreach\n\nCapital raise outreach workstream.",
+                    "claims": [
+                        {
+                            "source_section_id": "capital.md/Intro",
+                            "quote": "team is coordinating investor outreach for the capital raise",
+                        }
+                    ],
+                }
+            ],
+            "cross_refs": [],
+        }
+    )
+    complete = mocker.patch(
+        "mdwiki.llm.openai_compatible.OpenAICompatibleProvider.complete",
+        return_value=CompleteResult(text=plan, input_tokens=10, output_tokens=10),
+    )
+    mocker.patch(
+        "mdwiki.llm.anthropic.AnthropicProvider.__init__",
+        side_effect=AssertionError("Anthropic must not be constructed"),
+    )
+    mocker.patch("mdwiki.bootstrap.get_default_embedder", return_value=StubEmbedder())
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main(["refresh", "--bootstrap-batch", "--yes"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "openai-compatible" in captured.out
+    assert "synchronous ingest fallback" in captured.out
+    assert complete.call_count == 1
+    assert (tmp_path / "wiki" / "workstreams" / "investor-outreach.md").is_file()
+    assert (tmp_path / "wiki" / "index.md").is_file()
+    assert "ingest capital.md" in (tmp_path / "wiki" / "log.md").read_text()
+    report = get_status(tmp_path)
+    assert report.pending == 0
+    assert report.failed == 0
+    assert report.ingested == 1
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM pages").fetchone()["c"] == 1
+        assert conn.execute("SELECT COUNT(*) AS c FROM backrefs").fetchone()["c"] == 1
+    sidecar = json.loads((tmp_path / "raw" / ".sources.json").read_text())
+    source_meta = next(iter(sidecar.values()))
+    assert source_meta["status"] == "ingested"
+    assert source_meta["failure_reason"] is None

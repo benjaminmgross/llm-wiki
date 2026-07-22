@@ -9,8 +9,9 @@ support image inputs (e.g. ``qwen2.5-vl-72b``, ``llava-*``). The default raises
 ``NotImplementedError`` so misconfigured wikis fail loudly instead of silently
 degrading to no-vision behavior.
 
-Batch is unsupported: ``batch_complete`` raises ``NotImplementedError``. Most local
-servers don't have a batch API; users wanting batch must switch to ``anthropic``.
+Native batch is unsupported: ``batch_complete`` raises ``NotImplementedError``.
+Bootstrap orchestration may explicitly fall back to synchronous ingest with this
+same provider.
 """
 
 from __future__ import annotations
@@ -54,6 +55,17 @@ class OpenAICompatibleProvider(Provider):
     """Provider backed by any OpenAI-compatible chat-completions endpoint."""
 
     name: str = "openai-compatible"
+
+    def is_recoverable_error(self, exc: Exception) -> bool:
+        return isinstance(
+            exc,
+            (
+                openai.RateLimitError,
+                openai.APIConnectionError,
+                openai.APITimeoutError,
+                openai.InternalServerError,
+            ),
+        )
 
     def __init__(
         self,
@@ -197,9 +209,7 @@ class OpenAICompatibleProvider(Provider):
         if tools is None and tool_choice is not None:
             raise ValueError("tool_choice requires tools to be set")
         del tools, tool_choice  # not yet wired for openai-compatible — see docstring
-        sdk_messages = [{"role": "system", "content": system}] + [
-            {"role": m.role, "content": m.content} for m in messages
-        ]
+        sdk_messages = [{"role": "system", "content": system}] + [{"role": m.role, "content": m.content} for m in messages]
         response = self._client.chat.completions.create(
             model=self.model,
             max_tokens=max_tokens,
@@ -235,10 +245,7 @@ class OpenAICompatibleProvider(Provider):
         suffix = image_path.suffix.lower()
         media_type = _IMAGE_MEDIA_TYPES.get(suffix)
         if media_type is None:
-            raise ValueError(
-                f"describe_image: unsupported image extension {suffix!r}. "
-                f"Supported: {sorted(_IMAGE_MEDIA_TYPES)}"
-            )
+            raise ValueError(f"describe_image: unsupported image extension {suffix!r}. Supported: {sorted(_IMAGE_MEDIA_TYPES)}")
         b64 = base64.standard_b64encode(image_path.read_bytes()).decode("ascii")
         # OpenAI vision content format: an image_url block with a data: URI
         response = self._client.chat.completions.create(
@@ -267,8 +274,8 @@ class OpenAICompatibleProvider(Provider):
         """Most OpenAI-compatible local servers (vLLM, llama.cpp) don't expose a batch API."""
         raise NotImplementedError(
             "openai-compatible provider does not support batch_complete. "
-            "Use the sync ingest path (`mdwiki init --bootstrap`), or switch "
-            "to provider = 'anthropic' for the Batch API."
+            "Use the sync ingest path (`mdwiki init --bootstrap`) or the "
+            "bootstrap-batch synchronous fallback."
         )
 
 

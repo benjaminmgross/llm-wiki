@@ -26,9 +26,9 @@ governs what page kinds exist, when to update vs. create, and how to cite.
 
 ## Common operations
 
-- ``mdwiki status`` — pending vs ingested counts, last lint, recent events
+- ``mdwiki status`` — pending/failed/ingested counts, failed reasons, last lint, recent events
 - ``mdwiki ingest <source>`` — interactive single-source ingest (you can ``--yes``)
-- ``mdwiki ingest --pending`` — bulk-ingest every pending source
+- ``mdwiki ingest --pending`` — bulk-ingest every pending or failed source
 - ``mdwiki query "<question>"`` — cited Q&A from existing wiki pages
 - ``mdwiki synthesize "<topic>"`` — produce a synthesis page from existing pages
 - ``mdwiki lint`` — broken refs, orphans, stale, coverage gaps; ``--fix`` interactive

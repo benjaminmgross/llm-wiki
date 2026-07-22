@@ -10,6 +10,8 @@ Built on [Karpathy's llm-wiki pattern](https://gist.github.com/karpathy/442a6bf5
 **v1.3.0 highlights (new):**
 
 - **`mdwiki refresh`** — re-scan an initialized wiki for newly-added files and register them as pending. Pair with `--bootstrap` for one-shot refreshes (`mdwiki refresh --bootstrap`); ideal for daily cron / scheduled-agent workflows. Content-hash dedup means previously-registered files are skipped automatically.
+- **Provider-aware bootstrap ingest** — `init/refresh --bootstrap-batch` honors `.mdwiki/config.toml`. Providers with native batch support use it; other providers explicitly fall back to isolated synchronous ingest with the same backend. There is no silent Anthropic switch.
+- **Durable partial-failure reporting** — failed sources retain their reason in `state.db` and `raw/.sources.json`; `mdwiki status` enumerates them and the next `--pending`/bootstrap run retries only pending or failed sources.
 - **Sidecar merge fix** — `_register_sources` now merges with the existing `raw/.sources.json` instead of overwriting, so `mdwiki rebuild` continues to work correctly after a refresh.
 
 **v1.2.0 highlights:**
@@ -30,7 +32,7 @@ Built on [Karpathy's llm-wiki pattern](https://gist.github.com/karpathy/442a6bf5
 **v1.1.0 (still shipped):**
 
 - **Multi-filetype ingest** — markdown, plain text, code (35+ languages), CSV/TSV, PDF, DOCX, HTML; plus opt-in image OCR via Claude vision
-- **Anthropic Batch API** — `init --bootstrap-batch` submits every pending source as one batch (~50% cheaper, ~1h ETA)
+- **Anthropic Batch API** — when `provider = "anthropic"`, `init --bootstrap-batch` submits every outstanding source as one batch (~50% cheaper, ~1h ETA)
 - **OpenAI-compatible provider** — point at vLLM, llama.cpp, OpenRouter, Together, etc. for local/cheaper inference
 - **Interactive `lint --fix`** — remediate broken refs deterministically; `--fix=full` re-ingests stale and coverage-gap sources
 - **`rebuild-log`** — regenerate `wiki/log.md` from the events table (recovery utility)
@@ -43,6 +45,7 @@ Built on [Karpathy's llm-wiki pattern](https://gist.github.com/karpathy/442a6bf5
 git clone <this repo>
 cd markdown-consolidator
 uv sync
+# Only for provider = "anthropic":
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
@@ -63,7 +66,7 @@ mdwiki init --profile=working-dir    # scaffold .mdwiki/, register sources, inge
 mdwiki status                        # see "412 pending sources"
 mdwiki doctor                        # verify provider + API ping
 mdwiki ingest one-file.md            # interactive single-source ingest
-mdwiki ingest --pending              # bulk ingest everything that's still pending
+mdwiki ingest --pending              # bulk ingest everything pending or previously failed
 mdwiki refresh                       # later: pick up files added since init
 mdwiki refresh --bootstrap           # ...and immediately ingest them (good for cron)
 mdwiki query "what did I conclude about transformer attention sinks?"
@@ -138,7 +141,8 @@ Refresh is content-hash dedup'd against `state.db`, so re-running it is safe and
 ```bash
 # crontab — every morning at 7am, sweep the folder for new files and ingest them
 0 7 * * * cd ~/notes/research && /path/to/mdwiki refresh --bootstrap
-# Or use --bootstrap-batch for ~50% cheaper / ~1h ETA (good for nightly runs):
+# Use native batch when the configured provider supports it; otherwise this
+# explicitly falls back to synchronous ingest with that same provider:
 0 7 * * * cd ~/notes/research && /path/to/mdwiki refresh --bootstrap-batch -y
 ```
 
@@ -146,15 +150,15 @@ Refresh is content-hash dedup'd against `state.db`, so re-running it is safe and
 
 | Command | Purpose |
 |---|---|
-| `mdwiki init [path] [--profile=<name>] [--bootstrap \| --bootstrap-batch]` | Scaffold `.mdwiki/`, register every loadable file as pending. `--profile` selects a corpus-aware seed schema (default: `working-dir`). `--bootstrap` chains sync `ingest --pending --yes`; `--bootstrap-batch` submits every pending source via Anthropic's Batch API (~50% cheaper, ~1h ETA) |
-| `mdwiki refresh [path] [--bootstrap \| --bootstrap-batch]` | Re-scan an initialized wiki for newly-added files; register new ones as pending. `path` defaults to the current directory and may point anywhere inside the wiki tree. `--bootstrap` chains a sync ingest; `--bootstrap-batch` uses the Batch API. Ideal for daily cron / scheduled-agent workflows |
-| `mdwiki status` | Pending/ingested counts, page counts by kind, recent events, last lint |
+| `mdwiki init [path] [--profile=<name>] [--bootstrap \| --bootstrap-batch]` | Scaffold `.mdwiki/`, register every loadable file as pending. `--profile` selects a corpus-aware seed schema (default: `working-dir`). `--bootstrap` chains sync `ingest --pending --yes`; `--bootstrap-batch` uses configured-provider native batch when supported and an explicit same-provider sync fallback otherwise |
+| `mdwiki refresh [path] [--bootstrap \| --bootstrap-batch]` | Re-scan an initialized wiki for newly-added files, then optionally ingest outstanding pending/failed sources. `path` defaults to the current directory and may point anywhere inside the wiki tree. `--bootstrap-batch` never changes the configured provider. Ideal for daily cron / scheduled-agent workflows |
+| `mdwiki status` | Pending/failed/ingested counts, enumerated failed-source reasons, page counts by kind, recent events, last lint |
 | `mdwiki source <hash-prefix>` | Inspect one registered source — original path, raw path, dependent pages |
 | `mdwiki rebuild` | Restore the `sources` table from `raw/.sources.json` after `state.db` deletion |
 | `mdwiki rebuild-log` | Regenerate `wiki/log.md` from the events table (recovery utility) |
 | `mdwiki doctor` | Pre-flight: provider config + 1-token API ping + embedder model |
 | `mdwiki ingest <source>` | Interactive single-source ingest (prompt → JSON plan → quote-verify → confirm → apply) |
-| `mdwiki ingest --pending` | Bulk-ingest every source still in pending status. Resumes cleanly if interrupted |
+| `mdwiki ingest --pending` | Bulk-ingest every source in pending or failed status. Resumes cleanly after interruption or partial failure |
 | `mdwiki ingest --all` | Re-ingest every source, including already-ingested ones |
 | `mdwiki query "<q>" [--file]` | Cited Q&A from existing wiki pages; `--file` files the answer as a synthesis |
 | `mdwiki synthesize "<topic>" \| --auto` | Explicit synthesis from a topic, or walk the cross-ref graph and propose syntheses |
@@ -226,7 +230,22 @@ timeout = 120.0
 vision_capable = false           # set true only for vision-capable models (Qwen-VL, LLaVA)
 ```
 
-Caveats: `--bootstrap-batch` requires `provider = "anthropic"` (most local servers don't have a batch API); `describe_image` requires `vision_capable = true`.
+`api_key` is read as a literal config value; mdwiki does not expand environment-variable placeholders in TOML. If a hosted endpoint requires a secret, keep the secret-bearing config out of version control or apply your repository's secret-management policy.
+
+`--bootstrap-batch` works with this configuration. Because most OpenAI-compatible endpoints do not expose a native batch API, mdwiki prints an explicit notice and processes sources sequentially through the configured OpenAI-compatible endpoint. It never substitutes Anthropic. Each source commits independently; failures remain retryable and appear with reasons in `mdwiki status`.
+
+After setting the OpenAI-compatible block above in the wiki's `.mdwiki/config.toml`, the terminal-driven capital-raise workflow is:
+
+```bash
+cd /path/to/key-initiatives/capital-raise
+mdwiki doctor                         # verifies this OpenAI-compatible endpoint/model
+mdwiki refresh --bootstrap-batch -y  # explicit same-provider sync fallback when native batch is unavailable
+mdwiki status                         # 0 pending/failed, or exact failed paths + reasons
+```
+
+No `wiki/`, `raw/`, log, backref, or database edits are required. If one source fails, successful sources remain committed and the next `refresh --bootstrap-batch -y` or `ingest --pending` run selects only sources still marked pending or failed.
+
+`describe_image` still requires `vision_capable = true` and a model/endpoint that actually accepts image inputs.
 
 `.mdwiki/schema.md` is the LLM's rulebook — page kinds, naming conventions, citation format, when to update vs create, synthesis triggers. It ships with sane defaults; edit to taste, the LLM honors it on every ingest/query/synthesize.
 
@@ -234,7 +253,7 @@ Caveats: `--bootstrap-batch` requires `provider = "anthropic"` (most local serve
 
 Designed for, deferred to v1.2+:
 
-- **Streaming Batch API status** — `--bootstrap-batch` polls every 60s and reports progress, but doesn't expose the underlying batch object
+- **Streaming native-batch status** — when the configured provider uses native batch, `--bootstrap-batch` polls every 60s and reports progress, but doesn't expose the underlying batch object
 - **Loader registry pluggable via entry_points** — third-party loaders are v1.2+
 - **Audio / video / xlsx loaders** — punted
 - **Multi-provider dispatch within one wiki** — config still names ONE provider

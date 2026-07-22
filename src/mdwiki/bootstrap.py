@@ -1,12 +1,8 @@
-"""Batch-API bootstrap path — submits every pending source as one batch (50% cheaper, ~1h).
+"""Provider-aware bootstrap path with native batch and same-provider sync fallback.
 
-The sync path lives in ``ingest.ingest_source`` / ``ingest_many``. This module mirrors
-that pipeline but routes the LLM round-trip through ``Provider.batch_complete`` so the
-user pays the Anthropic batch discount in exchange for ~1h latency. Quote verification
-and ``IngestTransaction`` application are reused unchanged after the batch completes.
-
-Failed entries (rate-limit, validation errors) leave the source as ``pending``; the user
-recovers by re-running ``mdwiki init --bootstrap-batch`` (or the sync ``--bootstrap``).
+Providers that declare native batch capability use it. Other configured providers run
+the same pending-source workflow synchronously and explicitly report the fallback. Each
+source remains an isolated transaction; failures are persisted for status and retry.
 """
 
 from __future__ import annotations
@@ -22,10 +18,13 @@ from mdwiki.embedder import Embedder, get_default_embedder
 from mdwiki.embeddings import serialize
 from mdwiki.index import build_index
 from mdwiki.ingest import (
+    IngestError,
     _apply_pages_and_backrefs,
     _chunk_or_whole,
     _find_candidate_pages,
     _recent_log_entries,
+    _reject_existing_new_page_paths,
+    ingest_many,
 )
 from mdwiki.ingest_tool import INGEST_TOOL_CHOICE, INGEST_TOOL_DEFINITION
 from mdwiki.llm import build_provider_from_config
@@ -38,8 +37,18 @@ from mdwiki.llm.base import (
 from mdwiki.plan import PlanValidationError, allowed_kinds_for_wiki, parse_plan, parse_plan_dict
 from mdwiki.prompts import INGEST_SYSTEM_PROMPT, INGEST_SYSTEM_PROMPT_TOOL_USE, build_ingest_user_prompt
 from mdwiki.quote import min_quote_words_for_wiki, quote_normalize_mode_for_wiki, verify_plan
+from mdwiki.source_state import mark_source_failed
 from mdwiki.state import connect
 from mdwiki.transaction import IngestTransaction
+
+
+@dataclass(frozen=True)
+class BootstrapFailure:
+    """One source or provider-protocol failure from bootstrap ingest."""
+
+    source_id: str
+    original_path: str
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -54,7 +63,7 @@ class BootstrapResult:
         Number whose plans verified and were applied via IngestTransaction.
     failed : int
         Number that came back with errors (rate-limited, invalid response, etc.).
-        These remain ``pending`` for retry.
+        These are marked ``failed`` with durable reasons and remain retryable.
     skipped : int
         Number whose plans verified but had verdict-only / empty plans.
     cost_estimate : BatchCostEstimate
@@ -69,6 +78,9 @@ class BootstrapResult:
     skipped: int
     cost_estimate: BatchCostEstimate
     batch_id: str
+    mode: str = "native-batch"
+    provider: str = ""
+    failures: tuple[BootstrapFailure, ...] = ()
 
 
 @dataclass
@@ -91,6 +103,7 @@ def bootstrap_batch(
     on_status: Callable[[str, int, int], None] | None = None,
     on_progress: Callable[[int, int, str], None] | None = None,
     on_batch_id: Callable[[str], None] | None = None,
+    on_fallback: Callable[[str], None] | None = None,
 ) -> BootstrapResult:
     """Submit every pending source as one batch and apply each successful result.
 
@@ -122,28 +135,67 @@ def bootstrap_batch(
             skipped=0,
             cost_estimate=BatchCostEstimate(requests=0, input_tokens=0, output_tokens_max=0, usd_total=0.0),
             batch_id="",
+            mode="native-batch" if provider.supports_batch else "sync-fallback",
+            provider=provider.name,
         )
 
-    # Anthropic supports constrained-decoding ``tool_use``; route every batch
-    # request through the ingest tool so each response is structurally
-    # guaranteed to parse. Other providers fall back to free-form JSON.
-    use_tool = provider.name == "anthropic"
+    if not provider.supports_batch:
+        if on_fallback is not None:
+            on_fallback(provider.name)
+        return _bootstrap_sync_fallback(
+            wiki_root=wiki_root,
+            provider=provider,
+            embedder=embedder,
+            pending=pending,
+            on_progress=on_progress,
+        )
+
+    use_tool = provider.supports_tool_use
 
     requests: list[BatchRequest] = []
     contexts: dict[str, _RequestContext] = {}
+    failures: list[BootstrapFailure] = []
     for source_row in pending:
-        request, context = _prepare_request(
-            wiki_root=wiki_root, source_row=source_row, embedder=embedder, use_tool=use_tool
-        )
+        try:
+            request, context = _prepare_request(
+                wiki_root=wiki_root,
+                source_row=source_row,
+                embedder=embedder,
+                use_tool=use_tool,
+            )
+        except Exception as exc:
+            _record_failure(wiki_root, source_row=source_row, reason=f"request preparation failed: {exc}", failures=failures)
+            continue
         requests.append(request)
         contexts[source_row["id"]] = context
+
+    if not requests:
+        return BootstrapResult(
+            submitted=0,
+            applied=0,
+            failed=len(failures),
+            skipped=0,
+            cost_estimate=BatchCostEstimate(requests=0, input_tokens=0, output_tokens_max=0, usd_total=0.0),
+            batch_id="",
+            mode="native-batch",
+            provider=provider.name,
+            failures=tuple(failures),
+        )
 
     estimate = provider.estimate_batch_cost(requests)
     if not yes:
         chooser = confirm or _terminal_confirm_estimate
         if not chooser(estimate):
             return BootstrapResult(
-                submitted=0, applied=0, failed=0, skipped=0, cost_estimate=estimate, batch_id=""
+                submitted=0,
+                applied=0,
+                failed=len(failures),
+                skipped=0,
+                cost_estimate=estimate,
+                batch_id="",
+                mode="native-batch",
+                provider=provider.name,
+                failures=tuple(failures),
             )
 
     captured_batch_id: str = ""
@@ -162,48 +214,128 @@ def bootstrap_batch(
     )
 
     applied = 0
-    failed = 0
     skipped = 0
     batch_id = captured_batch_id
-    for index, result in enumerate(results, start=1):
-        if on_progress is not None:
-            on_progress(index, len(results), result.custom_id)
-        if result.error is not None:
-            failed += 1
-            continue
-        context = contexts.get(result.custom_id)
-        if context is None:
-            failed += 1
-            continue
-        outcome = _apply_one_result(
-            wiki_root=wiki_root,
-            embedder=embedder,
-            response_text=result.text,
-            context=context,
-            tool_input=result.tool_input,
+    grouped: dict[str, list[Any]] = {}
+    for result in results:
+        grouped.setdefault(result.custom_id, []).append(result)
+
+    for custom_id in sorted(set(grouped) - set(contexts)):
+        failures.append(
+            BootstrapFailure(
+                source_id=custom_id,
+                original_path=f"<unknown:{custom_id}>",
+                reason="provider returned a result for an unknown source id",
+            )
         )
+
+    for index, (source_id, context) in enumerate(contexts.items(), start=1):
+        if on_progress is not None:
+            on_progress(index, len(contexts), source_id)
+        matches = grouped.get(source_id, [])
+        if len(matches) != 1:
+            reason = (
+                "provider returned no result for submitted source"
+                if not matches
+                else f"provider returned {len(matches)} duplicate results for submitted source"
+            )
+            _record_failure(wiki_root, source_row=context.source_row, reason=reason, failures=failures)
+            continue
+        result = matches[0]
+        if result.error is not None:
+            _record_failure(wiki_root, source_row=context.source_row, reason=result.error, failures=failures)
+            continue
+        try:
+            outcome, reason = _apply_one_result(
+                wiki_root=wiki_root,
+                embedder=embedder,
+                response_text=result.text,
+                context=context,
+                tool_input=result.tool_input,
+            )
+        except Exception as exc:
+            _record_failure(wiki_root, source_row=context.source_row, reason=str(exc), failures=failures)
+            continue
         if outcome == "applied":
             applied += 1
         elif outcome == "skipped":
             skipped += 1
         else:
-            failed += 1
+            _record_failure(wiki_root, source_row=context.source_row, reason=reason, failures=failures)
 
     return BootstrapResult(
         submitted=len(requests),
         applied=applied,
-        failed=failed,
+        failed=len(failures),
         skipped=skipped,
         cost_estimate=estimate,
         batch_id=batch_id,
+        mode="native-batch",
+        provider=provider.name,
+        failures=tuple(failures),
     )
+
+
+def _bootstrap_sync_fallback(
+    *,
+    wiki_root: Path,
+    provider: Provider,
+    embedder: Embedder,
+    pending: list[dict[str, Any]],
+    on_progress: Callable[[int, int, str], None] | None,
+) -> BootstrapResult:
+    by_id = {row["id"]: row["original_path"] for row in pending}
+    results = ingest_many(
+        wiki_root,
+        scope="pending",
+        yes=True,
+        provider=provider,
+        embedder=embedder,
+        on_progress=on_progress,
+    )
+    failures = tuple(
+        BootstrapFailure(
+            source_id=result.source_id or "",
+            original_path=by_id.get(result.source_id or "", "<unknown>"),
+            reason=result.message.removeprefix("failed: "),
+        )
+        for result in results
+        if not result.applied
+    )
+    skipped = sum(1 for result in results if result.applied and result.plan is not None and result.plan.is_empty())
+    applied = sum(1 for result in results if result.applied) - skipped
+    return BootstrapResult(
+        submitted=len(results),
+        applied=applied,
+        failed=len(failures),
+        skipped=skipped,
+        cost_estimate=BatchCostEstimate(requests=0, input_tokens=0, output_tokens_max=0, usd_total=0.0),
+        batch_id="",
+        mode="sync-fallback",
+        provider=provider.name,
+        failures=failures,
+    )
+
+
+def _record_failure(
+    wiki_root: Path,
+    *,
+    source_row: dict[str, Any],
+    reason: str,
+    failures: list[BootstrapFailure],
+) -> None:
+    source_id = source_row["id"]
+    original_path = source_row["original_path"]
+    mark_source_failed(wiki_root, source_id, reason)
+    failures.append(BootstrapFailure(source_id=source_id, original_path=original_path, reason=reason))
 
 
 def _load_pending(wiki_root: Path) -> list[dict[str, Any]]:
     db_path = wiki_root / WIKI_DIR_NAME / "state.db"
     with connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT id, original_path, raw_path, status FROM sources WHERE status = 'pending' ORDER BY original_path"
+            "SELECT id, original_path, raw_path, status FROM sources "
+            "WHERE status IN ('pending', 'failed') ORDER BY original_path"
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -258,8 +390,8 @@ def _apply_one_result(
     response_text: str,
     context: _RequestContext,
     tool_input: dict[str, Any] | None = None,
-) -> str:
-    """Parse, verify, and apply one batch result. Returns ``"applied"|"skipped"|"failed"``.
+) -> tuple[str, str]:
+    """Parse, verify, and apply one batch result with a failure reason.
 
     When ``tool_input`` is present (Anthropic ``tool_use`` path), the parsed
     plan is taken directly from the SDK-exposed dict. Otherwise the legacy
@@ -275,8 +407,9 @@ def _apply_one_result(
             plan = parse_plan_dict(tool_input, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
         else:
             plan = parse_plan(response_text, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
-    except PlanValidationError:
-        return "failed"
+        _reject_existing_new_page_paths(wiki_root=wiki_root, plan=plan)
+    except (PlanValidationError, IngestError) as exc:
+        return "failed", f"invalid ingest plan: {exc}"
 
     verification = verify_plan(
         plan,
@@ -286,7 +419,8 @@ def _apply_one_result(
         min_quote_words=min_quote_words_for_wiki(wiki_root),
     )
     if not verification.valid:
-        return "failed"
+        details = "; ".join(error.message for error in verification.errors)
+        return "failed", f"quote verification failed: {details}"
 
     source_row = context.source_row
     if plan.is_empty():
@@ -296,12 +430,9 @@ def _apply_one_result(
             summary=f"{plan.verdict}: {source_row['original_path']} — {plan.rationale}",
         ):
             pass
-        return "skipped"
+        return "skipped", ""
 
-    summary = (
-        f"ingest {source_row['original_path']} → "
-        f"{len(plan.updates)} update(s), {len(plan.new_pages)} new page(s) [batch]"
-    )
+    summary = f"ingest {source_row['original_path']} → {len(plan.updates)} update(s), {len(plan.new_pages)} new page(s) [batch]"
     with IngestTransaction(wiki_root=wiki_root, source_id=source_row["id"], summary=summary) as tx:
         page_embeddings: dict[str, bytes] = {}
         for new_page in plan.new_pages:
@@ -314,7 +445,7 @@ def _apply_one_result(
         _apply_pages_and_backrefs(tx=tx, plan=plan, embeddings=page_embeddings, source_id=source_row["id"])
         tx.write_file(wiki_root / "wiki" / "index.md", build_index(wiki_root))
 
-    return "applied"
+    return "applied", ""
 
 
 def _terminal_confirm_estimate(estimate: BatchCostEstimate) -> bool:

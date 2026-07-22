@@ -21,12 +21,22 @@ class EventRow:
 
 
 @dataclass(frozen=True)
+class FailedSourceRow:
+    """One retryable source failure shown by ``mdwiki status``."""
+
+    original_path: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class StatusReport:
     """A snapshot of wiki state suitable for ``mdwiki status``."""
 
     pending: int
     ingested: int
     pages_total: int
+    failed: int = 0
+    failed_sources: tuple[FailedSourceRow, ...] = ()
     disk_pages_total: int = 0
     pages_with_embeddings: int = 0
     drift_warnings: tuple[str, ...] = ()
@@ -50,11 +60,19 @@ def get_status(wiki_root: Path, *, recent_event_limit: int = 5) -> StatusReport:
     with connect(db_path) as conn:
         pending = conn.execute("SELECT COUNT(*) AS c FROM sources WHERE status = 'pending'").fetchone()["c"]
         ingested = conn.execute("SELECT COUNT(*) AS c FROM sources WHERE status = 'ingested'").fetchone()["c"]
+        failed_rows = conn.execute(
+            "SELECT original_path, failure_reason FROM sources WHERE status = 'failed' ORDER BY original_path"
+        ).fetchall()
+        failed_sources = tuple(
+            FailedSourceRow(
+                original_path=row["original_path"],
+                reason=row["failure_reason"] or "reason unavailable",
+            )
+            for row in failed_rows
+        )
 
         pages_total = conn.execute("SELECT COUNT(*) AS c FROM pages").fetchone()["c"]
-        pages_with_embeddings = conn.execute(
-            "SELECT COUNT(*) AS c FROM pages WHERE embedding IS NOT NULL"
-        ).fetchone()["c"]
+        pages_with_embeddings = conn.execute("SELECT COUNT(*) AS c FROM pages WHERE embedding IS NOT NULL").fetchone()["c"]
         kind_rows = conn.execute("SELECT kind, COUNT(*) AS c FROM pages GROUP BY kind").fetchall()
         pages_by_kind = {row["kind"]: row["c"] for row in kind_rows}
 
@@ -81,6 +99,8 @@ def get_status(wiki_root: Path, *, recent_event_limit: int = 5) -> StatusReport:
         pending=pending,
         ingested=ingested,
         pages_total=pages_total,
+        failed=len(failed_sources),
+        failed_sources=failed_sources,
         disk_pages_total=disk_pages_total,
         pages_with_embeddings=pages_with_embeddings,
         drift_warnings=drift_warnings,
@@ -95,7 +115,12 @@ def format_status(report: StatusReport, *, wiki_root: Path) -> str:
     """Render ``StatusReport`` for human consumption (used by the CLI)."""
     lines: list[str] = [f"mdwiki at {wiki_root}", ""]
 
-    lines.append(f"Sources:    {report.pending} pending, {report.ingested} ingested")
+    lines.append(f"Sources:    {report.pending} pending, {report.failed} failed, {report.ingested} ingested")
+
+    if report.failed_sources:
+        lines.append("Failed sources (retried by `mdwiki ingest --pending`):")
+        for source in report.failed_sources:
+            lines.append(f"  - {source.original_path}: {source.reason}")
 
     kind_str = ", ".join(f"{k}: {v}" for k, v in sorted(report.pages_by_kind.items())) or "—"
     lines.append(f"Wiki pages: {report.pages_total}  ({kind_str})")
@@ -144,7 +169,6 @@ def _build_drift_warnings(
         )
     if pages_total > 0 and pages_with_embeddings < pages_total:
         warnings.append(
-            f"WARNING: {pages_total - pages_with_embeddings} page row(s) have no embedding. "
-            "Run `mdwiki rebuild --pages` before ingesting."
+            f"WARNING: {pages_total - pages_with_embeddings} page row(s) have no embedding. Run `mdwiki rebuild --pages` before ingesting."
         )
     return warnings

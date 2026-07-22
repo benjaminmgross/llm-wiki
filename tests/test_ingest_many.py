@@ -12,7 +12,7 @@ from pytest_mock import MockerFixture
 
 from mdwiki.ingest import IngestError, ingest_many
 from mdwiki.init import init_wiki
-from mdwiki.llm.base import CompleteResult
+from mdwiki.llm.base import CompleteResult, Message, PingResult, Provider
 from mdwiki.state import connect
 
 
@@ -43,9 +43,7 @@ def _plan_for(*, page_path: str, section_id: str) -> str:
 @pytest.fixture
 def wiki_with_three_pending(tmp_path: Path) -> Path:
     for name in ("a", "b", "c"):
-        (tmp_path / f"{name}.md").write_text(
-            f"# {name}\n\n## Intro\n\nThis paper introduces attention sinks for long contexts.\n"
-        )
+        (tmp_path / f"{name}.md").write_text(f"# {name}\n\n## Intro\n\nThis paper introduces attention sinks for long contexts.\n")
     init_wiki(tmp_path)
     return tmp_path
 
@@ -123,12 +121,19 @@ def test_ingest_many_failure_does_not_abort_loop(wiki_with_three_pending: Path, 
     assert len(failed) == 1
     assert len(failures) == 1
     assert isinstance(failures[0][1], IngestError)
+    with connect(wiki_with_three_pending / ".mdwiki" / "state.db") as conn:
+        failed_row = conn.execute("SELECT status, failure_reason FROM sources WHERE original_path = 'b.md'").fetchone()
+    sidecar = json.loads((wiki_with_three_pending / "raw" / ".sources.json").read_text())
+    failed_meta = next(meta for meta in sidecar.values() if meta["original_path"] == "b.md")
+    assert failed_row["status"] == "failed"
+    assert failed_row["failure_reason"]
+    assert failed[0].message == f"failed: {failed_row['failure_reason']}"
+    assert failed_meta["status"] == "failed"
+    assert failed_meta["failure_reason"] == failed_row["failure_reason"]
 
 
 @pytest.mark.unit
-def test_ingest_many_httpx_timeout_does_not_abort_loop(
-    wiki_with_three_pending: Path, mocker: MockerFixture
-) -> None:
+def test_ingest_many_httpx_timeout_does_not_abort_loop(wiki_with_three_pending: Path, mocker: MockerFixture) -> None:
     counter = {"calls": 0}
 
     def fake_complete(**_kw):  # type: ignore[no-untyped-def]
@@ -167,9 +172,7 @@ def test_ingest_many_httpx_timeout_does_not_abort_loop(
 
 @pytest.mark.unit
 def test_ingest_many_progress_callback_receives_each_step(wiki_with_three_pending: Path, mocker: MockerFixture) -> None:
-    plans = iter(
-        [_plan_for(page_path=f"wiki/concepts/p{i}.md", section_id=f"{n}.md/Intro") for i, n in enumerate("abc")]
-    )
+    plans = iter([_plan_for(page_path=f"wiki/concepts/p{i}.md", section_id=f"{n}.md/Intro") for i, n in enumerate("abc")])
     mocker.patch(
         "mdwiki.llm.anthropic.AnthropicProvider.complete",
         side_effect=lambda **_kw: CompleteResult(text=next(plans), input_tokens=10, output_tokens=10),
@@ -193,9 +196,7 @@ def test_ingest_many_empty_returns_empty(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_ingest_many_propagates_authentication_error(
-    wiki_with_three_pending: Path, mocker: MockerFixture
-) -> None:
+def test_ingest_many_propagates_authentication_error(wiki_with_three_pending: Path, mocker: MockerFixture) -> None:
     """Regression: round-2 C2.
 
     Round-1 broadened the catch to ``anthropic.APIError`` to handle transient
@@ -208,9 +209,7 @@ def test_ingest_many_propagates_authentication_error(
     propagate to the CLI handler.
     """
     fake_response = httpx.Response(401, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
-    auth_error = anthropic.AuthenticationError(
-        message="invalid x-api-key", response=fake_response, body={"error": {"message": "invalid"}}
-    )
+    auth_error = anthropic.AuthenticationError(message="invalid x-api-key", response=fake_response, body={"error": {"message": "invalid"}})
     mocker.patch(
         "mdwiki.llm.anthropic.AnthropicProvider.complete",
         side_effect=auth_error,
@@ -245,3 +244,74 @@ def test_ingest_many_all_includes_already_ingested(wiki_with_three_pending: Path
     # already-ingested status when scope="all").
     assert complete_mock.call_count == 3
     assert all(r.applied for r in results)
+
+
+@pytest.mark.unit
+def test_ingest_many_uses_provider_recoverable_error_classification(wiki_with_three_pending: Path) -> None:
+    class RetryableProviderError(Exception):
+        pass
+
+    class NonAnthropicProvider(Provider):
+        name = "non-anthropic"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def ping(self) -> PingResult:
+            return PingResult(provider=self.name, model="test", latency_ms=0.0, ok=True, message="pong")
+
+        def complete(
+            self,
+            *,
+            system: str,
+            messages: list[Message],
+            max_tokens: int = 1024,
+            tools: list[dict[str, object]] | None = None,
+            tool_choice: dict[str, object] | None = None,
+        ) -> CompleteResult:
+            self.calls += 1
+            if self.calls == 2:
+                raise RetryableProviderError("retry later")
+            source = "a" if self.calls == 1 else "c"
+            return CompleteResult(
+                text=_plan_for(page_path=f"wiki/concepts/{source}.md", section_id=f"{source}.md/Intro"),
+                input_tokens=10,
+                output_tokens=10,
+            )
+
+        def is_recoverable_error(self, exc: Exception) -> bool:
+            return isinstance(exc, RetryableProviderError)
+
+    provider = NonAnthropicProvider()
+    results = ingest_many(wiki_with_three_pending, scope="pending", yes=True, provider=provider)
+
+    assert provider.calls == 3
+    assert [result.applied for result in results] == [True, False, True]
+    assert "retry later" in results[1].message
+
+
+@pytest.mark.unit
+def test_ingest_many_pending_retries_failed_source_only_and_clears_reason(wiki_with_three_pending: Path, mocker: MockerFixture) -> None:
+    db_path = wiki_with_three_pending / ".mdwiki" / "state.db"
+    with connect(db_path) as conn:
+        conn.execute("UPDATE sources SET status = 'ingested', ingested_at = 1.0 WHERE original_path IN ('a.md', 'c.md')")
+        conn.execute("UPDATE sources SET status = 'failed', failure_reason = 'retry me' WHERE original_path = 'b.md'")
+        conn.commit()
+    complete_mock = mocker.patch(
+        "mdwiki.llm.anthropic.AnthropicProvider.complete",
+        return_value=CompleteResult(
+            text=_plan_for(page_path="wiki/concepts/retried-b.md", section_id="b.md/Intro"),
+            input_tokens=10,
+            output_tokens=10,
+        ),
+    )
+
+    results = ingest_many(wiki_with_three_pending, scope="pending", yes=True)
+
+    assert len(results) == 1
+    assert results[0].applied is True
+    assert complete_mock.call_count == 1
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT status, failure_reason FROM sources WHERE original_path = 'b.md'").fetchone()
+    assert row["status"] == "ingested"
+    assert row["failure_reason"] is None

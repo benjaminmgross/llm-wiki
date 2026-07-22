@@ -44,8 +44,7 @@ def test_sources_round_trip(tmp_path: Path) -> None:
     init_db(db_path)
     with connect(db_path) as conn:
         conn.execute(
-            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) VALUES (?, ?, ?, ?, ?, ?)",
             ("abc123def456", "ai-agents/foo.md", "raw/abc123def456-foo.md", "abc123def456" + "0" * 52, 1700000000.0, "pending"),
         )
         row = conn.execute("SELECT id, original_path, status FROM sources WHERE id = ?", ("abc123def456",)).fetchone()
@@ -175,9 +174,7 @@ def test_legacy_pages_check_constraint_migration_preserves_backrefs(tmp_path: Pa
         backrefs_rows = conn.execute("SELECT page_path, quote FROM backrefs").fetchall()
         pages_rows = conn.execute("SELECT path, kind FROM pages").fetchall()
         # Confirm the CHECK constraint was actually dropped (the migration ran).
-        pages_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='pages'"
-        ).fetchone()[0]
+        pages_sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='pages'").fetchone()[0]
 
     assert len(backrefs_rows) == 1, "backrefs row was deleted by the migration"
     assert backrefs_rows[0]["quote"] == "the cited quote"
@@ -204,3 +201,37 @@ def test_transactions_link_inverses_via_fk(tmp_path: Path) -> None:
                 "INSERT INTO transaction_inverses (transaction_id, sql) VALUES (?, ?)",
                 ("tx-missing", "DELETE FROM x"),
             )
+
+
+@pytest.mark.unit
+def test_connect_migrates_legacy_sources_with_failure_reason_column(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    legacy = sqlite3.connect(db_path)
+    try:
+        legacy.executescript(
+            """
+            CREATE TABLE sources (
+                id TEXT PRIMARY KEY,
+                original_path TEXT NOT NULL,
+                raw_path TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                mtime REAL NOT NULL,
+                ingested_at REAL,
+                status TEXT NOT NULL
+            );
+            CREATE TABLE transaction_inverses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transaction_id TEXT NOT NULL,
+                sql TEXT NOT NULL,
+                params_json TEXT NOT NULL DEFAULT '[]'
+            );
+            """
+        )
+        legacy.commit()
+    finally:
+        legacy.close()
+
+    with connect(db_path) as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(sources)")}
+
+    assert "failure_reason" in columns

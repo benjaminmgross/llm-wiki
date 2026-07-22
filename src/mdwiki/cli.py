@@ -104,13 +104,16 @@ def _build_parser() -> argparse.ArgumentParser:
     bootstrap_group.add_argument(
         "--bootstrap",
         action="store_true",
-        help="After init, immediately ingest every pending source (chains `ingest --pending --yes`).",
+        help="After init, immediately ingest outstanding pending or failed sources (chains `ingest --pending --yes`).",
     )
     bootstrap_group.add_argument(
         "--bootstrap-batch",
         action="store_true",
         dest="bootstrap_batch",
-        help="After init, submit every pending source to the Anthropic Batch API (~50%% cheaper, ~1h ETA).",
+        help=(
+            "After init, ingest outstanding pending or failed sources with the configured provider: native batch when supported, "
+            "otherwise an explicit synchronous fallback."
+        ),
     )
     init_p.add_argument(
         "--yes",
@@ -141,13 +144,16 @@ def _build_parser() -> argparse.ArgumentParser:
     refresh_bootstrap_group.add_argument(
         "--bootstrap",
         action="store_true",
-        help="After refresh, immediately ingest every pending source (chains `ingest --pending --yes`).",
+        help="After refresh, immediately ingest outstanding pending or failed sources (chains `ingest --pending --yes`).",
     )
     refresh_bootstrap_group.add_argument(
         "--bootstrap-batch",
         action="store_true",
         dest="bootstrap_batch",
-        help="After refresh, submit every pending source to the Anthropic Batch API (~50%% cheaper, ~1h ETA).",
+        help=(
+            "After refresh, ingest outstanding pending or failed sources with the configured provider: native batch when supported, "
+            "otherwise an explicit synchronous fallback."
+        ),
     )
     refresh_p.add_argument(
         "--yes",
@@ -157,7 +163,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     refresh_p.set_defaults(_handler=_cmd_refresh)
 
-    status_p = subparsers.add_parser("status", help="Show pending/ingested counts, recent events, last lint.")
+    status_p = subparsers.add_parser("status", help="Show pending/failed/ingested counts, recent events, last lint.")
     status_p.set_defaults(_handler=_cmd_status)
 
     source_p = subparsers.add_parser("source", help="Inspect a registered source by hash or hash prefix.")
@@ -182,10 +188,17 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor_p.set_defaults(_handler=_cmd_doctor)
 
     ingest_p = subparsers.add_parser("ingest", help="Ingest one source — or every pending / every source — through the LLM into the wiki.")
-    ingest_p.add_argument("source", nargs="?", help="Source id (12-char hash or unique prefix) or original_path. Omit when using --all or --pending.")
+    ingest_p.add_argument(
+        "source", nargs="?", help="Source id (12-char hash or unique prefix) or original_path. Omit when using --all or --pending."
+    )
     bulk = ingest_p.add_mutually_exclusive_group()
-    bulk.add_argument("--all", action="store_true", dest="all_sources", help="Re-ingest every registered source (re-processes already-ingested sources too).")
-    bulk.add_argument("--pending", action="store_true", help="Ingest every source whose status is still 'pending'.")
+    bulk.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_sources",
+        help="Re-ingest every registered source (re-processes already-ingested sources too).",
+    )
+    bulk.add_argument("--pending", action="store_true", help="Ingest every source whose status is pending or failed.")
     ingest_p.add_argument("--yes", "-y", action="store_true", help="Apply LLM plans without confirmation (default ON for --all/--pending).")
     ingest_p.set_defaults(_handler=_cmd_ingest)
 
@@ -259,16 +272,20 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 
 def _run_bootstrap_batch(wiki_root: Path, *, yes: bool = False) -> int:
-    """Submit every pending source to Anthropic's Batch API (~50% off, ~1h ETA)."""
+    """Use configured-provider native batch or an explicit same-provider sync fallback."""
     from mdwiki.bootstrap import bootstrap_batch
 
-    print("\n--- bootstrap-batch: building batch request ---\n")
+    print("\n--- bootstrap-batch: selecting configured provider path ---\n")
     try:
         result = bootstrap_batch(
             wiki_root,
             yes=yes,
             on_status=lambda status, ok, total: print(f"  [batch status: {status} — {ok}/{total} succeeded]"),
             on_progress=lambda i, total, cid: print(f"  [{i}/{total}] applying {cid}..."),
+            on_fallback=lambda provider: print(
+                f"Configured provider {provider!r} does not support native batch; "
+                "using the same provider via synchronous ingest fallback.\n"
+            ),
         )
     except (MissingAPIKeyError, UnknownProviderError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -289,13 +306,16 @@ def _run_bootstrap_batch(wiki_root: Path, *, yes: bool = False) -> int:
         print(_fatal_api_error_message(exc), file=sys.stderr)
         return 1
 
-    if result.submitted == 0:
-        print("Bootstrap batch aborted (no submission).")
+    if result.submitted == 0 and result.failed == 0:
+        print("Bootstrap ingest found no sources to process (or native batch submission was declined).")
         return 0
+    mode_label = "native batch" if result.mode == "native-batch" else "synchronous ingest fallback"
     print(
-        f"\nBootstrap batch done: applied {result.applied} of {result.submitted} "
+        f"\nBootstrap {mode_label} done with {result.provider}: applied {result.applied} of {result.submitted} "
         f"({result.failed} failed, {result.skipped} verdict-skip)."
     )
+    for failure in result.failures:
+        print(f"  ! failed: {failure.original_path}: {failure.reason}", file=sys.stderr)
     return 0 if result.failed == 0 else 1
 
 
@@ -337,7 +357,7 @@ def _run_bootstrap_sync(wiki_root: Path, *, files_registered: int) -> int:
         return 1
     applied = sum(1 for r in ingest_results if r.applied)
     print(f"\nBootstrap done: {applied} of {len(ingest_results)} applied.")
-    return 0
+    return 0 if applied == len(ingest_results) else 1
 
 
 def _cmd_refresh(args: argparse.Namespace) -> int:
@@ -481,7 +501,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
             return 1
         applied = sum(1 for r in results if r.applied)
         print(f"\nDone: {applied} of {len(results)} applied.")
-        return 0
+        return 0 if applied == len(results) else 1
 
     if args.source is None:
         print("error: provide a <source> or use --all / --pending.", file=sys.stderr)
@@ -547,17 +567,17 @@ def _cmd_lint(args: argparse.Namespace) -> int:
 
     if getattr(args, "fix", None) is not None:
         result = lint_fix(wiki_root, mode=args.fix, yes=args.yes)
-        print(
-            f"Lint --fix={args.fix}: applied {result.fixed_count}, "
-            f"skipped {result.skipped_count}, failed {result.failed_count}."
-        )
+        print(f"Lint --fix={args.fix}: applied {result.fixed_count}, skipped {result.skipped_count}, failed {result.failed_count}.")
         return 0 if result.failed_count == 0 else 1
 
     report = lint_wiki(wiki_root)
     if not report.findings:
         print("Lint: clean — no findings.")
         return 0
-    print(f"Lint: {len(report.findings)} finding(s) " + ", ".join(f"{kind}={count}" for kind, count in sorted(report.findings_by_kind.items())))
+    print(
+        f"Lint: {len(report.findings)} finding(s) "
+        + ", ".join(f"{kind}={count}" for kind, count in sorted(report.findings_by_kind.items()))
+    )
     print()
     for kind in sorted(report.findings_by_kind):
         print(f"## {kind}")
@@ -709,10 +729,7 @@ def _fatal_api_error_message(exc: Exception) -> str:
             "(e.g. vLLM, llama.cpp) and that the host is reachable."
         )
     if isinstance(exc, openai.APITimeoutError):
-        return (
-            f"error: OpenAI-compatible request timed out ({exc}). "
-            "The endpoint may be overloaded; retry, or raise the client timeout."
-        )
+        return f"error: OpenAI-compatible request timed out ({exc}). The endpoint may be overloaded; retry, or raise the client timeout."
     if isinstance(exc, openai.RateLimitError):
         return (
             f"error: OpenAI-compatible endpoint rate-limited the request ({exc}). "

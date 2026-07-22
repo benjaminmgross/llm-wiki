@@ -41,6 +41,24 @@ def test_subclass_with_methods_instantiates() -> None:
 
 
 @pytest.mark.unit
+def test_provider_capabilities_default_to_safe_opt_outs() -> None:
+    class Stub(Provider):
+        name = "stub"
+
+        def ping(self) -> PingResult:
+            return PingResult(provider=self.name, model="stub", latency_ms=0.0, ok=True, message="pong")
+
+        def complete(self, *, system: str, messages: list[Message], max_tokens: int = 1024) -> CompleteResult:
+            return CompleteResult(text="ok", input_tokens=1, output_tokens=1)
+
+    provider = Stub()
+
+    assert provider.supports_batch is False
+    assert provider.supports_tool_use is False
+    assert provider.is_recoverable_error(RuntimeError("boom")) is False
+
+
+@pytest.mark.unit
 def test_message_is_frozen() -> None:
     msg = Message(role="user", content="hi")
     with pytest.raises(Exception):

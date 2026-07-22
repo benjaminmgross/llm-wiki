@@ -64,6 +64,7 @@ CLAUDE.md.new
 .claude/
 
 # Other AI Assistants
+.worktrees/
 .cursor/
 .aider/
 .continue/

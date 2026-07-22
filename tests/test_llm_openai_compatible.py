@@ -149,9 +149,7 @@ def test_ping_translates_specific_openai_errors_into_actionable_messages(
 
     assert result.ok is False
     lower = result.message.lower()
-    assert any(kw in lower for kw in expected_keywords), (
-        f"expected one of {expected_keywords!r} in {result.message!r}"
-    )
+    assert any(kw in lower for kw in expected_keywords), f"expected one of {expected_keywords!r} in {result.message!r}"
 
 
 @pytest.mark.unit
@@ -189,9 +187,7 @@ def test_batch_complete_raises_not_implemented() -> None:
     """OpenAI-compatible servers (vLLM, llama.cpp) don't have a batch API."""
     provider, _ = _build_provider_with_mocked_client()
     with pytest.raises(NotImplementedError, match="batch"):
-        provider.batch_complete(
-            [BatchRequest(custom_id="x", system="s", messages=[Message(role="user", content="p")])]
-        )
+        provider.batch_complete([BatchRequest(custom_id="x", system="s", messages=[Message(role="user", content="p")])])
 
 
 @pytest.mark.unit
@@ -223,3 +219,36 @@ def test_constructor_accepts_optional_api_key() -> None:
     )
     assert provider.model == "qwen2.5-72b-instruct"
     assert provider.name == "openai-compatible"
+
+
+@pytest.mark.unit
+def test_openai_compatible_declares_no_native_batch_or_tool_capability() -> None:
+    provider, _ = _build_provider_with_mocked_client()
+
+    assert provider.supports_batch is False
+    assert provider.supports_tool_use is False
+
+
+@pytest.mark.unit
+def test_openai_compatible_classifies_transient_but_not_auth_errors_as_recoverable() -> None:
+    provider, _ = _build_provider_with_mocked_client()
+    request = MagicMock()
+    transient = openai.APIConnectionError(request=request)
+    fatal = openai.AuthenticationError(
+        message="invalid key",
+        response=MagicMock(status_code=401, headers={}),
+        body={},
+    )
+
+    assert provider.is_recoverable_error(transient) is True
+    assert provider.is_recoverable_error(fatal) is False
+
+
+@pytest.mark.unit
+def test_openai_compatible_batch_error_does_not_recommend_anthropic() -> None:
+    provider, _ = _build_provider_with_mocked_client()
+
+    with pytest.raises(NotImplementedError) as excinfo:
+        provider.batch_complete([BatchRequest(custom_id="x", system="s", messages=[Message(role="user", content="p")])])
+
+    assert "anthropic" not in str(excinfo.value).lower()

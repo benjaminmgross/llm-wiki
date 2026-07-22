@@ -48,6 +48,18 @@ def test_skill_prints_agent_guide_section(tmp_path: Path, monkeypatch, capsys) -
 
 
 @pytest.mark.unit
+def test_skill_guide_describes_failed_source_status_and_retry(tmp_path: Path, monkeypatch, capsys) -> None:
+    init_wiki(tmp_path, profile="working-dir")
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["skill"]) == 0
+    out = capsys.readouterr().out
+
+    assert "pending/failed/ingested" in out
+    assert "pending or failed source" in out
+
+
+@pytest.mark.unit
 def test_skill_emits_initiative_schema_when_initiative_profile_used(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

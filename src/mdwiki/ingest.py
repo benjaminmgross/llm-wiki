@@ -12,9 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-import anthropic
-import httpx
-
 from mdwiki.chunker import MarkdownChunker
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.embedder import Embedder, get_default_embedder
@@ -28,6 +25,7 @@ from mdwiki.page_kinds import infer_kind_from_page_path
 from mdwiki.plan import Plan, PlanValidationError, allowed_kinds_for_wiki, parse_plan, parse_plan_dict
 from mdwiki.prompts import INGEST_SYSTEM_PROMPT, INGEST_SYSTEM_PROMPT_TOOL_USE, build_ingest_user_prompt
 from mdwiki.quote import min_quote_words_for_wiki, quote_normalize_mode_for_wiki, verify_plan
+from mdwiki.source_state import mark_source_failed
 from mdwiki.state import connect
 from mdwiki.transaction import IngestTransaction
 
@@ -101,31 +99,35 @@ def ingest_source(
         )
 
     raw_path = wiki_root / source_row["raw_path"]
-    chunker = MarkdownChunker(min_section_words=1)
-    sections = _chunk_or_whole(raw_path, source_path=source_row["original_path"], chunker=chunker)
-    section_ids = {s["section_id"] for s in sections}
-    source_text = raw_path.read_text()
+    try:
+        chunker = MarkdownChunker(min_section_words=1)
+        sections = _chunk_or_whole(raw_path, source_path=source_row["original_path"], chunker=chunker)
+        section_ids = {s["section_id"] for s in sections}
+        source_text = raw_path.read_text()
+    except Exception as exc:
+        raise IngestError(f"Source preparation failed: {exc}") from exc
 
     schema_text = (wiki_root / WIKI_DIR_NAME / "schema.md").read_text()
     recent_log = _recent_log_entries(wiki_root, limit=10)
 
     provider = provider or build_provider_from_config(wiki_root)
     embedder = embedder or get_default_embedder()
-    section_vectors = [embedder.embed_text(s["content"]) for s in sections] if sections else []
-    candidate_pages = _find_candidate_pages(wiki_root=wiki_root, section_vectors=section_vectors)
+    try:
+        section_vectors = [embedder.embed_text(s["content"]) for s in sections] if sections else []
+        candidate_pages = _find_candidate_pages(wiki_root=wiki_root, section_vectors=section_vectors)
+        user_prompt = build_ingest_user_prompt(
+            source_path=source_row["original_path"],
+            sections=sections,
+            candidate_pages=candidate_pages,
+            schema_text=schema_text,
+            recent_log_entries=recent_log,
+        )
+    except Exception as exc:
+        raise IngestError(f"Source preparation failed: {exc}") from exc
 
-    user_prompt = build_ingest_user_prompt(
-        source_path=source_row["original_path"],
-        sections=sections,
-        candidate_pages=candidate_pages,
-        schema_text=schema_text,
-        recent_log_entries=recent_log,
-    )
-
-    # Anthropic supports constrained-decoding ``tool_use``; route the ingest
-    # plan through it so the response payload is structurally guaranteed to
-    # parse. Other providers fall back to free-form JSON in response text.
-    use_tool = provider.name == "anthropic"
+    # Capability routing keeps orchestration independent of provider identity.
+    # Protocol-style adapters predating capabilities default to free-form JSON.
+    use_tool = getattr(provider, "supports_tool_use", False)
     system_prompt = INGEST_SYSTEM_PROMPT_TOOL_USE if use_tool else INGEST_SYSTEM_PROMPT
     messages = [Message(role="user", content=user_prompt)]
     plan: Plan | None = None
@@ -212,7 +214,7 @@ def ingest_source(
         page_embeddings: dict[str, bytes] = {}
         for new_page in plan.new_pages:
             tx.write_file(wiki_root / new_page.path, new_page.content)
-            page_embeddings[new_page.path] = serialize(embedder.embed_text(new_page.content))
+            page_embeddings[new_page.path] = _embed_page(embedder, path=new_page.path, content=new_page.content)
         for update in plan.updates:
             # update.content is the COMPLETE revised page (per the prompt
             # contract) — write it verbatim. Previous releases concatenated
@@ -220,11 +222,19 @@ def ingest_source(
             # the spec and made wiki pages grow without bound.
             full_target = wiki_root / update.page
             tx.write_file(full_target, update.content)
-            page_embeddings[update.page] = serialize(embedder.embed_text(update.content))
+            page_embeddings[update.page] = _embed_page(embedder, path=update.page, content=update.content)
         _apply_pages_and_backrefs(tx=tx, plan=plan, embeddings=page_embeddings, source_id=source_row["id"])
         tx.write_file(wiki_root / "wiki" / "index.md", build_index(wiki_root))
 
     return IngestResult(source_id=source_row["id"], applied=True, message=summary, plan=plan)
+
+
+def _embed_page(embedder: Embedder, *, path: str, content: str) -> bytes:
+    """Create a page embedding while preserving per-source failure isolation."""
+    try:
+        return serialize(embedder.embed_text(content))
+    except Exception as exc:
+        raise IngestError(f"Page embedding failed for {path}: {exc}") from exc
 
 
 def ingest_many(
@@ -263,7 +273,7 @@ def ingest_many(
         Called as ``(original_path, exception)`` when a single ingest raises.
     """
     db_path = wiki_root / WIKI_DIR_NAME / "state.db"
-    where = "" if scope == "all" else "WHERE status = 'pending'"
+    where = "" if scope == "all" else "WHERE status IN ('pending', 'failed')"
     with connect(db_path) as conn:
         rows = conn.execute(f"SELECT id, original_path FROM sources {where} ORDER BY original_path").fetchall()
     targets = [(row["id"], row["original_path"]) for row in rows]
@@ -287,13 +297,7 @@ def ingest_many(
                 force=(scope == "all"),
             )
             results.append(result)
-        except (
-            IngestError,
-            anthropic.RateLimitError,
-            anthropic.APIConnectionError,
-            anthropic.InternalServerError,
-            httpx.TimeoutException,
-        ) as exc:
+        except Exception as exc:
             # IngestError covers logical, per-source failures (bad quotes,
             # parse errors). The Anthropic subclasses cover SDK-level
             # transients that the SDK's max_retries already exhausted. Raw
@@ -305,11 +309,12 @@ def ingest_many(
             # permission, malformed request) that will fail every subsequent
             # source identically — we let them propagate so the CLI can print
             # one clear error and exit.
+            if not isinstance(exc, IngestError) and not provider.is_recoverable_error(exc):
+                raise
+            mark_source_failed(wiki_root, source_id, str(exc))
             if on_failure is not None:
                 on_failure(original_path, exc)
-            results.append(
-                IngestResult(source_id=source_id, applied=False, message=f"failed: {exc}", plan=None)
-            )
+            results.append(IngestResult(source_id=source_id, applied=False, message=f"failed: {exc}", plan=None))
     return results
 
 
@@ -421,9 +426,7 @@ def _apply_pages_and_backrefs(*, tx: IngestTransaction, plan: Plan, embeddings: 
 
     now = time.time()
     for new_page in plan.new_pages:
-        tx.upsert_page(
-            path=new_page.path, kind=new_page.kind, embedding=embeddings.get(new_page.path), last_touched_at=now
-        )
+        tx.upsert_page(path=new_page.path, kind=new_page.kind, embedding=embeddings.get(new_page.path), last_touched_at=now)
     for update in plan.updates:
         tx.upsert_page(
             path=update.page,
@@ -433,14 +436,10 @@ def _apply_pages_and_backrefs(*, tx: IngestTransaction, plan: Plan, embeddings: 
         )
     for update in plan.updates:
         for claim in update.claims:
-            tx.insert_backref(
-                page_path=update.page, source_id=source_id, section_anchor=claim.source_section_id, quote=claim.quote
-            )
+            tx.insert_backref(page_path=update.page, source_id=source_id, section_anchor=claim.source_section_id, quote=claim.quote)
     for new_page in plan.new_pages:
         for claim in new_page.claims:
-            tx.insert_backref(
-                page_path=new_page.path, source_id=source_id, section_anchor=claim.source_section_id, quote=claim.quote
-            )
+            tx.insert_backref(page_path=new_page.path, source_id=source_id, section_anchor=claim.source_section_id, quote=claim.quote)
 
 
 def _find_candidate_pages(*, wiki_root: Path, section_vectors: list[list[float]]) -> list[dict[str, str]]:
@@ -461,9 +460,7 @@ def _find_candidate_pages(*, wiki_root: Path, section_vectors: list[list[float]]
 
     accumulated: dict[str, float] = {}
     for vec in section_vectors:
-        for path, score in find_top_k(
-            vec, page_vectors, k=CANDIDATES_PER_SECTION, min_similarity=MIN_CANDIDATE_SIMILARITY
-        ):
+        for path, score in find_top_k(vec, page_vectors, k=CANDIDATES_PER_SECTION, min_similarity=MIN_CANDIDATE_SIMILARITY):
             accumulated[path] = max(accumulated.get(path, 0.0), score)
 
     ranked_paths = sorted(accumulated, key=lambda p: accumulated[p], reverse=True)[:MAX_CANDIDATES_TOTAL]
@@ -489,8 +486,7 @@ def _reject_existing_new_page_paths(*, wiki_root: Path, plan: Plan) -> None:
         seen.add(new_page.path)
         if (wiki_root / new_page.path).exists():
             raise IngestError(
-                f"LLM proposed new page {new_page.path}, but that file already exists. "
-                "The model must return an update for existing pages."
+                f"LLM proposed new page {new_page.path}, but that file already exists. The model must return an update for existing pages."
             )
 
 

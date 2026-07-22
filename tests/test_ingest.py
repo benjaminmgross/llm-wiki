@@ -52,6 +52,7 @@ def _good_plan_dict() -> dict:
 
 class SequencedProvider:
     name = "anthropic"
+    supports_tool_use = True
 
     def __init__(self, results: list[CompleteResult]) -> None:
         self.results = results

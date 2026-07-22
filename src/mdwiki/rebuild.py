@@ -85,16 +85,18 @@ def rebuild_wiki(start: Path | None = None) -> RebuildResult:
             if status not in {"pending", "ingested", "failed"}:
                 status = "pending"
             ingested_at = meta.get("ingested_at", inferred_ingested_at) if status == "ingested" else None
+            failure_reason = meta.get("failure_reason") if status == "failed" else None
             conn.execute(
-                "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status, ingested_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status, ingested_at, failure_reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "original_path = excluded.original_path, "
                 "raw_path = excluded.raw_path, "
                 "content_hash = excluded.content_hash, "
                 "mtime = excluded.mtime, "
                 "status = excluded.status, "
-                "ingested_at = excluded.ingested_at",
+                "ingested_at = excluded.ingested_at, "
+                "failure_reason = excluded.failure_reason",
                 (
                     short_hash,
                     meta["original_path"],
@@ -103,6 +105,7 @@ def rebuild_wiki(start: Path | None = None) -> RebuildResult:
                     meta["mtime"],
                     status,
                     ingested_at,
+                    failure_reason,
                 ),
             )
         conn.commit()
@@ -143,11 +146,7 @@ def _infer_ingested_sources_from_log(wiki_root: Path) -> dict[str, float | None]
         if source_path is not None:
             ingested_by_tx[tx_id] = (source_path, _extract_log_ts(line))
 
-    return {
-        source_path: ingested_at
-        for tx_id, (source_path, ingested_at) in ingested_by_tx.items()
-        if tx_id not in undone_tx_ids
-    }
+    return {source_path: ingested_at for tx_id, (source_path, ingested_at) in ingested_by_tx.items() if tx_id not in undone_tx_ids}
 
 
 def _extract_tx_id(line: str) -> str | None:
