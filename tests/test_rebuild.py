@@ -80,6 +80,25 @@ def test_rebuild_restores_ingested_status_from_sidecar(initialized_wiki: Path) -
 
 
 @pytest.mark.unit
+def test_rebuild_restores_failed_status_and_reason_from_sidecar(initialized_wiki: Path) -> None:
+    sidecar_path = initialized_wiki / "raw" / ".sources.json"
+    sidecar = json.loads(sidecar_path.read_text())
+    beta_id = next(source_id for source_id, meta in sidecar.items() if meta["original_path"] == "beta.md")
+    sidecar[beta_id]["status"] = "failed"
+    sidecar[beta_id]["failure_reason"] = "provider timed out"
+    sidecar_path.write_text(json.dumps(sidecar, indent=2, sort_keys=True))
+
+    db_path = initialized_wiki / ".mdwiki" / "state.db"
+    db_path.unlink()
+    rebuild_wiki(initialized_wiki)
+
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT status, failure_reason FROM sources WHERE original_path = 'beta.md'").fetchone()
+    assert row["status"] == "failed"
+    assert row["failure_reason"] == "provider timed out"
+
+
+@pytest.mark.unit
 def test_rebuild_infers_ingested_status_from_log_for_legacy_sidecar(initialized_wiki: Path) -> None:
     (initialized_wiki / "wiki" / "log.md").write_text(
         "- 2026-05-03T03:11:03Z [tx-alpha] ingest alpha.md → 0 update(s), 1 new page(s) [batch]\n"
@@ -90,10 +109,7 @@ def test_rebuild_infers_ingested_status_from_log_for_legacy_sidecar(initialized_
     rebuild_wiki(initialized_wiki)
 
     with connect(db_path) as conn:
-        restored = {
-            row["original_path"]: row["status"]
-            for row in conn.execute("SELECT original_path, status FROM sources")
-        }
+        restored = {row["original_path"]: row["status"] for row in conn.execute("SELECT original_path, status FROM sources")}
     assert restored["alpha.md"] == "ingested"
     assert restored["beta.md"] == "pending"
     assert restored["gamma.md"] == "pending"

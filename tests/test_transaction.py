@@ -165,12 +165,8 @@ def test_upsert_page_update_branch_does_not_crash_on_commit(wiki: Path) -> None:
     # Verify both txs committed and the second update stuck.
     db_path = wiki / ".mdwiki" / "state.db"
     with connect(db_path) as conn:
-        page_row = conn.execute(
-            "SELECT kind, embedding, last_touched_at FROM pages WHERE path = ?", (page_path,)
-        ).fetchone()
-        inverses = conn.execute(
-            "SELECT sql, params_json FROM transaction_inverses ORDER BY id"
-        ).fetchall()
+        page_row = conn.execute("SELECT kind, embedding, last_touched_at FROM pages WHERE path = ?", (page_path,)).fetchone()
+        inverses = conn.execute("SELECT sql, params_json FROM transaction_inverses ORDER BY id").fetchall()
     assert page_row["embedding"] == new_embedding
     assert page_row["last_touched_at"] == 2.0
     # Inverse for the UPDATE must NOT carry the prior bytes (so its params_json
@@ -195,3 +191,31 @@ def test_tx_with_source_id_marks_source_ingested(wiki: Path) -> None:
         row = conn.execute("SELECT status, ingested_at FROM sources WHERE id = ?", (source_id,)).fetchone()
     assert row["status"] == "ingested"
     assert row["ingested_at"] is not None
+
+
+@pytest.mark.unit
+def test_successful_tx_clears_prior_failure_reason_in_db_and_sidecar(wiki: Path) -> None:
+    db_path = wiki / ".mdwiki" / "state.db"
+    with connect(db_path) as conn:
+        source_id = conn.execute("SELECT id FROM sources LIMIT 1").fetchone()["id"]
+        conn.execute(
+            "UPDATE sources SET status = 'failed', failure_reason = 'temporary outage' WHERE id = ?",
+            (source_id,),
+        )
+        conn.commit()
+    sidecar_path = wiki / "raw" / ".sources.json"
+    sidecar = json.loads(sidecar_path.read_text())
+    sidecar[source_id]["status"] = "failed"
+    sidecar[source_id]["failure_reason"] = "temporary outage"
+    sidecar_path.write_text(json.dumps(sidecar, indent=2, sort_keys=True))
+
+    with IngestTransaction(wiki_root=wiki, source_id=source_id, summary="retry succeeded"):
+        pass
+
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT status, failure_reason FROM sources WHERE id = ?", (source_id,)).fetchone()
+    mirrored = json.loads(sidecar_path.read_text())[source_id]
+    assert row["status"] == "ingested"
+    assert row["failure_reason"] is None
+    assert mirrored["status"] == "ingested"
+    assert mirrored["failure_reason"] is None

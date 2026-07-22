@@ -2,6 +2,10 @@
 
 This document outlines recent major changes to this repository.
 
+## Current bootstrap behavior
+
+The v1.1 notes below describe when Anthropic batch support was introduced. Current `mdwiki init/refresh --bootstrap-batch` always honors `[llm].provider`: a provider with native batch capability uses it, while other providers receive an explicit same-provider synchronous fallback. In particular, `provider = "openai-compatible"` does not require or silently substitute Anthropic. Each source commits independently; failed sources retain a reason in `state.db` and `raw/.sources.json`, appear in `mdwiki status`, and are the only sources retried alongside pending sources by `mdwiki ingest --pending` or a later bootstrap run.
+
 ## v1.1.0 — Multi-filetype ingest, batch API, local providers (2026-04-30)
 
 **v1.1.0 broadens what `mdwiki` can ingest, where it can run, and how cheaply it can build a wiki.** All changes are additive — existing v1.0 wikis upgrade transparently (`pip install -U` is enough; no schema migration required).

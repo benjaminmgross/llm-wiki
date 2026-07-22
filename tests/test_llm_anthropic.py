@@ -36,6 +36,29 @@ def test_constructor_accepts_explicit_api_key() -> None:
 
 
 @pytest.mark.unit
+def test_anthropic_declares_batch_and_tool_capabilities() -> None:
+    provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="sk-explicit")
+
+    assert provider.supports_batch is True
+    assert provider.supports_tool_use is True
+
+
+@pytest.mark.unit
+def test_anthropic_classifies_only_source_local_transport_errors_as_recoverable() -> None:
+    provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="sk-explicit")
+    request = MagicMock()
+    transient = anthropic.APIConnectionError(request=request)
+    fatal = anthropic.AuthenticationError(
+        message="invalid key",
+        response=MagicMock(status_code=401, headers={}),
+        body={},
+    )
+
+    assert provider.is_recoverable_error(transient) is True
+    assert provider.is_recoverable_error(fatal) is False
+
+
+@pytest.mark.unit
 def test_constructor_raises_clear_error_without_api_key() -> None:
     with pytest.raises(MissingAPIKeyError) as excinfo:
         AnthropicProvider(model="claude-sonnet-4-6")
@@ -168,9 +191,7 @@ def test_complete_raises_clear_error_on_max_tokens_truncation(mocker: MockerFixt
     fake_response = MagicMock()
     fake_response.content = [MagicMock(type="text", text='{"verdict": "ingest", "rationale": "trun')]
     fake_response.stop_reason = "max_tokens"
-    fake_response.usage = MagicMock(
-        input_tokens=100, output_tokens=4096, cache_read_input_tokens=0, cache_creation_input_tokens=0
-    )
+    fake_response.usage = MagicMock(input_tokens=100, output_tokens=4096, cache_read_input_tokens=0, cache_creation_input_tokens=0)
     _mock_stream(fake_client, fake_response)
 
     provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="sk-x", client=fake_client)
@@ -248,9 +269,7 @@ def test_describe_image_sends_image_content_block(tmp_path, mocker: MockerFixtur
         (".gif", "image/gif"),
     ],
 )
-def test_describe_image_maps_extension_to_media_type(
-    tmp_path, mocker: MockerFixture, ext: str, expected_media_type: str
-) -> None:
+def test_describe_image_maps_extension_to_media_type(tmp_path, mocker: MockerFixture, ext: str, expected_media_type: str) -> None:
     """Each registered image extension maps to the right MIME type for the API."""
     src = tmp_path / f"x{ext}"
     src.write_bytes(b"binary")
@@ -306,8 +325,7 @@ def test_batch_complete_submits_one_create_call_with_each_request(mocker: Mocker
     ]
 
     requests = [
-        BatchRequest(custom_id=f"src-{c}", system="sys", messages=[Message(role="user", content=f"prompt-{c}")])
-        for c in ("a", "b", "c")
+        BatchRequest(custom_id=f"src-{c}", system="sys", messages=[Message(role="user", content=f"prompt-{c}")]) for c in ("a", "b", "c")
     ]
     results = provider.batch_complete(requests, poll_interval=0.0)
 
@@ -390,9 +408,7 @@ def test_batch_complete_raises_timeout_when_deadline_elapses(mocker: MockerFixtu
     from mdwiki.llm.base import BatchRequest
 
     provider, fake_client = _build_batch_provider()
-    fake_client.messages.batches.create.return_value = MagicMock(
-        id="batch_timeout", processing_status="in_progress"
-    )
+    fake_client.messages.batches.create.return_value = MagicMock(id="batch_timeout", processing_status="in_progress")
     # Always in-progress — never reaches "ended", so deadline check trips.
     fake_client.messages.batches.retrieve.return_value = MagicMock(
         id="batch_timeout",
@@ -415,17 +431,13 @@ def test_batch_complete_raises_timeout_when_deadline_elapses(mocker: MockerFixtu
 
 @pytest.mark.unit
 @pytest.mark.parametrize("status", ["canceling", "canceled", "expired", "errored"])
-def test_batch_complete_raises_on_terminal_abnormal_status(
-    mocker: MockerFixture, status: str
-) -> None:
+def test_batch_complete_raises_on_terminal_abnormal_status(mocker: MockerFixture, status: str) -> None:
     """Terminal/abnormal statuses (canceling, canceled, expired, errored) raise ``BatchUnexpectedStatusError``."""
     from mdwiki.llm.anthropic import BatchUnexpectedStatusError
     from mdwiki.llm.base import BatchRequest
 
     provider, fake_client = _build_batch_provider()
-    fake_client.messages.batches.create.return_value = MagicMock(
-        id="batch_abnormal", processing_status=status
-    )
+    fake_client.messages.batches.create.return_value = MagicMock(id="batch_abnormal", processing_status=status)
     fake_client.messages.batches.retrieve.return_value = MagicMock(
         id="batch_abnormal",
         processing_status=status,

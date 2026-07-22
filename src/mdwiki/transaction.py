@@ -33,6 +33,7 @@ from types import TracebackType
 from typing import Self
 
 from mdwiki.discover import WIKI_DIR_NAME
+from mdwiki.source_state import mirror_source_state
 from mdwiki.state import connect
 
 UNDO_DIR_NAME: str = "undo"
@@ -68,7 +69,7 @@ class IngestTransaction:
         self._conn: sqlite3.Connection | None = None
         self._committed: bool = False
         self._inverses: list[tuple[str, tuple]] = []
-        self._prev_source_state: tuple[str, float | None] | None = None
+        self._prev_source_state: tuple[str, float | None, str | None] | None = None
 
     @property
     def tx_id(self) -> str:
@@ -139,9 +140,7 @@ class IngestTransaction:
         if _is_wiki_page(rel) and prev_body is not None:
             from mdwiki.version_chain import compute_body_hash, embed_previous_hash
 
-            content = embed_previous_hash(
-                body=content, previous_hash=compute_body_hash(prev_body)
-            )
+            content = embed_previous_hash(body=content, previous_hash=compute_body_hash(prev_body))
 
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_name(f"{path.name}.tmp-{self._tx_id}")
@@ -195,9 +194,7 @@ class IngestTransaction:
         """
         if self._conn is None:
             raise RuntimeError("IngestTransaction must be entered as a context manager before calling upsert_page().")
-        prev = self._conn.execute(
-            "SELECT kind, embedding, last_touched_at FROM pages WHERE path = ?", (path,)
-        ).fetchone()
+        prev = self._conn.execute("SELECT kind, embedding, last_touched_at FROM pages WHERE path = ?", (path,)).fetchone()
         if prev is None:
             self._conn.execute(
                 "INSERT INTO pages (path, kind, embedding, last_touched_at) VALUES (?, ?, ?, ?)",
@@ -243,19 +240,17 @@ class IngestTransaction:
             (now, "ingest", self._source_id, self._summary, self._tx_id),
         )
         if self._source_id is not None:
-            prev = self._conn.execute(
-                "SELECT status, ingested_at FROM sources WHERE id = ?", (self._source_id,)
-            ).fetchone()
-            self._prev_source_state = (prev["status"], prev["ingested_at"]) if prev is not None else None
+            prev = self._conn.execute("SELECT status, ingested_at, failure_reason FROM sources WHERE id = ?", (self._source_id,)).fetchone()
+            self._prev_source_state = (prev["status"], prev["ingested_at"], prev["failure_reason"]) if prev is not None else None
             self._conn.execute(
-                "UPDATE sources SET status = 'ingested', ingested_at = ? WHERE id = ?",
+                "UPDATE sources SET status = 'ingested', ingested_at = ?, failure_reason = NULL WHERE id = ?",
                 (now, self._source_id),
             )
             if self._prev_source_state is not None:
-                prev_status, prev_ingested_at = self._prev_source_state
+                prev_status, prev_ingested_at, prev_failure_reason = self._prev_source_state
                 self.add_inverse(
-                    "UPDATE sources SET status = ?, ingested_at = ? WHERE id = ?",
-                    (prev_status, prev_ingested_at, self._source_id),
+                    "UPDATE sources SET status = ?, ingested_at = ?, failure_reason = ? WHERE id = ?",
+                    (prev_status, prev_ingested_at, prev_failure_reason, self._source_id),
                 )
 
         for sql, params in self._inverses:
@@ -273,8 +268,14 @@ class IngestTransaction:
         self._committed = True
         if self._source_id is not None:
             try:
-                _mark_sidecar_ingested(self._wiki_root, self._source_id, now)
-            except OSError as exc:
+                mirror_source_state(
+                    self._wiki_root,
+                    source_id=self._source_id,
+                    status="ingested",
+                    ingested_at=now,
+                    failure_reason=None,
+                )
+            except Exception as exc:
                 print(
                     f"warning: source status committed to DB but raw/.sources.json update failed: {exc} "
                     f"(source_id={self._source_id}; rebuild may mark this source pending)",
@@ -330,30 +331,3 @@ def _is_wiki_page(rel: Path) -> bool:
     if name in {"log.md", "index.md"}:
         return False
     return True
-
-
-def _mark_sidecar_ingested(wiki_root: Path, source_id: str, ingested_at: float) -> None:
-    """Mirror source ingest status into the tracked raw sidecar for DB rebuild."""
-    sidecar_path = wiki_root / "raw" / ".sources.json"
-    if not sidecar_path.is_file():
-        return
-
-    sidecar = json.loads(sidecar_path.read_text())
-    meta = sidecar.get(source_id)
-    if not isinstance(meta, dict):
-        return
-
-    meta["status"] = "ingested"
-    meta["ingested_at"] = ingested_at
-    tmp_path = sidecar_path.with_name(f"{sidecar_path.name}.tmp-{source_id}")
-    try:
-        tmp_path.write_text(json.dumps(sidecar, indent=2, sort_keys=True))
-        import os
-
-        os.replace(tmp_path, sidecar_path)
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass

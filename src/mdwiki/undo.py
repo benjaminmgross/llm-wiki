@@ -154,16 +154,21 @@ def _sync_source_sidecar_from_db(*, wiki_root: Path) -> None:
     sidecar = json.loads(sidecar_path.read_text())
     db_path = wiki_root / WIKI_DIR_NAME / "state.db"
     with connect(db_path) as conn:
-        rows = conn.execute("SELECT id, status, ingested_at FROM sources").fetchall()
+        rows = conn.execute("SELECT id, status, ingested_at, failure_reason FROM sources").fetchall()
 
     changed = False
     for row in rows:
         meta = sidecar.get(row["id"])
         if not isinstance(meta, dict):
             continue
-        if meta.get("status") != row["status"] or meta.get("ingested_at") != row["ingested_at"]:
+        if (
+            meta.get("status") != row["status"]
+            or meta.get("ingested_at") != row["ingested_at"]
+            or meta.get("failure_reason") != row["failure_reason"]
+        ):
             meta["status"] = row["status"]
             meta["ingested_at"] = row["ingested_at"]
+            meta["failure_reason"] = row["failure_reason"]
             changed = True
 
     if not changed:

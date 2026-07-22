@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS sources (
     content_hash    TEXT NOT NULL,
     mtime           REAL NOT NULL,
     ingested_at     REAL,
-    status          TEXT NOT NULL CHECK (status IN ('pending', 'ingested', 'failed'))
+    status          TEXT NOT NULL CHECK (status IN ('pending', 'ingested', 'failed')),
+    failure_reason  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS pages (
@@ -154,6 +155,15 @@ def _apply_inline_migrations(conn) -> None:
     ``OperationalError: duplicate column name`` — we swallow exactly that
     case, since it means another connection already applied the migration.
     """
+    source_cols_rows = conn.execute("PRAGMA table_info(sources)").fetchall()
+    source_cols = {row[1] for row in source_cols_rows}
+    if source_cols_rows and "failure_reason" not in source_cols:
+        try:
+            conn.execute("ALTER TABLE sources ADD COLUMN failure_reason TEXT")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+
     inverse_cols_rows = conn.execute("PRAGMA table_info(transaction_inverses)").fetchall()
     if not inverse_cols_rows:
         return  # table doesn't exist yet; init_db will create it with the right schema
@@ -182,9 +192,7 @@ def _apply_inline_migrations(conn) -> None:
     # https://www.sqlite.org/lang_altertable.html#otheralter and re-enable in a
     # ``finally`` so a mid-rebuild failure can't leave the connection with FKs
     # silently disabled.
-    pages_sql_row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='pages'"
-    ).fetchone()
+    pages_sql_row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='pages'").fetchone()
     if pages_sql_row is not None and "CHECK" in (pages_sql_row[0] or ""):
         conn.execute("PRAGMA foreign_keys = OFF")
         try:

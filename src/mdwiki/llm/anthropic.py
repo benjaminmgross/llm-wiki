@@ -93,6 +93,19 @@ class AnthropicProvider(Provider):
     """Concrete provider backed by Anthropic's Messages API."""
 
     name: str = "anthropic"
+    supports_batch: bool = True
+    supports_tool_use: bool = True
+
+    def is_recoverable_error(self, exc: Exception) -> bool:
+        return isinstance(
+            exc,
+            (
+                anthropic.RateLimitError,
+                anthropic.APIConnectionError,
+                anthropic.InternalServerError,
+                httpx.TimeoutException,
+            ),
+        )
 
     def __init__(
         self,
@@ -124,8 +137,7 @@ class AnthropicProvider(Provider):
         resolved_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not resolved_key:
             raise MissingAPIKeyError(
-                "ANTHROPIC_API_KEY is not set. Export it in your shell "
-                "(`export ANTHROPIC_API_KEY=sk-...`) or pass api_key= explicitly."
+                "ANTHROPIC_API_KEY is not set. Export it in your shell (`export ANTHROPIC_API_KEY=sk-...`) or pass api_key= explicitly."
             )
         # Bounded timeouts prevent a stalled socket from hanging --all forever;
         # max_retries=2 gives us SDK-level exponential backoff on 5xx/429 for free.
@@ -253,7 +265,6 @@ class AnthropicProvider(Provider):
             tool_input=tool_input,
         )
 
-
     def describe_image(self, image_path: Path) -> str:
         """Send the image to Claude vision and return the model's markdown description.
 
@@ -269,10 +280,7 @@ class AnthropicProvider(Provider):
         suffix = image_path.suffix.lower()
         media_type = _IMAGE_MEDIA_TYPES.get(suffix)
         if media_type is None:
-            raise ValueError(
-                f"describe_image: unsupported image extension {suffix!r}. "
-                f"Supported: {sorted(_IMAGE_MEDIA_TYPES)}"
-            )
+            raise ValueError(f"describe_image: unsupported image extension {suffix!r}. Supported: {sorted(_IMAGE_MEDIA_TYPES)}")
         b64 = base64.standard_b64encode(image_path.read_bytes()).decode("ascii")
         response = self._client.messages.create(
             model=self.model,
@@ -292,7 +300,6 @@ class AnthropicProvider(Provider):
         )
         return next((block.text for block in response.content if getattr(block, "type", None) == "text"), "")
 
-
     def estimate_batch_cost(self, requests: list[BatchRequest]) -> BatchCostEstimate:
         """Coarse upper-bound cost estimate using a 4-chars-per-token heuristic.
 
@@ -300,14 +307,11 @@ class AnthropicProvider(Provider):
         Anthropic's tokenizer and the actual output length, so the actual cost
         is typically lower.
         """
-        input_chars = sum(
-            len(req.system) + sum(len(m.content) for m in req.messages) for req in requests
-        )
+        input_chars = sum(len(req.system) + sum(len(m.content) for m in req.messages) for req in requests)
         input_tokens = int(input_chars / _CHARS_PER_TOKEN)
         output_tokens_max = sum(req.max_tokens for req in requests)
         usd_total = (
-            (input_tokens * _SONNET_INPUT_USD_PER_MTOK / 1_000_000)
-            + (output_tokens_max * _SONNET_OUTPUT_USD_PER_MTOK / 1_000_000)
+            (input_tokens * _SONNET_INPUT_USD_PER_MTOK / 1_000_000) + (output_tokens_max * _SONNET_OUTPUT_USD_PER_MTOK / 1_000_000)
         ) * _BATCH_DISCOUNT
         return BatchCostEstimate(
             requests=len(requests),
@@ -328,8 +332,8 @@ class AnthropicProvider(Provider):
 
         Returns one ``BatchResult`` per ``BatchRequest``. Failed/canceled results
         come back with ``error`` populated and empty ``text`` — caller decides
-        how to surface them (typically: leave the source as ``pending`` and
-        log a warning).
+        how to surface them (bootstrap records a durable ``failed`` source with
+        the provider reason so only unfinished work is retried).
         """
         sdk_requests = []
         for req in requests:
@@ -338,9 +342,7 @@ class AnthropicProvider(Provider):
             params: dict[str, Any] = {
                 "model": self.model,
                 "max_tokens": req.max_tokens,
-                "system": [
-                    {"type": "text", "text": req.system, "cache_control": {"type": "ephemeral"}}
-                ],
+                "system": [{"type": "text", "text": req.system, "cache_control": {"type": "ephemeral"}}],
                 "messages": [{"role": m.role, "content": m.content} for m in req.messages],
             }
             if req.tools is not None:

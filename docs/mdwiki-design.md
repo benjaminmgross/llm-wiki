@@ -1,12 +1,13 @@
 ---
 title: mdwiki — Design (v1.2.0)
 created: 2025-04-29
-updated: 2026-04-30
+updated: 2026-07-22
 version: 1.2.0
 status: locked
 tags: [mdwiki, design, llm-wiki, karpathy-pattern, multi-filetype, batch-api, local-providers, profiles, version-chain]
 supersedes: v0 design
 changelog:
+  - post-1.3 (2026-07-22) — Provider-capability routing for `init/refresh --bootstrap-batch`: native batch when the configured provider supports it, otherwise an explicit synchronous fallback through that same provider. Added durable per-source failure reasons, failed-source status enumeration, and pending+failed-only retry semantics. No silent provider substitution.
   - 1.2.0 (2026-04-30) — Corpus-aware profiles (`mdwiki init --profile=working-dir|initiative|transcripts|framework`) layered on a Profile + deep-merge config-overlay foundation. New profile contents under `src/mdwiki/profiles/`. `MarkdownChunker` fallback tiers (H2 → H1 → paragraph → sliding-window). `_normalize(mode="transcripts")` strips `[HH:MM:SS]` and `Speaker:` prefixes for transcripts mode. New `TranscriptLoader` (VTT / SRT / Fathom-md). Page version chain (`previous_hash:` SHA-256 in YAML frontmatter, auto-embedded by `transaction.write_file()` for `wiki/` paths). Profile-aware plan validation (`allowed_kinds_for_wiki()`); legacy `pages.kind` CHECK constraint dropped via inline migration. New `mdwiki skill` command (runtime agent guide). Phase-5 quality primitives (`state.db.rejections`, `state.db.cost_ledger`, `mdwiki.rejection_memory`, `mdwiki.cost_guard`, `[unverified-quote]` lint check) — primitives only; ingest-path wiring is v1.2.1. New `scripts/run_canary.py` for real-corpus structural + live scorecards. Schema is forward-compatible; existing wikis auto-migrate on first connect (drops the kind CHECK; adds rejections + cost_ledger tables). 29 new tests, 416 total passing, 0 regressions.
   - 1.1.0 (2026-04-30) — Multi-filetype ingest via Loader registry (md/txt/code/csv/pdf/docx/html/image), Anthropic Batch API (`init --bootstrap-batch`), generic `OpenAICompatibleProvider` for vLLM/llama.cpp/OpenRouter/Together, opt-in Claude vision OCR for images and scanned-PDF fallback, `mdwiki lint --fix [=full]` interactive remediation, `mdwiki rebuild-log` recovery utility. Schema + ingest prompt rewritten for healthier entity-page creation balance (Karpathy rubric 47→79 on a mixed-filetype test corpus). New deps — pypdfium2, python-docx, markdownify, openai. Schema is forward-compatible; no v1.0→v1.1 migration needed.
   - 1.0.5 (2026-04-30) — round-1 review fixes. UPDATE schema: drop `section`; `content` is the COMPLETE revised page body (no section splicing in v1.0.0). Document `mdwiki rebuild` as sources-only restoration; backrefs/events/pages are not replayable from log.md alone (re-ingest sources to recover). Document `mdwiki ingest --pending` as the bulk-run resume mechanism (no checkpoint file in v1.0.0). Add path-traversal defense in plan parser. Atomic file writes via tmp+os.replace. WAL journaling + 30s busy_timeout for concurrent invocation safety. HTTP timeout + max_retries=2 on the Anthropic client.
@@ -17,6 +18,16 @@ changelog:
 **Vision.** A folder-local CLI that turns any directory of markdown into an LLM-maintained wiki: immutable raw sources, an LLM-owned wiki layer of interlinked pages, and a schema document the user controls. Built on Karpathy's *llm-wiki* pattern. Replaces `markdown-consolidator`; the existing modules become internals.
 
 This document is the locked v1.0.0 contract. All open questions from v0 are resolved below.
+
+## Current implementation note — provider-aware bootstrap
+
+The historical sections below describe the v1.0 contract and v1.1 Anthropic Batch API addition. Current mdwiki keeps the config-driven provider as the single source of truth for every ingest path:
+
+- `Provider.supports_batch` and `Provider.supports_tool_use` declare backend capabilities; built-in provider bootstrap routing follows those capabilities instead of choosing a vendor by name.
+- `init/refresh --bootstrap-batch` uses native batch only when the configured provider declares it. Otherwise mdwiki announces a synchronous fallback and calls that same provider once per outstanding source.
+- Unsupported batch never causes an implicit switch to Anthropic.
+- Each source is applied in its own `IngestTransaction`. Source-local failures are persisted as `failed` with a reason in both `state.db` and `raw/.sources.json`; `mdwiki status` enumerates them.
+- `ingest --pending` and both bootstrap paths select `pending` plus `failed`, so reruns target only unfinished sources.
 
 ## UX (the happy path)
 
@@ -118,7 +129,7 @@ mdwiki will never write to `CLAUDE.md` and will never assume one exists.
 `mdwiki init` is **non-destructive and idempotent**:
 
 1. Create `.mdwiki/` with default config, empty sqlite schema, and a starter `schema.md`.
-2. Walk the folder (respecting `.gitignore` + config excludes) and **register** every `.md` as a `pending` source: hash, mtime, original_path, copied to `raw/`.
+2. Walk the folder (respecting `.gitignore` + config excludes) and **register** every loadable source as `pending`: hash, mtime, original_path, converted/copied to `raw/`.
 3. Refuse to init if a parent already contains `.mdwiki/` — single wiki per folder, like git. (No nested wikis. Use separate folders for separate wikis.)
 4. Print a summary; **ingest nothing**.
 
@@ -126,8 +137,9 @@ Then the user picks how to bootstrap:
 
 | Mode | Command | When to use |
 |---|---|---|
-| Incremental | `mdwiki ingest <file>` or `--all` | Default; one source at a time, fully attributable |
-| Bootstrap | `mdwiki init --bootstrap` | Cold start with hundreds of files; runs the legacy clustering pipeline once via the Batch API to seed `wiki/`, then switches to incremental |
+| Incremental | `mdwiki ingest <file>` or `--pending` | Default; one source at a time, or only outstanding pending/failed sources |
+| Synchronous bootstrap | `mdwiki init --bootstrap` | Cold start through the configured provider, one independently committed source at a time |
+| Batch-preferred bootstrap | `mdwiki init --bootstrap-batch` | Use configured-provider native batch when supported; otherwise announce and use same-provider synchronous ingest |
 | Lazy | (do nothing) | Sources stay `pending`; only ingested when referenced by a query |
 
 Bootstrap is where today's `clustering` + `synthesis` modules earn their keep — they solve the cold-start problem the wiki pattern is weakest at.
@@ -255,6 +267,7 @@ We deliberately skip a self-critique LLM pass (would double cost). The human is 
 src/mdwiki/llm/
   base.py        # Provider abstract base class
   anthropic.py   # v1.0.0
+  openai_compatible.py  # v1.1+ (vLLM, llama.cpp, OpenRouter, Together, etc.)
   __init__.py    # factory: read [llm] config → return provider instance
 ```
 
@@ -262,15 +275,18 @@ The `Provider` interface:
 
 ```python
 class Provider(ABC):
+    supports_batch: bool = False
+    supports_tool_use: bool = False
+
     @abstractmethod
-    def complete(self, system: str, messages: list[Message], json_schema: dict) -> dict: ...
-    @abstractmethod
-    def batch_complete(self, requests: list[BatchRequest]) -> list[dict]: ...
-    @abstractmethod
-    def estimate_cost(self, requests: list[BatchRequest]) -> float: ...
+    def complete(self, *, system: str, messages: list[Message], max_tokens: int = 1024) -> CompleteResult: ...
+
+    def batch_complete(self, requests: list[BatchRequest], ...) -> list[BatchResult]: ...
+    def estimate_batch_cost(self, requests: list[BatchRequest]) -> BatchCostEstimate: ...
+    def is_recoverable_error(self, exc: Exception) -> bool: ...
 ```
 
-Day 2 adds `qwen.py`, `kimi.py`, etc. by implementing this interface. **Out of scope for v1.0.0.** The seam is the v1.0.0 commitment; the implementations are not.
+The provider seam was the v1.0.0 commitment. v1.1 added the generic OpenAI-compatible adapter; later orchestration made optional capabilities explicit so providers without native batch support can use the same safe synchronous ingest workflow.
 
 ## Wiki edit safety
 
@@ -340,7 +356,7 @@ Calibrated against the v1.0.0 test corpus: `~/Desktop/Clippings`, 101 markdown f
 | Operation | Estimate (Sonnet 4.6 with prompt caching) |
 |---|---|
 | `init` (no LLM calls — just registers) | $0 |
-| `init --bootstrap` (101 files via Batch API) | **$5–15** |
+| `init --bootstrap-batch` (101 files via Anthropic Batch API) | **$5–15** |
 | `ingest <file>` (one new source, sync) | **$0.05–$0.20** depending on size |
 | `query "..."` (one question, sync) | **$0.01–$0.05** |
 | `lint` (full pass, sync) | **$0.50–$2** |
@@ -363,11 +379,12 @@ Each implementation phase ends in a manual-testing gate where the user runs conc
 
 | Command | Purpose |
 |---|---|
-| `mdwiki init [--bootstrap] [--mirror-raw]` | Scaffold + register sources |
-| `mdwiki ingest [<file>\|--all\|--pending] [--yes]` | Incremental ingest, interactive by default |
+| `mdwiki init [--bootstrap\|--bootstrap-batch]` | Scaffold, register sources, and optionally ingest through the configured provider |
+| `mdwiki refresh [--bootstrap\|--bootstrap-batch]` | Register new sources and optionally ingest outstanding pending/failed sources |
+| `mdwiki ingest [<file>\|--all\|--pending] [--yes]` | Incremental ingest; `--pending` includes retryable failures |
 | `mdwiki query "<q>" [--file]` | Search + synthesize, optionally file findings as a new page |
 | `mdwiki lint [--fix]` | Contradictions, orphans, stale, focus, headers, gaps |
-| `mdwiki status` | Pending/ingested counts, last lint, recent events |
+| `mdwiki status` | Pending/failed/ingested counts, failed-source reasons, last lint, recent events |
 | `mdwiki source <id>` | Reveal raw path / original path / dependent pages |
 | `mdwiki undo [N]` | Roll back the last N ingest transactions |
 | `mdwiki rebuild` | Reconstruct `state.db` from `raw/` + `wiki/` + `log.md` |

@@ -92,6 +92,25 @@ def test_format_status_renders_human_readable(populated_wiki: Path) -> None:
 
 
 @pytest.mark.unit
+def test_status_enumerates_failed_sources_with_reasons(populated_wiki: Path) -> None:
+    with connect(populated_wiki / ".mdwiki" / "state.db") as conn:
+        conn.execute("UPDATE sources SET status = 'failed', failure_reason = 'invalid ingest plan' WHERE original_path = 'b.md'")
+        conn.commit()
+
+    report = get_status(populated_wiki)
+    out = format_status(report, wiki_root=populated_wiki)
+
+    assert report.pending == 2
+    assert report.failed == 1
+    assert len(report.failed_sources) == 1
+    assert report.failed_sources[0].original_path == "b.md"
+    assert report.failed_sources[0].reason == "invalid ingest plan"
+    assert "1 failed" in out
+    assert "b.md" in out
+    assert "invalid ingest plan" in out
+
+
+@pytest.mark.unit
 def test_status_warns_when_disk_pages_exist_but_state_has_no_pages(populated_wiki: Path) -> None:
     (populated_wiki / "wiki" / "concepts").mkdir(parents=True)
     (populated_wiki / "wiki" / "concepts" / "drift.md").write_text("# Drift\n\nExists only on disk.")

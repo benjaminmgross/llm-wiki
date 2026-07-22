@@ -69,6 +69,17 @@ class Provider(ABC):
     """
 
     name: str = ""
+    supports_batch: bool = False
+    supports_tool_use: bool = False
+
+    def is_recoverable_error(self, exc: Exception) -> bool:
+        """Return whether ``exc`` is isolated enough to continue with the next source.
+
+        Providers opt in only transport/rate-limit/server errors that may vary by
+        request. Authentication, model, permission, and request-shape errors must
+        remain fatal so bulk ingest does not repeat a systemic failure.
+        """
+        return False
 
     @abstractmethod
     def ping(self) -> PingResult:
@@ -102,13 +113,13 @@ class Provider(ABC):
         max_tokens : int, optional
             Cap on output tokens (default 1024).
         tools : list[dict], optional
-            Tool definitions in Anthropic's wire format. When provided alongside
+            Tool definitions in mdwiki's provider-adapter format. When provided alongside
             ``tool_choice``, the provider engages constrained decoding so the
             response payload is structurally guaranteed to conform to the tool's
             ``input_schema``. Result is exposed in ``CompleteResult.tool_input``.
             Providers without constrained-decoding support may ignore this
-            argument and fall back to free-form text generation; callers should
-            not assume tool support except on ``AnthropicProvider``.
+            argument and fall back to free-form text generation; orchestration
+            checks ``supports_tool_use`` before supplying it.
         tool_choice : dict, optional
             Forces the model to call a specific tool when set, e.g.
             ``{"type": "tool", "name": "submit_plan"}``. Ignored when ``tools``
@@ -168,8 +179,8 @@ class Provider(ABC):
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support batch_complete. "
-            "Use AnthropicProvider for the bootstrap-batch path, or run the sync "
-            "ingest path (`mdwiki init --bootstrap`)."
+            "Use the sync ingest path (`mdwiki init --bootstrap`) or configure "
+            "bootstrap-batch to fall back to synchronous ingest."
         )
 
     def estimate_batch_cost(self, requests: list[BatchRequest]) -> BatchCostEstimate:
@@ -180,9 +191,7 @@ class Provider(ABC):
         provider-specific batch rates. Concrete providers override when more
         accurate token counting is available.
         """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement estimate_batch_cost."
-        )
+        raise NotImplementedError(f"{self.__class__.__name__} does not implement estimate_batch_cost.")
 
 
 @dataclass(frozen=True)
@@ -253,5 +262,3 @@ class BatchCostEstimate:
     input_tokens: int
     output_tokens_max: int
     usd_total: float
-
-
