@@ -233,6 +233,52 @@ def test_ingest_aborts_when_quote_verification_fails(wiki_with_one_source: Path,
 
 
 @pytest.mark.unit
+def test_ingest_retries_when_quote_verification_fails(wiki_with_one_source: Path) -> None:
+    bad_plan = _good_plan_dict()
+    bad_plan["new_pages"][0]["claims"][0]["quote"] = "this quote was never in the source"
+    provider = SequencedProvider([_tool_result(bad_plan), _tool_result(_good_plan_dict())])
+
+    result = ingest_source(wiki_with_one_source, "ai.md", yes=True, embedder=StubEmbedder(), provider=provider)
+
+    assert result.applied is True
+    assert len(provider.messages) == 2
+    assert "quote not found in source" in provider.messages[1][2].content
+
+
+@pytest.mark.unit
+def test_ingest_allows_multiple_corrective_plan_retries_by_default(wiki_with_one_source: Path) -> None:
+    target = wiki_with_one_source / "wiki" / "concepts" / "attention-sinks.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Existing\n\nDo not overwrite.")
+    corrected = {
+        "verdict": "ingest",
+        "rationale": "Update the existing page instead of creating it.",
+        "updates": [
+            {
+                "page": "wiki/concepts/attention-sinks.md",
+                "content": "# Existing\n\nDo not overwrite.\n\nAdds attention sinks for long contexts.",
+                "claims": [
+                    {
+                        "source_section_id": "ai.md/Intro",
+                        "quote": "this paper introduces attention sinks for long contexts",
+                    }
+                ],
+            }
+        ],
+        "new_pages": [],
+        "cross_refs": [],
+    }
+    provider = SequencedProvider(
+        [_tool_result(_good_plan_dict()), _tool_result(_good_plan_dict()), _tool_result(corrected)]
+    )
+
+    result = ingest_source(wiki_with_one_source, "ai.md", yes=True, embedder=StubEmbedder(), provider=provider)
+
+    assert result.applied is True
+    assert len(provider.messages) == 3
+
+
+@pytest.mark.unit
 def test_ingest_does_not_apply_when_user_rejects(wiki_with_one_source: Path, mocker: MockerFixture) -> None:
     _mock_provider(mocker, _good_plan_json())
     result = ingest_source(wiki_with_one_source, "ai.md", yes=False, confirm=lambda _: False)

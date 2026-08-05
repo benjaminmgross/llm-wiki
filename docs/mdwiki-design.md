@@ -1,12 +1,13 @@
 ---
 title: mdwiki — Design (v1.2.0)
 created: 2025-04-29
-updated: 2026-07-22
+updated: 2026-08-05
 version: 1.2.0
 status: locked
 tags: [mdwiki, design, llm-wiki, karpathy-pattern, multi-filetype, batch-api, local-providers, profiles, version-chain]
 supersedes: v0 design
 changelog:
+  - post-1.3 (2026-08-05) — Synchronous ingest now validates quotes inside the corrective-plan loop. Schema errors, existing-page collisions, invalid section ids, and non-verbatim quotes receive up to three corrective attempts before the source is persisted as failed. Validation remains strict; no claim is applied unless the final plan verifies.
   - post-1.3 (2026-07-22) — Provider-capability routing for `init/refresh --bootstrap-batch`: native batch when the configured provider supports it, otherwise an explicit synchronous fallback through that same provider. Added durable per-source failure reasons, failed-source status enumeration, and pending+failed-only retry semantics. No silent provider substitution.
   - 1.2.0 (2026-04-30) — Corpus-aware profiles (`mdwiki init --profile=working-dir|initiative|transcripts|framework`) layered on a Profile + deep-merge config-overlay foundation. New profile contents under `src/mdwiki/profiles/`. `MarkdownChunker` fallback tiers (H2 → H1 → paragraph → sliding-window). `_normalize(mode="transcripts")` strips `[HH:MM:SS]` and `Speaker:` prefixes for transcripts mode. New `TranscriptLoader` (VTT / SRT / Fathom-md). Page version chain (`previous_hash:` SHA-256 in YAML frontmatter, auto-embedded by `transaction.write_file()` for `wiki/` paths). Profile-aware plan validation (`allowed_kinds_for_wiki()`); legacy `pages.kind` CHECK constraint dropped via inline migration. New `mdwiki skill` command (runtime agent guide). Phase-5 quality primitives (`state.db.rejections`, `state.db.cost_ledger`, `mdwiki.rejection_memory`, `mdwiki.cost_guard`, `[unverified-quote]` lint check) — primitives only; ingest-path wiring is v1.2.1. New `scripts/run_canary.py` for real-corpus structural + live scorecards. Schema is forward-compatible; existing wikis auto-migrate on first connect (drops the kind CHECK; adds rejections + cost_ledger tables). 29 new tests, 416 total passing, 0 regressions.
   - 1.1.0 (2026-04-30) — Multi-filetype ingest via Loader registry (md/txt/code/csv/pdf/docx/html/image), Anthropic Batch API (`init --bootstrap-batch`), generic `OpenAICompatibleProvider` for vLLM/llama.cpp/OpenRouter/Together, opt-in Claude vision OCR for images and scanned-PDF fallback, `mdwiki lint --fix [=full]` interactive remediation, `mdwiki rebuild-log` recovery utility. Schema + ingest prompt rewritten for healthier entity-page creation balance (Karpathy rubric 47→79 on a mixed-filetype test corpus). New deps — pypdfium2, python-docx, markdownify, openai. Schema is forward-compatible; no v1.0→v1.1 migration needed.
@@ -28,6 +29,7 @@ The historical sections below describe the v1.0 contract and v1.1 Anthropic Batc
 - Unsupported batch never causes an implicit switch to Anthropic.
 - Each source is applied in its own `IngestTransaction`. Source-local failures are persisted as `failed` with a reason in both `state.db` and `raw/.sources.json`; `mdwiki status` enumerates them.
 - `ingest --pending` and both bootstrap paths select `pending` plus `failed`, so reruns target only unfinished sources.
+- Synchronous ingest makes up to three corrective attempts when a plan is malformed, calls an existing page new, cites an invalid section, or uses a non-verbatim quote. The final plan must still pass every local validation gate before any transaction begins.
 
 ## UX (the happy path)
 
@@ -254,9 +256,9 @@ If verdict is anything other than "ingest", updates/new_pages/cross_refs MUST be
 
 Verification stack (cheapest → most expensive):
 
-1. **Schema-validated JSON.** Invalid JSON → retry once.
-2. **Cite-or-refuse.** Every claim must reference a real `source_section_id`.
-3. **Quote-anchor.** Every claim's `quote` must appear verbatim (whitespace-normalized) in the source. mdwiki implements this in pure Python.
+1. **Schema-validated JSON.** Invalid plans enter a bounded corrective loop (up to three retries by default).
+2. **Cite-or-refuse.** Every claim must reference a real `source_section_id`; failures enter the same corrective loop.
+3. **Quote-anchor.** Every claim's `quote` must appear verbatim (whitespace-normalized) in the source. mdwiki implements this in pure Python and sends claim-level failures back for correction.
 4. **Human-in-the-loop.** The user is the final critic, by design (interactive ingest).
 
 We deliberately skip a self-critique LLM pass (would double cost). The human is the second pass.
@@ -319,7 +321,7 @@ Because ingest is interactive, conflict resolution happens in the conversation. 
 | LLM proposes a new page at a path that already exists | Show as an update to the existing page, not a new page; user can split off if intended |
 | Quote verification fails on N claims | List the bad claims; user picks (drop those claims and apply the rest / retry whole plan / abort) |
 
-`--yes` skips all prompts and applies the LLM's plan verbatim if quote verification passes. If verification fails with `--yes`, the ingest aborts (never silent failure).
+`--yes` skips human confirmation; it does not bypass validation. Recoverable plan and quote failures receive the bounded corrective retries above. If the final attempt still fails verification, ingestion aborts and persists the source-local failure reason (never a silent or partial apply).
 
 ## State schema (sqlite)
 

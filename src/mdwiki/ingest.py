@@ -58,7 +58,7 @@ def ingest_source(
     max_tokens: int = 16000,
     embedder: Embedder | None = None,
     force: bool = False,
-    plan_retries: int = 1,
+    plan_retries: int = 3,
 ) -> IngestResult:
     """Run the full ingest pipeline for one source.
 
@@ -82,8 +82,8 @@ def ingest_source(
         by ``ingest_many(scope="all")`` to give ``--all`` true re-process
         semantics. Default ``False`` — already-ingested sources short-circuit.
     plan_retries : int, optional
-        Number of corrective retries after recoverable LLM plan validation
-        failures. Defaults to one retry.
+        Number of corrective retries after recoverable LLM plan or quote
+        validation failures. Defaults to three retries.
 
     Raises
     ------
@@ -150,10 +150,20 @@ def ingest_source(
             else:
                 candidate_plan = parse_plan(response.text, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
             _reject_existing_new_page_paths(wiki_root=wiki_root, plan=candidate_plan)
+            verification = verify_plan(
+                candidate_plan,
+                source_text=source_text,
+                section_ids=section_ids,
+                mode=quote_normalize_mode_for_wiki(wiki_root),
+                min_quote_words=min_quote_words_for_wiki(wiki_root),
+            )
+            if not verification.valid:
+                details = "\n  ".join(err.message for err in verification.errors)
+                raise IngestError(f"Quote verification failed:\n  {details}")
         except PlanValidationError as exc:
             last_plan_error = IngestError(f"LLM returned an unparseable plan: {exc}")
         except IngestError as exc:
-            if not _is_recoverable_plan_error(exc):
+            if not _is_recoverable_validation_error(exc):
                 raise
             last_plan_error = exc
         else:
@@ -173,17 +183,6 @@ def ingest_source(
 
     if plan is None:
         raise last_plan_error or IngestError("LLM did not return an ingest plan.")
-
-    verification = verify_plan(
-        plan,
-        source_text=source_text,
-        section_ids=section_ids,
-        mode=quote_normalize_mode_for_wiki(wiki_root),
-        min_quote_words=min_quote_words_for_wiki(wiki_root),
-    )
-    if not verification.valid:
-        details = "\n  ".join(err.message for err in verification.errors)
-        raise IngestError(f"Quote verification failed:\n  {details}")
 
     if plan.is_empty():
         with IngestTransaction(
@@ -490,9 +489,11 @@ def _reject_existing_new_page_paths(*, wiki_root: Path, plan: Plan) -> None:
             )
 
 
-def _is_recoverable_plan_error(exc: IngestError) -> bool:
+def _is_recoverable_validation_error(exc: IngestError) -> bool:
     message = str(exc)
-    return "LLM proposed new page" in message and "already exists" in message
+    return ("LLM proposed new page" in message and "already exists" in message) or message.startswith(
+        "Quote verification failed:"
+    )
 
 
 def _response_summary_for_retry(response: Any) -> str:
