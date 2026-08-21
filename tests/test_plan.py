@@ -77,6 +77,15 @@ def test_parse_plan_rejects_blank_cross_ref_anchor_text() -> None:
         parse_plan_dict(payload)
 
 
+@pytest.mark.unit
+def test_parse_plan_rejects_self_cross_ref() -> None:
+    payload = _valid_payload()
+    payload["cross_refs"][0]["to_page"] = payload["cross_refs"][0]["from_page"]
+
+    with pytest.raises(PlanValidationError, match="distinct semantic pages"):
+        parse_plan_dict(payload)
+
+
 @pytest.mark.parametrize("field", ["from_page", "to_page"])
 @pytest.mark.parametrize("path", ["wiki/index.md", "wiki/log.md"])
 def test_parse_plan_rejects_infrastructure_cross_ref_endpoint(field: str, path: str) -> None:

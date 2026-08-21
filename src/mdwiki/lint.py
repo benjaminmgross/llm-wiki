@@ -125,6 +125,8 @@ def _check_orphans(wiki_root: Path) -> list[LintFinding]:
             resolved_target = resolve_page_link_target(from_page=rel_page, raw_target=target)
             if resolved_target is None or not is_semantic_page_path(resolved_target):
                 continue
+            if resolved_target == rel_page:
+                continue
             resolved = (wiki_root / resolved_target).resolve()
             try:
                 rel = resolved.relative_to(wiki_root.resolve()).as_posix()

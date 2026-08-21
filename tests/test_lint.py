@@ -90,6 +90,17 @@ def test_lint_detects_orphan_pages(wiki: Path) -> None:
 
 
 @pytest.mark.unit
+def test_lint_self_link_does_not_hide_orphan(wiki: Path) -> None:
+    """Only links from another semantic page satisfy the inbound-edge rule."""
+    page_path = "wiki/concepts/self-linked.md"
+    _add_page(wiki, path=page_path, content="# Self-linked\n\n[Self](self-linked.md)")
+
+    report = lint_wiki(wiki)
+
+    assert any(f.kind == "orphan" and f.page_path == page_path for f in report.findings)
+
+
+@pytest.mark.unit
 def test_lint_index_and_log_never_flagged_as_orphans(wiki: Path) -> None:
     """index.md and log.md are infrastructure, not pages."""
     (wiki / "wiki" / "index.md").write_text("# Index")

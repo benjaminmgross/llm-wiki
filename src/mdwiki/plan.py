@@ -218,6 +218,11 @@ def parse_plan_dict(payload: dict[str, Any], *, allowed_kinds: frozenset[str] | 
             if not is_semantic_page_path(endpoint):
                 reason = "an infrastructure page" if endpoint in INFRASTRUCTURE_PAGE_PATHS else "not a supported .md semantic page"
                 raise PlanValidationError(f"cross_refs[].{field}={endpoint!r} is {reason}, not a semantic endpoint.")
+        if cross_ref.from_page == cross_ref.to_page:
+            raise PlanValidationError(
+                "cross_refs[] endpoints must identify distinct semantic pages; "
+                f"from_page and to_page are both {cross_ref.from_page!r}."
+            )
         if not cross_ref.anchor_text.strip():
             raise PlanValidationError("cross_refs[].anchor_text must not be blank.")
         if any(ch < " " for ch in cross_ref.anchor_text) or any(ch in "[]" for ch in cross_ref.anchor_text):
