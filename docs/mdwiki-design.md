@@ -198,7 +198,7 @@ Step by step:
 4. **One LLM call per source** with: all sections + candidate pages + `schema.md` + recent log entries → JSON plan of `{verdict, rationale, updates, new_pages, cross_refs}`. Each claim carries `source_section_id` and a verbatim `quote`. (One call per source — not per section — keeps cost and UX friction low; if quality suffers on long sources, decompose in a later release.)
 5. **Verify** every quote exists in the source text (pure Python, no LLM call). On failure, surface to the user.
 6. Show the plan as a diff. User approves, steers (e.g., "drop the new page, just update X"), or aborts.
-7. Apply edits to `wiki/`; append to `log.md`; insert `events` + `backrefs` rows in `state.db`; mark source `ingested`. All within a single sqlite transaction.
+7. Apply edits to `wiki/`; materialize `cross_refs` as relative Markdown links; append to `log.md`; insert `events` + citation `backrefs` rows in `state.db`; mark source `ingested`. All within a single sqlite transaction.
 
 Periodically run `mdwiki lint` (or `--lint-after`) to catch drift.
 
@@ -224,7 +224,7 @@ flowchart LR
 
 - The parent assigns a source ID once and caps workers at the active session's real agent limit.
 - Workers use only native Codex/Claude delegation. They never invoke provider SDKs, model HTTP endpoints, or local inference, and never mutate wiki/database state.
-- Preparation records the immutable source, configuration-policy, and schema hashes plus all current non-generated page hashes. Apply validates only pages the plan will update or create, so disjoint plans survive unrelated commits.
+- Preparation records the immutable source, configuration-policy, and schema hashes plus all current non-generated page hashes. Apply hash-validates only pages the plan will update or read-modify-write (including cross-reference source pages); target-only cross-reference endpoints require existence under the write lock. Disjoint plans and target-only content changes therefore survive unrelated commits.
 - Existing-page updates use compare-at-apply semantics; new pages require absent-at-analysis and absent-at-apply. A conflict produces a distinct invalidation, no partial writes, and a fresh planning attempt.
 - `IngestTransaction` reserves `.mdwiki/write.lock` before any file operation and holds it through DB commit, source-sidecar mirroring, and log append. This protects shared files even though SQLite WAL alone only serializes database writers.
 - Plan validation rejects duplicate or colliding write targets before apply, so one transaction snapshots each page at most once. Every successful source retains its existing transaction, inverse SQL, file snapshot, event, source state, resume, and undo semantics.
@@ -282,6 +282,13 @@ For an UPDATE, ``content`` is the COMPLETE revised page body — mdwiki replaces
 
 If verdict is anything other than "ingest", updates/new_pages/cross_refs MUST be empty.
 ```
+
+`cross_refs[].from_page` and `to_page` are confined canonical `wiki/` paths.
+Both endpoints must exist after the plan's page writes. mdwiki appends each edge
+to a managed `## Related` block in `from_page` using a relative Markdown link;
+an equivalent existing edge is not duplicated. Cross-reference-only changes use
+the same transaction, page metadata, version-chain, embedding, and undo paths as
+ordinary page updates.
 
 Verification stack (cheapest → most expensive):
 
