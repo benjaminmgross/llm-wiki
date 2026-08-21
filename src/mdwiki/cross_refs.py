@@ -11,7 +11,6 @@ from urllib.parse import quote, unquote
 from mdwiki.plan import CrossRef, Plan
 
 _LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
-_FENCE_RE = re.compile(r"(?ms)^[ \t]*(?:```|~~~).*?^[ \t]*(?:```|~~~)[ \t]*$")
 _BLOCK_START = "<!-- mdwiki:cross-refs -->"
 _BLOCK_END = "<!-- /mdwiki:cross-refs -->"
 _MANAGED_LINK_LINE = r"- \[[^\]\n]+\]\([^()\n]+\)\n"
@@ -75,7 +74,46 @@ def _without_managed_blocks(content: str) -> str:
 
 
 def _without_fenced_code(content: str) -> str:
-    return _FENCE_RE.sub("", content)
+    visible: list[str] = []
+    active: tuple[str, int] | None = None
+    for line in content.splitlines(keepends=True):
+        if active is None:
+            opener = _fence_opener(line)
+            if opener is None:
+                visible.append(line)
+            else:
+                active = opener
+            continue
+        if _is_fence_closer(line, delimiter=active[0], minimum_length=active[1]):
+            active = None
+    return "".join(visible)
+
+
+def _fence_opener(line: str) -> tuple[str, int] | None:
+    stripped = line.rstrip("\r\n")
+    indent = len(stripped) - len(stripped.lstrip(" "))
+    if indent > 3:
+        return None
+    candidate = stripped[indent:]
+    if not candidate or candidate[0] not in {"`", "~"}:
+        return None
+    delimiter = candidate[0]
+    run_length = len(candidate) - len(candidate.lstrip(delimiter))
+    if run_length < 3:
+        return None
+    if delimiter == "`" and "`" in candidate[run_length:]:
+        return None
+    return delimiter, run_length
+
+
+def _is_fence_closer(line: str, *, delimiter: str, minimum_length: int) -> bool:
+    stripped = line.rstrip("\r\n")
+    indent = len(stripped) - len(stripped.lstrip(" "))
+    if indent > 3:
+        return False
+    candidate = stripped[indent:]
+    run_length = len(candidate) - len(candidate.lstrip(delimiter))
+    return run_length >= minimum_length and not candidate[run_length:].strip()
 
 
 def _require_endpoint(*, wiki_root: Path, page_bodies: dict[str, str], path: str) -> None:
