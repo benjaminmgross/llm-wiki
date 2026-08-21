@@ -1,12 +1,13 @@
 ---
 title: mdwiki — Design (v1.2.0)
 created: 2025-04-29
-updated: 2026-08-05
+updated: 2026-08-21
 version: 1.2.0
 status: locked
 tags: [mdwiki, design, llm-wiki, karpathy-pattern, multi-filetype, batch-api, local-providers, profiles, version-chain]
 supersedes: v0 design
 changelog:
+  - post-1.3 (2026-08-21) — Repeatable `init --exclude <gitwildmatch>` patterns are persisted and applied before source registration, then reused by refresh. `init --daily-budget-usd` configures native-batch projected-spend enforcement; `--no-cost-guard` is an explicit bootstrap exemption. Completed native batches write an estimated-cost receipt to `cost_ledger`, and the CLI prints the estimate even with `--yes`.
   - post-1.3 (2026-08-05) — Synchronous ingest now validates quotes inside the corrective-plan loop. Schema errors, existing-page collisions, invalid section ids, and non-verbatim quotes receive up to three corrective attempts before the source is persisted as failed. Validation remains strict; no claim is applied unless the final plan verifies.
   - post-1.3 (2026-07-22) — Provider-capability routing for `init/refresh --bootstrap-batch`: native batch when the configured provider supports it, otherwise an explicit synchronous fallback through that same provider. Added durable per-source failure reasons, failed-source status enumeration, and pending+failed-only retry semantics. No silent provider substitution.
   - 1.2.0 (2026-04-30) — Corpus-aware profiles (`mdwiki init --profile=working-dir|initiative|transcripts|framework`) layered on a Profile + deep-merge config-overlay foundation. New profile contents under `src/mdwiki/profiles/`. `MarkdownChunker` fallback tiers (H2 → H1 → paragraph → sliding-window). `_normalize(mode="transcripts")` strips `[HH:MM:SS]` and `Speaker:` prefixes for transcripts mode. New `TranscriptLoader` (VTT / SRT / Fathom-md). Page version chain (`previous_hash:` SHA-256 in YAML frontmatter, auto-embedded by `transaction.write_file()` for `wiki/` paths). Profile-aware plan validation (`allowed_kinds_for_wiki()`); legacy `pages.kind` CHECK constraint dropped via inline migration. New `mdwiki skill` command (runtime agent guide). Phase-5 quality primitives (`state.db.rejections`, `state.db.cost_ledger`, `mdwiki.rejection_memory`, `mdwiki.cost_guard`, `[unverified-quote]` lint check) — primitives only; ingest-path wiring is v1.2.1. New `scripts/run_canary.py` for real-corpus structural + live scorecards. Schema is forward-compatible; existing wikis auto-migrate on first connect (drops the kind CHECK; adds rejections + cost_ledger tables). 29 new tests, 416 total passing, 0 regressions.
@@ -30,6 +31,8 @@ The historical sections below describe the v1.0 contract and v1.1 Anthropic Batc
 - Each source is applied in its own `IngestTransaction`. Source-local failures are persisted as `failed` with a reason in both `state.db` and `raw/.sources.json`; `mdwiki status` enumerates them.
 - `ingest --pending` and both bootstrap paths select `pending` plus `failed`, so reruns target only unfinished sources.
 - Synchronous ingest makes up to three corrective attempts when a plan is malformed, calls an existing page new, cites an invalid section, or uses a non-verbatim quote. The final plan must still pass every local validation gate before any transaction begins.
+- `init --exclude <glob>` accepts repeatable gitwildmatch patterns, persists them to `[exclude].globs`, and applies them before source copying or registration; refresh applies the same persisted patterns.
+- Native batch compares the provider estimate plus today's ledger spend to `[cost_guard].daily_budget_usd` before submission. `--no-cost-guard` is an explicit one-run override for approved bootstrap spend. Completed native batches record actual reported token counts with the provider's pre-submission USD estimate and print a receipt.
 
 ## UX (the happy path)
 
@@ -131,7 +134,7 @@ mdwiki will never write to `CLAUDE.md` and will never assume one exists.
 `mdwiki init` is **non-destructive and idempotent**:
 
 1. Create `.mdwiki/` with default config, empty sqlite schema, and a starter `schema.md`.
-2. Walk the folder (respecting `.gitignore` + config excludes) and **register** every loadable source as `pending`: hash, mtime, original_path, converted/copied to `raw/`.
+2. Walk the folder (respecting `.gitignore` + repeatable `--exclude` patterns persisted to config) and **register** every allowed loadable source as `pending`: hash, mtime, original_path, converted/copied to `raw/`.
 3. Refuse to init if a parent already contains `.mdwiki/` — single wiki per folder, like git. (No nested wikis. Use separate folders for separate wikis.)
 4. Print a summary; **ingest nothing**.
 
@@ -366,6 +369,8 @@ Calibrated against the v1.0.0 test corpus: `~/Desktop/Clippings`, 101 markdown f
 
 These numbers will get re-validated by the implementation; bootstrap especially is sensitive to chunk count.
 
+For governed native-batch operation, `init --daily-budget-usd <usd>` persists a cap. The estimated batch cost is checked against remaining daily budget before provider submission. A deliberately exempt cold-start uses `--no-cost-guard`; the run still prints and stores its estimated-cost receipt. The ledger currently covers native batch only, so synchronous ingest, query, synthesis, and vision calls must not be represented as cost-guarded until their provider-side wiring lands.
+
 ## Test approach
 
 v1.0.0 development uses two corpora:
@@ -381,8 +386,8 @@ Each implementation phase ends in a manual-testing gate where the user runs conc
 
 | Command | Purpose |
 |---|---|
-| `mdwiki init [--bootstrap\|--bootstrap-batch]` | Scaffold, register sources, and optionally ingest through the configured provider |
-| `mdwiki refresh [--bootstrap\|--bootstrap-batch]` | Register new sources and optionally ingest outstanding pending/failed sources |
+| `mdwiki init [--exclude <glob>] [--daily-budget-usd <usd>] [--bootstrap\|--bootstrap-batch]` | Persist exclusions and the optional native-batch budget, register only allowed sources, and optionally ingest through the configured provider |
+| `mdwiki refresh [--bootstrap\|--bootstrap-batch] [--no-cost-guard]` | Register new allowed sources and optionally ingest outstanding pending/failed sources; native batch enforces projected spend unless explicitly exempted |
 | `mdwiki ingest [<file>\|--all\|--pending] [--yes]` | Incremental ingest; `--pending` includes retryable failures |
 | `mdwiki query "<q>" [--file]` | Search + synthesize, optionally file findings as a new page |
 | `mdwiki lint [--fix]` | Contradictions, orphans, stale, focus, headers, gaps |

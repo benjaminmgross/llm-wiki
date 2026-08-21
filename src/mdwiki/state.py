@@ -109,8 +109,8 @@ CREATE TABLE IF NOT EXISTS rejections (
 CREATE INDEX IF NOT EXISTS idx_rejections_source ON rejections(source_id);
 CREATE INDEX IF NOT EXISTS idx_rejections_ts ON rejections(ts);
 
--- Phase 5: cost ledger. Every LLM call appends a row; the daily budget cap
--- (config.toml [cost_guard].daily_budget_usd) is enforced by check_budget().
+-- Native batch bootstrap appends an estimated-upper-bound receipt; its daily
+-- cap (config.toml [cost_guard].daily_budget_usd) is enforced by check_budget().
 CREATE TABLE IF NOT EXISTS cost_ledger (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          REAL NOT NULL,

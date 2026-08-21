@@ -59,11 +59,12 @@ def refresh_wiki(target: Path) -> InitResult:
         raw_dir=raw_dir,
         db_path=wiki_dir / "state.db",
         registry=registry,
+        exclude_globs=list(config.get("exclude", {}).get("globs", [])),
     )
 
     suffix_parts: list[str] = []
     if skipped:
-        suffix_parts.append(f"skipped {skipped} via .gitignore")
+        suffix_parts.append(f"skipped {skipped} via ignore rules")
     if dedup_skipped:
         suffix_parts.append(f"skipped {dedup_skipped} already-registered")
     if empty_load_skipped:

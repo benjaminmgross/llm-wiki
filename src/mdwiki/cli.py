@@ -8,6 +8,7 @@ embedded contexts.
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -16,6 +17,7 @@ import anthropic
 import openai
 
 from mdwiki import __version__
+from mdwiki.cost_guard import CostBudgetExceededError
 from mdwiki.discover import WikiNotFound, find_wiki
 from mdwiki.doctor import format_report, run_doctor
 from mdwiki.ingest import IngestError, ingest_many, ingest_source
@@ -53,6 +55,17 @@ _FATAL_OPENAI_ERRORS: tuple[type[Exception], ...] = (
     openai.APIStatusError,
 )
 _FATAL_API_ERRORS: tuple[type[Exception], ...] = _FATAL_ANTHROPIC_ERRORS + _FATAL_OPENAI_ERRORS
+
+
+def _positive_float(value: str) -> float:
+    """Parse a strictly positive float for argparse options."""
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be finite and greater than zero")
+    return parsed
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -127,6 +140,23 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=list_profile_names(),
         help="Corpus-aware profile (default: working-dir). Determines the seed schema and config overlay.",
     )
+    init_p.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="Gitwildmatch source exclusion persisted to config; repeat for multiple patterns.",
+    )
+    init_p.add_argument(
+        "--daily-budget-usd",
+        type=_positive_float,
+        help="Persist a positive daily native-batch bootstrap spend cap in USD.",
+    )
+    init_p.add_argument(
+        "--no-cost-guard",
+        action="store_true",
+        help="Explicitly bypass the native-batch bootstrap spend cap for this run.",
+    )
     init_p.set_defaults(_handler=_cmd_init)
 
     refresh_p = subparsers.add_parser(
@@ -160,6 +190,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "-y",
         action="store_true",
         help="With --bootstrap-batch, skip the cost-estimate confirmation prompt (no effect with --bootstrap).",
+    )
+    refresh_p.add_argument(
+        "--no-cost-guard",
+        action="store_true",
+        help="Explicitly bypass the native-batch bootstrap spend cap for this run.",
     )
     refresh_p.set_defaults(_handler=_cmd_refresh)
 
@@ -247,7 +282,12 @@ def _build_parser() -> argparse.ArgumentParser:
 def _cmd_init(args: argparse.Namespace) -> int:
     """Handler for ``mdwiki init [--profile=<name>] [--bootstrap | --bootstrap-batch]``."""
     try:
-        result = init_wiki(args.path, profile=args.profile)
+        result = init_wiki(
+            args.path,
+            profile=args.profile,
+            exclude_globs=args.exclude,
+            daily_budget_usd=args.daily_budget_usd,
+        )
     except NestedWikiError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -263,7 +303,10 @@ def _cmd_init(args: argparse.Namespace) -> int:
         return 0
 
     if args.bootstrap_batch:
-        return _run_bootstrap_batch(args.path.resolve(), yes=args.yes)
+        bootstrap_kwargs = {"yes": args.yes}
+        if args.no_cost_guard:
+            bootstrap_kwargs["cost_guard_override"] = True
+        return _run_bootstrap_batch(args.path.resolve(), **bootstrap_kwargs)
 
     if not args.bootstrap:
         return 0
@@ -271,7 +314,12 @@ def _cmd_init(args: argparse.Namespace) -> int:
     return _run_bootstrap_sync(args.path.resolve(), files_registered=result.files_registered)
 
 
-def _run_bootstrap_batch(wiki_root: Path, *, yes: bool = False) -> int:
+def _run_bootstrap_batch(
+    wiki_root: Path,
+    *,
+    yes: bool = False,
+    cost_guard_override: bool = False,
+) -> int:
     """Use configured-provider native batch or an explicit same-provider sync fallback."""
     from mdwiki.bootstrap import bootstrap_batch
 
@@ -280,6 +328,7 @@ def _run_bootstrap_batch(wiki_root: Path, *, yes: bool = False) -> int:
         result = bootstrap_batch(
             wiki_root,
             yes=yes,
+            cost_guard_override=cost_guard_override,
             on_status=lambda status, ok, total: print(f"  [batch status: {status} — {ok}/{total} succeeded]"),
             on_progress=lambda i, total, cid: print(f"  [{i}/{total}] applying {cid}..."),
             on_fallback=lambda provider: print(
@@ -287,7 +336,7 @@ def _run_bootstrap_batch(wiki_root: Path, *, yes: bool = False) -> int:
                 "using the same provider via synchronous ingest fallback.\n"
             ),
         )
-    except (MissingAPIKeyError, UnknownProviderError) as exc:
+    except (MissingAPIKeyError, UnknownProviderError, CostBudgetExceededError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except ValueError as exc:
@@ -310,6 +359,12 @@ def _run_bootstrap_batch(wiki_root: Path, *, yes: bool = False) -> int:
         print("Bootstrap ingest found no sources to process (or native batch submission was declined).")
         return 0
     mode_label = "native batch" if result.mode == "native-batch" else "synchronous ingest fallback"
+    if result.mode == "native-batch":
+        estimate = result.cost_estimate
+        print(
+            f"Cost receipt (estimated upper bound): ${estimate.usd_total:.4f} for {estimate.requests} request(s), "
+            f"{estimate.input_tokens:,} input tokens, {estimate.output_tokens_max:,} max output tokens."
+        )
     print(
         f"\nBootstrap {mode_label} done with {result.provider}: applied {result.applied} of {result.submitted} "
         f"({result.failed} failed, {result.skipped} verdict-skip)."
@@ -394,7 +449,10 @@ def _cmd_refresh(args: argparse.Namespace) -> int:
     # intent. Both ``ingest_many(scope='pending')`` and ``bootstrap_batch``
     # handle the empty-pending case gracefully (no-op + exit 0).
     if args.bootstrap_batch:
-        return _run_bootstrap_batch(wiki_root, yes=args.yes)
+        bootstrap_kwargs = {"yes": args.yes}
+        if args.no_cost_guard:
+            bootstrap_kwargs["cost_guard_override"] = True
+        return _run_bootstrap_batch(wiki_root, **bootstrap_kwargs)
 
     if args.bootstrap:
         return _run_bootstrap_sync(wiki_root, files_registered=result.files_registered)

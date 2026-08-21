@@ -36,6 +36,57 @@ def test_init_subcommand_creates_wiki_in_cwd(
 
 
 @pytest.mark.unit
+def test_init_subcommand_accepts_repeatable_exclude_globs(tmp_path: Path) -> None:
+    import tomllib
+
+    from mdwiki.state import connect
+
+    (tmp_path / "allowed.md").write_text("# Allowed")
+    (tmp_path / "script.py").write_text("print('excluded')")
+    excluded_dir = tmp_path / "kbs"
+    excluded_dir.mkdir()
+    (excluded_dir / "duplicate.md").write_text("# Excluded")
+
+    exit_code = main(["init", str(tmp_path), "--exclude", "kbs/**", "--exclude", "**/*.py"])
+
+    assert exit_code == 0
+    config = tomllib.loads((tmp_path / ".mdwiki" / "config.toml").read_text())
+    assert config["exclude"]["globs"] == ["kbs/**", "**/*.py"]
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        paths = {row["original_path"] for row in conn.execute("SELECT original_path FROM sources")}
+    assert paths == {"allowed.md"}
+
+
+@pytest.mark.unit
+def test_init_subcommand_persists_daily_budget(tmp_path: Path) -> None:
+    import tomllib
+
+    (tmp_path / "allowed.md").write_text("# Allowed")
+
+    exit_code = main(["init", str(tmp_path), "--daily-budget-usd", "2"])
+
+    assert exit_code == 0
+    config = tomllib.loads((tmp_path / ".mdwiki" / "config.toml").read_text())
+    assert config["cost_guard"]["daily_budget_usd"] == 2.0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("budget", ["0", "-1", "nan", "inf"])
+def test_init_subcommand_rejects_invalid_daily_budget(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    budget: str,
+) -> None:
+    (tmp_path / "allowed.md").write_text("# Allowed")
+
+    exit_code = main(["init", str(tmp_path), "--daily-budget-usd", budget])
+
+    assert exit_code == 2
+    assert "greater than zero" in capsys.readouterr().err
+    assert not (tmp_path / ".mdwiki").exists()
+
+
+@pytest.mark.unit
 def test_init_bootstrap_chains_ingest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -97,6 +148,60 @@ def test_init_bootstrap_returns_nonzero_on_partial_failure(
     )
 
     assert main(["init", "--bootstrap"]) == 1
+
+
+@pytest.mark.unit
+def test_init_bootstrap_batch_prints_cost_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mocker: MockerFixture,
+) -> None:
+    from mdwiki.bootstrap import BootstrapResult
+    from mdwiki.llm.base import BatchCostEstimate
+
+    (tmp_path / "a.md").write_text("# A")
+    monkeypatch.chdir(tmp_path)
+    mocker.patch(
+        "mdwiki.bootstrap.bootstrap_batch",
+        return_value=BootstrapResult(
+            submitted=1,
+            applied=1,
+            failed=0,
+            skipped=0,
+            cost_estimate=BatchCostEstimate(
+                requests=1,
+                input_tokens=1200,
+                output_tokens_max=16000,
+                usd_total=0.1234,
+            ),
+            batch_id="batch-receipt",
+            provider="anthropic",
+        ),
+    )
+
+    exit_code = main(["init", "--bootstrap-batch", "--yes"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "$0.1234" in out
+    assert "1,200 input tokens" in out
+    assert "16,000 max output tokens" in out
+
+
+@pytest.mark.unit
+def test_init_bootstrap_batch_forwards_cost_guard_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
+) -> None:
+    (tmp_path / "a.md").write_text("# A")
+    monkeypatch.chdir(tmp_path)
+    batch_mock = mocker.patch("mdwiki.cli._run_bootstrap_batch", return_value=0)
+
+    assert main(["init", "--bootstrap-batch", "--yes", "--no-cost-guard"]) == 0
+
+    batch_mock.assert_called_once_with(tmp_path.resolve(), yes=True, cost_guard_override=True)
 
 
 @pytest.mark.unit
@@ -576,13 +681,13 @@ def test_refresh_bootstrap_batch_chains_submission(
     batch_mock = mocker.patch("mdwiki.cli._run_bootstrap_batch", return_value=0)
 
     # Act
-    exit_code = main(["refresh", "--bootstrap-batch", "--yes"])
+    exit_code = main(["refresh", "--bootstrap-batch", "--yes", "--no-cost-guard"])
 
     # Assert — _run_bootstrap_batch was called with the resolved wiki root + yes=True
     assert exit_code == 0
     batch_mock.assert_called_once()
     call_kwargs = batch_mock.call_args.kwargs
-    assert call_kwargs == {"yes": True}
+    assert call_kwargs == {"yes": True, "cost_guard_override": True}
     (positional_root,) = batch_mock.call_args.args
     assert positional_root == tmp_path.resolve()
 

@@ -1,12 +1,4 @@
-"""Tests for ``mdwiki.cost_guard`` — daily-USD spend tracking + budget enforcement.
-
-Every LLM call records token counts and USD cost estimate to ``state.db.cost_ledger``.
-``check_budget`` raises ``CostBudgetExceededError`` when today's spend exceeds the
-configured daily cap.
-
-Phase 5 ships the primitives. CLI flag (``--no-cost-guard``) and provider-side
-auto-recording wiring are documented follow-ups.
-"""
+"""Tests for native-batch receipt tracking and daily-budget enforcement."""
 
 from __future__ import annotations
 
@@ -95,6 +87,31 @@ def test_check_budget_raises_over_cap(db_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_check_budget_raises_when_spend_equals_cap(db_path: Path) -> None:
+    with connect(db_path) as conn:
+        record_cost(conn=conn, operation="ingest", cost_usd=1.00)
+        conn.commit()
+
+        with pytest.raises(CostBudgetExceededError):
+            check_budget(conn=conn, daily_budget_usd=1.00, override=False)
+
+
+@pytest.mark.unit
+def test_check_budget_raises_when_spend_plus_projection_exceeds_cap(db_path: Path) -> None:
+    with connect(db_path) as conn:
+        record_cost(conn=conn, operation="bootstrap_batch_estimate", cost_usd=0.75)
+        conn.commit()
+
+        with pytest.raises(CostBudgetExceededError, match="projected total"):
+            check_budget(
+                conn=conn,
+                daily_budget_usd=1.00,
+                override=False,
+                projected_cost_usd=0.30,
+            )
+
+
+@pytest.mark.unit
 def test_check_budget_override_bypasses_cap(db_path: Path) -> None:
     """``override=True`` lets the caller proceed past the cap (the ``--no-cost-guard`` flag)."""
     with connect(db_path) as conn:
@@ -113,3 +130,22 @@ def test_check_budget_no_cap_configured_is_silent(db_path: Path) -> None:
         conn.commit()
 
         check_budget(conn=conn, daily_budget_usd=None, override=False)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("daily_budget_usd", "projected_cost_usd"),
+    [(float("nan"), 0.1), (float("inf"), 0.1), (1.0, float("nan")), (1.0, float("inf"))],
+)
+def test_check_budget_rejects_nonfinite_values(
+    db_path: Path,
+    daily_budget_usd: float,
+    projected_cost_usd: float,
+) -> None:
+    with connect(db_path) as conn, pytest.raises(CostBudgetExceededError, match="finite"):
+        check_budget(
+            conn=conn,
+            daily_budget_usd=daily_budget_usd,
+            override=False,
+            projected_cost_usd=projected_cost_usd,
+        )

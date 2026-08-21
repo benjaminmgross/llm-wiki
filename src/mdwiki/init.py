@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -187,7 +188,13 @@ class InitResult:
     message: str
 
 
-def init_wiki(target: Path, *, profile: str = "working-dir") -> InitResult:
+def init_wiki(
+    target: Path,
+    *,
+    profile: str = "working-dir",
+    exclude_globs: list[str] | None = None,
+    daily_budget_usd: float | None = None,
+) -> InitResult:
     """Scaffold a wiki at ``target`` and register every markdown source as pending.
 
     Parameters
@@ -198,6 +205,11 @@ def init_wiki(target: Path, *, profile: str = "working-dir") -> InitResult:
         Corpus-aware profile name. Determines the seed schema and config
         overlay written to ``.mdwiki/``. ``"working-dir"`` is the legacy
         behavior (DEFAULT_SCHEMA + DEFAULT_CONFIG verbatim).
+    exclude_globs : list[str] or None, default=None
+        Gitwildmatch patterns persisted to ``[exclude].globs`` and applied
+        before any source is registered.
+    daily_budget_usd : float or None, default=None
+        Optional daily native-batch bootstrap spend cap persisted to ``[cost_guard]``.
 
     Returns
     -------
@@ -214,6 +226,9 @@ def init_wiki(target: Path, *, profile: str = "working-dir") -> InitResult:
     # Imported here to avoid a circular import: profiles imports DEFAULT_SCHEMA
     # from this module to define the working-dir profile.
     from mdwiki.profiles import deep_merge, load_profile
+
+    if daily_budget_usd is not None and (not math.isfinite(daily_budget_usd) or daily_budget_usd <= 0):
+        raise ValueError("daily_budget_usd must be finite and greater than zero")
 
     loaded_profile = load_profile(name=profile)
 
@@ -243,6 +258,13 @@ def init_wiki(target: Path, *, profile: str = "working-dir") -> InitResult:
     # alongside the defaults. Working-dir's overlay is empty, so the merged dict
     # equals DEFAULT_CONFIG byte-for-byte after toml round-trip.
     merged_config = deep_merge(base=DEFAULT_CONFIG, overlay=loaded_profile.config_overlay)
+    configured_excludes = list(merged_config.get("exclude", {}).get("globs", []))
+    for pattern in exclude_globs or []:
+        if pattern not in configured_excludes:
+            configured_excludes.append(pattern)
+    merged_config.setdefault("exclude", {})["globs"] = configured_excludes
+    if daily_budget_usd is not None:
+        merged_config.setdefault("cost_guard", {})["daily_budget_usd"] = daily_budget_usd
 
     init_db(wiki_dir / "state.db")
     (wiki_dir / "config.toml").write_bytes(tomli_w.dumps(merged_config).encode("utf-8"))
@@ -256,12 +278,16 @@ def init_wiki(target: Path, *, profile: str = "working-dir") -> InitResult:
     registry = build_registry(config=merged_config, provider=None)
 
     registered, skipped, dedup_skipped, empty_load_skipped = _register_sources(
-        target=target, raw_dir=raw_dir, db_path=wiki_dir / "state.db", registry=registry
+        target=target,
+        raw_dir=raw_dir,
+        db_path=wiki_dir / "state.db",
+        registry=registry,
+        exclude_globs=configured_excludes,
     )
 
     suffix_parts: list[str] = []
     if skipped:
-        suffix_parts.append(f"skipped {skipped} via .gitignore")
+        suffix_parts.append(f"skipped {skipped} via ignore rules")
     if dedup_skipped:
         suffix_parts.append(f"skipped {dedup_skipped} duplicate-content")
     if empty_load_skipped:
@@ -302,6 +328,7 @@ def _register_sources(
     raw_dir: Path,
     db_path: Path,
     registry: tuple[Loader, ...],
+    exclude_globs: list[str] | None = None,
 ) -> tuple[int, int, int, int]:
     """Walk ``target``, register every loadable file as a pending source.
 
@@ -312,6 +339,8 @@ def _register_sources(
         uses this in-memory registry rather than calling ``get_loader_for``,
         which would re-parse ``.mdwiki/config.toml`` per file (O(N) TOML
         parses for a corpus of N files).
+    exclude_globs : list[str] or None, default=None
+        Additional gitwildmatch patterns from ``[exclude].globs``.
 
     Returns
     -------
@@ -328,7 +357,7 @@ def _register_sources(
     """
     import sys
 
-    spec = _load_gitignore(target)
+    ignore_specs = _load_ignore_specs(target, exclude_globs=exclude_globs or [])
     source_paths = sorted(_iter_loadable_files(target, registry=registry))
     registered = 0
     skipped = 0
@@ -359,7 +388,7 @@ def _register_sources(
         for source_path in source_paths:
             try:
                 rel_posix = source_path.relative_to(target).as_posix()
-                if spec is not None and spec.match_file(rel_posix):
+                if any(spec.match_file(rel_posix) for spec in ignore_specs):
                     skipped += 1
                     continue
 
@@ -478,12 +507,19 @@ def _resolve_loader(path: Path, *, registry: tuple[Loader, ...]) -> Loader:
     raise UnsupportedFiletypeError(f"No loader registered for: {path}")
 
 
-def _load_gitignore(target: Path) -> pathspec.PathSpec | None:
-    """Parse ``target/.gitignore`` if present; return ``None`` otherwise."""
+def _load_ignore_specs(target: Path, *, exclude_globs: list[str]) -> tuple[pathspec.PathSpec, ...]:
+    """Load source and configured excludes as independent privacy boundaries.
+
+    Keeping the specs separate prevents a configured negation from re-including
+    a path that the corpus owner's ``.gitignore`` excludes.
+    """
     gitignore_path = target / ".gitignore"
-    if not gitignore_path.is_file():
-        return None
-    return pathspec.PathSpec.from_lines("gitwildmatch", gitignore_path.read_text().splitlines())
+    specs: list[pathspec.PathSpec] = []
+    if gitignore_path.is_file():
+        specs.append(pathspec.PathSpec.from_lines("gitwildmatch", gitignore_path.read_text().splitlines()))
+    if exclude_globs:
+        specs.append(pathspec.PathSpec.from_lines("gitwildmatch", exclude_globs))
+    return tuple(specs)
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")

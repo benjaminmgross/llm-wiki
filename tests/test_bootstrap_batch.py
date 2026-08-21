@@ -14,6 +14,7 @@ import pytest
 from pytest_mock import MockerFixture
 
 from mdwiki.bootstrap import BootstrapResult, bootstrap_batch
+from mdwiki.cost_guard import CostBudgetExceededError
 from mdwiki.init import init_wiki
 from mdwiki.llm.base import (
     BatchCostEstimate,
@@ -298,6 +299,77 @@ def test_bootstrap_batch_submits_one_batch_per_pending_source(tmp_path: Path, mo
     assert result.submitted == 3
     assert result.applied == 3
     assert result.failed == 0
+
+
+@pytest.mark.unit
+def test_bootstrap_batch_blocks_when_estimate_exceeds_daily_budget(tmp_path: Path) -> None:
+    wiki = _three_source_corpus(tmp_path)
+    config_path = wiki / ".mdwiki" / "config.toml"
+    config_path.write_text(config_path.read_text() + "\n[cost_guard]\ndaily_budget_usd = 0.005\n")
+    provider = NonAnthropicBatchProvider([])
+
+    with pytest.raises(CostBudgetExceededError, match="projected"):
+        bootstrap_batch(
+            wiki,
+            yes=True,
+            provider=provider,
+            embedder=StubEmbedder(),  # type: ignore[arg-type]
+            poll_interval=0.0,
+        )
+
+    assert provider.requests == []
+    with connect(wiki / ".mdwiki" / "state.db") as conn:
+        assert conn.execute("SELECT COUNT(*) FROM cost_ledger").fetchone()[0] == 0
+
+
+@pytest.mark.unit
+def test_bootstrap_batch_override_records_estimated_cost_receipt(tmp_path: Path) -> None:
+    wiki = _three_source_corpus(tmp_path)
+    config_path = wiki / ".mdwiki" / "config.toml"
+    config_path.write_text(config_path.read_text() + "\n[cost_guard]\ndaily_budget_usd = 0.005\n")
+    with connect(wiki / ".mdwiki" / "state.db") as conn:
+        by_path = {
+            row["original_path"]: row["id"]
+            for row in conn.execute("SELECT id, original_path FROM sources ORDER BY original_path")
+        }
+    provider = NonAnthropicBatchProvider(
+        [
+            BatchResult(
+                custom_id=by_path["alpha.md"],
+                text=_plan_for_source("alpha-receipt", "alpha.md", "alpha discusses attention sinks for long contexts"),
+                input_tokens=100,
+                output_tokens=20,
+            ),
+            BatchResult(
+                custom_id=by_path["beta.md"],
+                text=_plan_for_source("beta-receipt", "beta.md", "beta covers retrieval augmented generation patterns"),
+                input_tokens=110,
+                output_tokens=25,
+            ),
+            BatchResult(
+                custom_id=by_path["gamma.md"],
+                text=_plan_for_source("gamma-receipt", "gamma.md", "gamma surveys quantization methods for inference"),
+                input_tokens=120,
+                output_tokens=30,
+            ),
+        ]
+    )
+
+    result = bootstrap_batch(
+        wiki,
+        yes=True,
+        cost_guard_override=True,
+        provider=provider,
+        embedder=StubEmbedder(),  # type: ignore[arg-type]
+        poll_interval=0.0,
+    )
+
+    assert result.cost_estimate.usd_total == pytest.approx(0.01)
+    with connect(wiki / ".mdwiki" / "state.db") as conn:
+        receipt = conn.execute(
+            "SELECT operation, tokens_in, tokens_out, cost_usd FROM cost_ledger"
+        ).fetchone()
+    assert tuple(receipt) == ("bootstrap_batch_estimate", 330, 75, pytest.approx(0.01))
 
 
 @pytest.mark.unit

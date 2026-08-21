@@ -13,6 +13,8 @@ Built on [Karpathy's llm-wiki pattern](https://gist.github.com/karpathy/442a6bf5
 - **Provider-aware bootstrap ingest** — `init/refresh --bootstrap-batch` honors `.mdwiki/config.toml`. Providers with native batch support use it; other providers explicitly fall back to isolated synchronous ingest with the same backend. There is no silent Anthropic switch.
 - **Durable partial-failure reporting** — failed sources retain their reason in `state.db` and `raw/.sources.json`; `mdwiki status` enumerates them and the next `--pending`/bootstrap run retries only pending or failed sources.
 - **Sidecar merge fix** — `_register_sources` now merges with the existing `raw/.sources.json` instead of overwriting, so `mdwiki rebuild` continues to work correctly after a refresh.
+- **Pre-registration source scoping** — repeatable `mdwiki init --exclude <gitwildmatch>` patterns are persisted to `[exclude].globs` and applied before files enter `raw/`; refresh reuses the same rules.
+- **Native-batch cost guard and receipts** — `--daily-budget-usd` persists a conservative cap, bootstrap rejects a projected over-budget batch before submission, and successful native batches write an estimated-cost ledger row and print a receipt. Use `--no-cost-guard` only for an explicitly approved bootstrap exemption.
 
 **v1.2.0 highlights:**
 
@@ -23,9 +25,9 @@ Built on [Karpathy's llm-wiki pattern](https://gist.github.com/karpathy/442a6bf5
 - **Page version chain** — every wiki/ page write embeds `previous_hash:` (SHA-256 of the prior body) in YAML frontmatter, building a tamper-evident chain. Inspired by [demarkus](https://github.com/latebit-io/demarkus).
 - **Fallback chunker tiers** — `MarkdownChunker` now falls back from H2 → H1 → paragraph → sliding-window when no H2 is present. Transcripts and unstructured md no longer return zero sections.
 - **`mdwiki skill`** — runtime command that prints the wiki's `.mdwiki/schema.md` plus an embedded agent how-to guide to stdout, so a Claude Code instance opening a wiki folder can `mdwiki skill` for inline docs.
-- **Quality compounding primitives** (state.db tables + modules ready; full integration into ingest hot path is staged for v1.2.1):
+- **Quality compounding primitives:**
   - `state.db.rejections` + `mdwiki.rejection_memory` — per-source rejection logging for prompt re-injection
-  - `state.db.cost_ledger` + `mdwiki.cost_guard` — daily-USD spend tracking + budget enforcement
+  - `state.db.cost_ledger` + `mdwiki.cost_guard` — native-batch projected-spend enforcement and estimated-cost receipts; other LLM paths remain follow-up wiring
   - `[unverified-quote]` lint check flags any wiki page containing the marker
 - **`canary` runner** — `scripts/run_canary.py` exercises mdwiki against a real folder and emits a Karpathy-style scorecard (page counts by kind, cross-ref density, coverage, backref count). Free structural mode + opt-in `--live` LLM mode.
 
@@ -63,6 +65,8 @@ Point it at any folder of mixed sources:
 cd ~/notes/research                  # any folder with .md / .pdf / .docx / .csv / .txt / code
 mdwiki init --profile=working-dir    # scaffold .mdwiki/, register sources, ingest nothing yet
                                      # profiles: working-dir | initiative | transcripts | framework
+                                     # use repeatable --exclude globs to scope before registration
+                                     # add --daily-budget-usd 2 for a conservative native-batch cap
 mdwiki status                        # see "412 pending sources"
 mdwiki doctor                        # verify provider + API ping
 mdwiki ingest one-file.md            # interactive single-source ingest
@@ -80,6 +84,8 @@ Or skip the steps and bootstrap in one shot:
 ```bash
 mdwiki init --bootstrap                          # init + ingest every pending source with --yes
 mdwiki init --profile=initiative --bootstrap     # same, with a corpus-aware profile
+mdwiki init --profile=framework --exclude 'generated/**' --daily-budget-usd 2
+mdwiki refresh --bootstrap-batch --yes --no-cost-guard  # explicit bootstrap-only budget exemption
 ```
 
 ## What gets created
@@ -150,8 +156,8 @@ Refresh is content-hash dedup'd against `state.db`, so re-running it is safe and
 
 | Command | Purpose |
 |---|---|
-| `mdwiki init [path] [--profile=<name>] [--bootstrap \| --bootstrap-batch]` | Scaffold `.mdwiki/`, register every loadable file as pending. `--profile` selects a corpus-aware seed schema (default: `working-dir`). `--bootstrap` chains sync `ingest --pending --yes`; `--bootstrap-batch` uses configured-provider native batch when supported and an explicit same-provider sync fallback otherwise |
-| `mdwiki refresh [path] [--bootstrap \| --bootstrap-batch]` | Re-scan an initialized wiki for newly-added files, then optionally ingest outstanding pending/failed sources. `path` defaults to the current directory and may point anywhere inside the wiki tree. `--bootstrap-batch` never changes the configured provider. Ideal for daily cron / scheduled-agent workflows |
+| `mdwiki init [path] [--profile=<name>] [--exclude <glob>] [--daily-budget-usd <usd>] [--bootstrap \| --bootstrap-batch]` | Scaffold `.mdwiki/`, persist source exclusions and the optional native-batch budget, then register only allowed files as pending. `--exclude` is repeatable. `--bootstrap` chains sync `ingest --pending --yes`; `--bootstrap-batch` uses configured-provider native batch when supported and an explicit same-provider sync fallback otherwise |
+| `mdwiki refresh [path] [--bootstrap \| --bootstrap-batch] [--no-cost-guard]` | Re-scan an initialized wiki using the persisted exclusions, then optionally ingest outstanding pending/failed sources. Native batch enforces the configured projected-spend cap and prints a receipt; `--no-cost-guard` is an explicit one-run exemption. `--bootstrap-batch` never changes the configured provider |
 | `mdwiki status` | Pending/failed/ingested counts, enumerated failed-source reasons, page counts by kind, recent events, last lint |
 | `mdwiki source <hash-prefix>` | Inspect one registered source — original path, raw path, dependent pages |
 | `mdwiki rebuild` | Restore the `sources` table from `raw/.sources.json` after `state.db` deletion |

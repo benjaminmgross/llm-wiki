@@ -78,6 +78,50 @@ def test_fresh_init_respects_gitignore(fresh_target: Path) -> None:
 
 
 @pytest.mark.unit
+def test_configured_negation_cannot_reinclude_gitignored_source(tmp_path: Path) -> None:
+    private = tmp_path / "private"
+    private.mkdir()
+    (private / "allowed.md").write_text("# Still private")
+    (tmp_path / ".gitignore").write_text("private/**\n")
+
+    result = init_wiki(tmp_path, exclude_globs=["!private/allowed.md"])
+
+    assert result.files_registered == 0
+
+
+@pytest.mark.unit
+def test_init_exclude_globs_are_persisted_and_applied_before_registration(tmp_path: Path) -> None:
+    (tmp_path / "allowed.md").write_text("# Allowed")
+    (tmp_path / "script.py").write_text("print('excluded')")
+    excluded_dir = tmp_path / "kbs"
+    excluded_dir.mkdir()
+    (excluded_dir / "duplicate.md").write_text("# Excluded")
+
+    result = init_wiki(tmp_path, exclude_globs=["kbs/**", "**/*.py"])
+
+    assert result.files_registered == 1
+    config = tomllib.loads((tmp_path / ".mdwiki" / "config.toml").read_text())
+    assert config["exclude"]["globs"] == ["kbs/**", "**/*.py"]
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        paths = {row["original_path"] for row in conn.execute("SELECT original_path FROM sources")}
+    assert paths == {"allowed.md"}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("budget", [0, -1, float("nan"), float("inf")])
+def test_init_rejects_invalid_daily_budget_before_writing_files(tmp_path: Path, budget: float) -> None:
+    """An invalid cap must fail without leaving a partially initialized wiki."""
+    (tmp_path / "doc.md").write_text("# Doc\n")
+
+    with pytest.raises(ValueError, match="greater than zero"):
+        init_wiki(tmp_path, daily_budget_usd=budget)
+
+    assert not (tmp_path / ".mdwiki").exists()
+    assert not (tmp_path / "raw").exists()
+    assert not (tmp_path / "wiki").exists()
+
+
+@pytest.mark.unit
 def test_fresh_init_does_not_register_mdwiki_internals(fresh_target: Path) -> None:
     """Fresh init should not register .mdwiki/schema.md (or anything else under .mdwiki/) as a source."""
     init_wiki(fresh_target)

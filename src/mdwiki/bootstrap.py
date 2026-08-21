@@ -7,12 +7,14 @@ source remains an isolated transaction; failures are persisted for status and re
 
 from __future__ import annotations
 
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from mdwiki.chunker import MarkdownChunker
+from mdwiki.cost_guard import check_budget, record_cost
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.embedder import Embedder, get_default_embedder
 from mdwiki.embeddings import serialize
@@ -96,6 +98,7 @@ def bootstrap_batch(
     wiki_root: Path,
     *,
     yes: bool = False,
+    cost_guard_override: bool = False,
     provider: Provider | None = None,
     embedder: Embedder | None = None,
     poll_interval: float = 60.0,
@@ -113,6 +116,8 @@ def bootstrap_batch(
         Folder containing ``.mdwiki/``.
     yes : bool
         Skip the cost-estimate confirm prompt.
+    cost_guard_override : bool
+        Explicitly bypass the configured daily budget for this bootstrap.
     provider, embedder : optional
         Injection seams; default to ``build_provider_from_config(wiki_root)`` and
         ``get_default_embedder()``.
@@ -183,6 +188,15 @@ def bootstrap_batch(
         )
 
     estimate = provider.estimate_batch_cost(requests)
+    config = tomllib.loads((wiki_root / WIKI_DIR_NAME / "config.toml").read_text())
+    daily_budget_usd = config.get("cost_guard", {}).get("daily_budget_usd")
+    with connect(wiki_root / WIKI_DIR_NAME / "state.db") as conn:
+        check_budget(
+            conn=conn,
+            daily_budget_usd=daily_budget_usd,
+            override=cost_guard_override,
+            projected_cost_usd=estimate.usd_total,
+        )
     if not yes:
         chooser = confirm or _terminal_confirm_estimate
         if not chooser(estimate):
@@ -212,6 +226,15 @@ def bootstrap_batch(
         on_status=on_status,
         on_batch_id=_capture_batch_id,
     )
+    with connect(wiki_root / WIKI_DIR_NAME / "state.db") as conn:
+        record_cost(
+            conn=conn,
+            operation="bootstrap_batch_estimate",
+            tokens_in=sum(result.input_tokens for result in results),
+            tokens_out=sum(result.output_tokens for result in results),
+            cost_usd=estimate.usd_total,
+        )
+        conn.commit()
 
     applied = 0
     skipped = 0

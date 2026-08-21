@@ -73,3 +73,21 @@ def test_refresh_wiki_preserves_sidecar_merge(tmp_path: Path) -> None:
     sidecar = json.loads((tmp_path / "raw" / ".sources.json").read_text())
     paths = {entry["original_path"] for entry in sidecar.values()}
     assert paths == {"alpha.md", "beta.md"}
+
+
+@pytest.mark.unit
+def test_refresh_wiki_applies_persisted_exclude_globs(tmp_path: Path) -> None:
+    (tmp_path / "alpha.md").write_text("# Alpha")
+    init_wiki(tmp_path, exclude_globs=["kbs/**", "**/*.py"])
+    excluded_dir = tmp_path / "kbs"
+    excluded_dir.mkdir()
+    (excluded_dir / "new.md").write_text("# Excluded")
+    (tmp_path / "new.py").write_text("print('excluded')")
+    (tmp_path / "beta.md").write_text("# Beta")
+
+    result = refresh_wiki(tmp_path)
+
+    assert result.files_registered == 1
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        paths = {row["original_path"] for row in conn.execute("SELECT original_path FROM sources")}
+    assert paths == {"alpha.md", "beta.md"}

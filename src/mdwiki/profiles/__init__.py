@@ -13,6 +13,7 @@ to the legacy ``DEFAULT_SCHEMA``. Subsequent phases add ``initiative``,
 from __future__ import annotations
 
 import tomllib
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -147,13 +148,13 @@ def deep_merge(*, base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, An
         New dict with deep-merged contents. Neither ``base`` nor ``overlay``
         is mutated.
     """
-    out: dict[str, Any] = dict(base)
+    out: dict[str, Any] = deepcopy(base)
     for key, overlay_val in overlay.items():
         base_val = out.get(key)
         if isinstance(base_val, dict) and isinstance(overlay_val, dict):
             out[key] = deep_merge(base=base_val, overlay=overlay_val)
         else:
-            out[key] = overlay_val
+            out[key] = deepcopy(overlay_val)
     return out
 
 

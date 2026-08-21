@@ -95,6 +95,17 @@ def test_deep_merge_preserves_base_keys_overlay_doesnt_touch() -> None:
 
 
 @pytest.mark.unit
+def test_deep_merge_does_not_share_untouched_nested_values_with_base() -> None:
+    """Mutating an untouched nested value in the result must not mutate ``base``."""
+    base = {"exclude": {"globs": []}}
+
+    merged = deep_merge(base=base, overlay={})
+    merged["exclude"]["globs"].append("**/*.py")
+
+    assert base == {"exclude": {"globs": []}}
+
+
+@pytest.mark.unit
 def test_deep_merge_overlay_dict_replaces_base_scalar() -> None:
     """When base has a scalar and overlay has a dict for the same key, overlay wins (dict)."""
     base = {"x": "scalar"}
