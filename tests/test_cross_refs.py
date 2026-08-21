@@ -47,6 +47,27 @@ def test_ordinary_markdown_link_prevents_redundant_managed_link(wiki: Path) -> N
     assert "mdwiki:cross-refs" not in body
 
 
+@pytest.mark.parametrize(
+    "destination",
+    ["target (v2).md", "<target (v2).md>"],
+)
+def test_ordinary_markdown_link_with_parenthesized_destination_is_idempotent(wiki: Path, destination: str) -> None:
+    target = wiki / "wiki/concepts/target (v2).md"
+    target.write_text("# Target v2\n")
+    source = wiki / "wiki/concepts/source.md"
+    original = f"# Source\n\nSee [the target]({destination}).\n"
+    source.write_text(original)
+    ref = CrossRef("wiki/concepts/source.md", "wiki/concepts/target (v2).md", "Target v2")
+
+    first = materialize_cross_refs(wiki_root=wiki, plan=_plan(ref))["wiki/concepts/source.md"]
+    source.write_text(first)
+    second = materialize_cross_refs(wiki_root=wiki, plan=_plan(ref))["wiki/concepts/source.md"]
+
+    assert first == original
+    assert second == first
+    assert "mdwiki:cross-refs" not in first
+
+
 def test_link_inside_fenced_example_does_not_suppress_real_edge(wiki: Path) -> None:
     source = wiki / "wiki/concepts/source.md"
     source.write_text("# Source\n\n```md\n[example](target.md)\n```\n")

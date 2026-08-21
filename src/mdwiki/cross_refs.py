@@ -10,7 +10,7 @@ from urllib.parse import quote, unquote
 
 from mdwiki.plan import CrossRef, Plan
 
-_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+_LINK_OPEN_RE = re.compile(r"\[[^\]\n]+\]\(")
 _MANAGED_LINK_RE = re.compile(r"^- \[([^\]]+)\]\(([^)]+)\)$", flags=re.MULTILINE)
 _BLOCK_START = "<!-- mdwiki:cross-refs -->"
 _BLOCK_END = "<!-- /mdwiki:cross-refs -->"
@@ -169,10 +169,71 @@ def _require_endpoint(*, wiki_root: Path, page_bodies: dict[str, str], path: str
 
 
 def _links_to(content: str, *, from_page: str, to_page: str) -> bool:
-    for match in _LINK_RE.finditer(content):
-        if resolve_page_link_target(from_page=from_page, raw_target=match.group(1)) == to_page:
+    for raw_target in _markdown_link_targets(content):
+        if resolve_page_link_target(from_page=from_page, raw_target=raw_target) == to_page:
             return True
     return False
+
+
+def _markdown_link_targets(content: str) -> list[str]:
+    """Extract inline link destinations, including balanced and ``<...>`` forms."""
+    targets: list[str] = []
+    for match in _LINK_OPEN_RE.finditer(content):
+        start = match.end()
+        if start >= len(content):
+            continue
+        if content[start] == "<":
+            end = _angle_destination_end(content, start=start + 1)
+            if end is not None:
+                targets.append(content[start + 1 : end])
+            continue
+
+        end = _balanced_destination_end(content, start=start)
+        if end is not None and end > start:
+            targets.append(content[start:end])
+    return targets
+
+
+def _angle_destination_end(content: str, *, start: int) -> int | None:
+    escaped = False
+    for index in range(start, len(content)):
+        character = content[index]
+        if character in "\r\n":
+            return None
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+            continue
+        if character != ">":
+            continue
+        closing = index + 1
+        while closing < len(content) and content[closing] in " \t":
+            closing += 1
+        return index if closing < len(content) and content[closing] == ")" else None
+    return None
+
+
+def _balanced_destination_end(content: str, *, start: int) -> int | None:
+    depth = 1
+    escaped = False
+    for index in range(start, len(content)):
+        character = content[index]
+        if character in "\r\n":
+            return None
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
 
 
 def encode_page_link_target(*, from_page: str, to_page: str) -> str:
