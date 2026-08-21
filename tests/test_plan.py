@@ -78,6 +78,16 @@ def test_parse_plan_rejects_blank_cross_ref_anchor_text() -> None:
 
 
 @pytest.mark.unit
+def test_parse_plan_preserves_trailing_backslash_cross_ref_anchor_text() -> None:
+    payload = _valid_payload()
+    payload["cross_refs"][0]["anchor_text"] = "the original paper\\"
+
+    plan = parse_plan_dict(payload)
+
+    assert plan.cross_refs[0].anchor_text == "the original paper\\"
+
+
+@pytest.mark.unit
 def test_parse_plan_rejects_self_cross_ref() -> None:
     payload = _valid_payload()
     payload["cross_refs"][0]["to_page"] = payload["cross_refs"][0]["from_page"]

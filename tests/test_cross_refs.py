@@ -60,6 +60,38 @@ def test_link_inside_fenced_example_does_not_suppress_real_edge(wiki: Path) -> N
     assert "- [Target](target.md)" in body
 
 
+def test_complete_managed_block_inside_fence_is_preserved_idempotently(wiki: Path) -> None:
+    source = wiki / "wiki/concepts/source.md"
+    fenced_block = (
+        "```md\n"
+        "<!-- mdwiki:cross-refs -->\n"
+        "## Related\n\n"
+        "- [Example](other.md)\n"
+        "<!-- /mdwiki:cross-refs -->\n"
+        "```\n"
+    )
+    source.write_text(f"# Source\n\n{fenced_block}")
+    ref = CrossRef("wiki/concepts/source.md", "wiki/concepts/target.md", "Target")
+
+    first = materialize_cross_refs(wiki_root=wiki, plan=_plan(ref))["wiki/concepts/source.md"]
+    source.write_text(first)
+    second = materialize_cross_refs(wiki_root=wiki, plan=_plan(ref))["wiki/concepts/source.md"]
+
+    assert first == second
+    assert fenced_block in first
+    assert first.count("<!-- mdwiki:cross-refs -->") == 2
+    assert first.count("- [Example](other.md)") == 1
+    assert first.count("- [Target](target.md)") == 1
+
+
+def test_trailing_backslash_anchor_is_escaped_as_safe_markdown(wiki: Path) -> None:
+    ref = CrossRef("wiki/concepts/source.md", "wiki/concepts/target.md", "Target\\")
+
+    body = materialize_cross_refs(wiki_root=wiki, plan=_plan(ref))["wiki/concepts/source.md"]
+
+    assert "- [Target\\\\](target.md)" in body
+
+
 @pytest.mark.parametrize(
     "malformed",
     ["Example: <!-- /mdwiki:cross-refs -->", "<!-- mdwiki:cross-refs -->\nExample without managed heading"],

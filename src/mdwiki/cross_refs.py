@@ -51,7 +51,10 @@ def _materialize_page(content: str, *, from_page: str, refs: list[CrossRef]) -> 
     managed.update(chosen)
     if not managed:
         return content
-    links = [f"- [{anchor}]({encode_page_link_target(from_page=from_page, to_page=target)})" for target, anchor in sorted(managed.items())]
+    links = [
+        f"- [{_encode_link_text(anchor)}]({encode_page_link_target(from_page=from_page, to_page=target)})"
+        for target, anchor in sorted(managed.items())
+    ]
     rendered_links = "\n".join(links)
     block = f"{_BLOCK_START}\n## Related\n\n{rendered_links}\n{_BLOCK_END}"
     unmanaged = _without_managed_blocks(content).rstrip()
@@ -59,11 +62,10 @@ def _materialize_page(content: str, *, from_page: str, refs: list[CrossRef]) -> 
 
 
 def _managed_targets(content: str, *, from_page: str) -> dict[str, str]:
-    matches = list(_BLOCK_RE.finditer(content))
     targets: dict[str, str] = {}
-    for match in matches:
+    for match in _managed_block_matches(content):
         for link_match in _MANAGED_LINK_RE.finditer(match.group("links")):
-            anchor = link_match.group(1)
+            anchor = _decode_link_text(link_match.group(1))
             raw_target = link_match.group(2)
             resolved = resolve_page_link_target(from_page=from_page, raw_target=raw_target)
             if resolved is None:
@@ -73,7 +75,49 @@ def _managed_targets(content: str, *, from_page: str) -> dict[str, str]:
 
 
 def _without_managed_blocks(content: str) -> str:
-    return _BLOCK_RE.sub("", content)
+    pieces: list[str] = []
+    cursor = 0
+    for match in _managed_block_matches(content):
+        pieces.append(content[cursor : match.start()])
+        cursor = match.end()
+    pieces.append(content[cursor:])
+    return "".join(pieces)
+
+
+def _managed_block_matches(content: str) -> list[re.Match[str]]:
+    fenced_spans = _fenced_code_spans(content)
+    return [
+        match
+        for match in _BLOCK_RE.finditer(content)
+        if not any(match.start() < end and start < match.end() for start, end in fenced_spans)
+    ]
+
+
+def _fenced_code_spans(content: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    active: tuple[str, int, int] | None = None
+    offset = 0
+    for line in content.splitlines(keepends=True):
+        line_end = offset + len(line)
+        if active is None:
+            opener = _fence_opener(line)
+            if opener is not None:
+                active = (opener[0], opener[1], offset)
+        elif _is_fence_closer(line, delimiter=active[0], minimum_length=active[1]):
+            spans.append((active[2], line_end))
+            active = None
+        offset = line_end
+    if active is not None:
+        spans.append((active[2], len(content)))
+    return spans
+
+
+def _encode_link_text(anchor: str) -> str:
+    return anchor.replace("\\", "\\\\")
+
+
+def _decode_link_text(anchor: str) -> str:
+    return anchor.replace("\\\\", "\\")
 
 
 def _without_fenced_code(content: str) -> str:
