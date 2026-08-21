@@ -11,6 +11,7 @@ from urllib.parse import quote, unquote
 from mdwiki.plan import CrossRef, Plan
 
 _LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+_MANAGED_LINK_RE = re.compile(r"^- \[([^\]]+)\]\(([^)]+)\)$", flags=re.MULTILINE)
 _BLOCK_START = "<!-- mdwiki:cross-refs -->"
 _BLOCK_END = "<!-- /mdwiki:cross-refs -->"
 _MANAGED_LINK_LINE = r"- \[[^\]\n]+\]\([^()\n]+\)\n"
@@ -46,7 +47,7 @@ def _materialize_page(content: str, *, from_page: str, refs: list[CrossRef]) -> 
     for ref in sorted(refs, key=lambda item: (item.to_page, item.anchor_text)):
         if _links_to(ordinary_content, from_page=from_page, to_page=ref.to_page):
             continue
-        chosen.setdefault(ref.to_page, ref.anchor_text)
+        _ = chosen.setdefault(ref.to_page, ref.anchor_text)
     managed.update(chosen)
     if not managed:
         return content
@@ -61,11 +62,13 @@ def _managed_targets(content: str, *, from_page: str) -> dict[str, str]:
     matches = list(_BLOCK_RE.finditer(content))
     targets: dict[str, str] = {}
     for match in matches:
-        for anchor, raw_target in re.findall(r"^- \[([^\]]+)\]\(([^)]+)\)$", match.group("links"), flags=re.MULTILINE):
+        for link_match in _MANAGED_LINK_RE.finditer(match.group("links")):
+            anchor = link_match.group(1)
+            raw_target = link_match.group(2)
             resolved = resolve_page_link_target(from_page=from_page, raw_target=raw_target)
             if resolved is None:
                 continue
-            targets.setdefault(resolved, anchor)
+            _ = targets.setdefault(resolved, anchor)
     return targets
 
 
