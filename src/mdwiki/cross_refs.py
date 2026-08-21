@@ -42,7 +42,11 @@ def materialize_cross_refs(*, wiki_root: Path, plan: Plan) -> dict[str, str]:
 
 def _materialize_page(content: str, *, from_page: str, refs: list[CrossRef]) -> str:
     ordinary_content = _without_fenced_code(_without_managed_blocks(content))
-    managed = _managed_targets(content, from_page=from_page)
+    managed = {
+        target: anchor
+        for target, anchor in _managed_targets(content, from_page=from_page).items()
+        if not _links_to(ordinary_content, from_page=from_page, to_page=target)
+    }
     chosen: dict[str, str] = {}
     for ref in sorted(refs, key=lambda item: (item.to_page, item.anchor_text)):
         if _links_to(ordinary_content, from_page=from_page, to_page=ref.to_page):
