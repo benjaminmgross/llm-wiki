@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from mdwiki.semantic_pages import INFRASTRUCTURE_PAGE_PATHS, is_semantic_page_path
+
 # Baseline page kinds always allowed by every profile. Extra kinds declared
 # by a profile's config-overlay (``[profile.<name>].extra_page_kinds``) are
 # unioned in by ``allowed_kinds_for_wiki()`` at plan-validation time. We keep
@@ -55,6 +57,7 @@ def allowed_kinds_for_wiki(wiki_root: Path) -> frozenset[str]:
     if not isinstance(extras, list):
         return VALID_KINDS
     return frozenset(VALID_KINDS | {str(k) for k in extras})
+
 
 # Page paths the LLM proposes must be confined to wiki/. Anything else
 # (.mdwiki/config.toml, raw/<hash>.md, /etc/passwd) is rejected at parse time
@@ -202,14 +205,23 @@ def parse_plan_dict(payload: dict[str, Any], *, allowed_kinds: frozenset[str] | 
     cross_refs = tuple(_parse_cross_ref(r) for r in _require(payload, "cross_refs", list))
 
     if verdict != "ingest" and (updates or new_pages or cross_refs):
-        raise PlanValidationError(
-            f"verdict {verdict!r} must be paired with empty updates/new_pages/cross_refs; got non-empty."
-        )
+        raise PlanValidationError(f"verdict {verdict!r} must be paired with empty updates/new_pages/cross_refs; got non-empty.")
 
     for update in updates:
         _validate_page_path(update.page, field="updates[].page")
     for new_page in new_pages:
         _validate_page_path(new_page.path, field="new_pages[].path")
+    for cross_ref in cross_refs:
+        _validate_page_path(cross_ref.from_page, field="cross_refs[].from_page")
+        _validate_page_path(cross_ref.to_page, field="cross_refs[].to_page")
+        for field, endpoint in (("from_page", cross_ref.from_page), ("to_page", cross_ref.to_page)):
+            if not is_semantic_page_path(endpoint):
+                reason = "an infrastructure page" if endpoint in INFRASTRUCTURE_PAGE_PATHS else "not a supported .md semantic page"
+                raise PlanValidationError(f"cross_refs[].{field}={endpoint!r} is {reason}, not a semantic endpoint.")
+        if not cross_ref.anchor_text.strip():
+            raise PlanValidationError("cross_refs[].anchor_text must not be blank.")
+        if any(ch < " " for ch in cross_ref.anchor_text) or any(ch in "[]" for ch in cross_ref.anchor_text):
+            raise PlanValidationError("cross_refs[].anchor_text must be plain single-line Markdown link text.")
     _validate_unique_write_targets(updates=updates, new_pages=new_pages)
 
     return Plan(verdict=verdict, rationale=rationale, updates=updates, new_pages=new_pages, cross_refs=cross_refs)
@@ -239,17 +251,13 @@ def _validate_page_path(path: str, *, field: str) -> None:
     # ["wiki", "\x00..", "etc", "passwd"] — no ".." segment). Reject any
     # control byte up front; legitimate page paths never contain them.
     if any(ch < " " for ch in path):
-        raise PlanValidationError(
-            f"{field}={path!r} contains a control character; page paths must be plain ASCII/UTF-8 text."
-        )
+        raise PlanValidationError(f"{field}={path!r} contains a control character; page paths must be plain ASCII/UTF-8 text.")
     if not path.startswith(_REQUIRED_PAGE_PREFIX):
         raise PlanValidationError(
             f"{field}={path!r} must start with {_REQUIRED_PAGE_PREFIX!r}; LLM-supplied page paths are confined to wiki/."
         )
     if ".." in path.split("/"):
-        raise PlanValidationError(
-            f"{field}={path!r} contains a '..' segment; path traversal is not allowed."
-        )
+        raise PlanValidationError(f"{field}={path!r} contains a '..' segment; path traversal is not allowed.")
     if "\\" in path or PurePosixPath(path).as_posix() != path:
         raise PlanValidationError(
             f"{field}={path!r} must be a canonical POSIX path without backslashes, repeated separators, or '.' segments."
@@ -281,9 +289,7 @@ def _validate_verdict(verdict: str) -> None:
         return
     if verdict.startswith("duplicate-of:") and len(verdict) > len("duplicate-of:"):
         return
-    raise PlanValidationError(
-        f"Invalid verdict {verdict!r}. Must be one of {sorted(VALID_BARE_VERDICTS)} or 'duplicate-of:<page-path>'."
-    )
+    raise PlanValidationError(f"Invalid verdict {verdict!r}. Must be one of {sorted(VALID_BARE_VERDICTS)} or 'duplicate-of:<page-path>'.")
 
 
 def _parse_update(raw: Any) -> Update:
@@ -329,12 +335,10 @@ def _parse_claim(raw: Any) -> Claim:
     )
 
 
-def _require(payload: dict, key: str, expected_type: type) -> Any:
+def _require(payload: dict[str, Any], key: str, expected_type: type) -> Any:
     if key not in payload:
         raise PlanValidationError(f"Missing required field {key!r}.")
     value = payload[key]
     if not isinstance(value, expected_type):
-        raise PlanValidationError(
-            f"Field {key!r} must be {expected_type.__name__}, got {type(value).__name__}."
-        )
+        raise PlanValidationError(f"Field {key!r} must be {expected_type.__name__}, got {type(value).__name__}.")
     return value

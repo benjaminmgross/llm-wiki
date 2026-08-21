@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from mdwiki.plan import allowed_kinds_for_wiki
+from mdwiki.semantic_pages import is_semantic_page_path
 
 _SPECIAL_KIND_FOLDERS: dict[str, str] = {
     "entity": "entities",
@@ -54,7 +55,7 @@ def iter_wiki_page_paths(wiki_root: Path) -> list[Path]:
     paths: list[Path] = []
     for page_path in sorted(wiki_dir.rglob("*.md")):
         rel = page_path.relative_to(wiki_root)
-        if rel.as_posix() in {"wiki/index.md", "wiki/log.md"}:
+        if not is_semantic_page_path(rel.as_posix()):
             continue
         paths.append(page_path)
     return paths

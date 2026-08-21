@@ -13,6 +13,7 @@ from mdwiki.plan import (
     PlanValidationError,
     Update,
     parse_plan,
+    parse_plan_dict,
 )
 
 
@@ -55,6 +56,44 @@ def test_parse_valid_full_plan() -> None:
     assert isinstance(plan.updates[0], Update)
     assert isinstance(plan.new_pages[0], NewPage)
     assert isinstance(plan.cross_refs[0], CrossRef)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("field", ["from_page", "to_page"])
+def test_parse_plan_rejects_cross_ref_path_outside_wiki(field: str) -> None:
+    payload = _valid_payload()
+    payload["cross_refs"][0][field] = "../outside.md"
+
+    with pytest.raises(PlanValidationError, match=field):
+        parse_plan_dict(payload)
+
+
+@pytest.mark.unit
+def test_parse_plan_rejects_blank_cross_ref_anchor_text() -> None:
+    payload = _valid_payload()
+    payload["cross_refs"][0]["anchor_text"] = "   "
+
+    with pytest.raises(PlanValidationError, match="anchor_text"):
+        parse_plan_dict(payload)
+
+
+@pytest.mark.parametrize("field", ["from_page", "to_page"])
+@pytest.mark.parametrize("path", ["wiki/index.md", "wiki/log.md"])
+def test_parse_plan_rejects_infrastructure_cross_ref_endpoint(field: str, path: str) -> None:
+    payload = _valid_payload()
+    payload["cross_refs"][0][field] = path
+
+    with pytest.raises(PlanValidationError, match="infrastructure"):
+        parse_plan_dict(payload)
+
+
+@pytest.mark.parametrize("field", ["from_page", "to_page"])
+def test_parse_plan_rejects_markdown_suffix_for_semantic_endpoint(field: str) -> None:
+    payload = _valid_payload()
+    payload["cross_refs"][0][field] = "wiki/concepts/not-semantic.markdown"
+
+    with pytest.raises(PlanValidationError, match="semantic endpoint"):
+        parse_plan_dict(payload)
 
 
 @pytest.mark.unit

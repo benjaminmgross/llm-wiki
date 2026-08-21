@@ -341,7 +341,7 @@ def _is_wiki_page(rel: Path) -> bool:
     """
     if not rel.parts or rel.parts[0] != "wiki":
         return False
-    if rel.suffix.lower() not in {".md", ".markdown"}:
+    if rel.suffix.lower() != ".md":
         return False
     name = rel.name.lower()
     if name in {"log.md", "index.md"}:
