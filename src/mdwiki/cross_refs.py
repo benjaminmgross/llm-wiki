@@ -54,23 +54,19 @@ def _materialize_page(content: str, *, from_page: str, refs: list[CrossRef]) -> 
     links = [f"- [{anchor}]({encode_page_link_target(from_page=from_page, to_page=target)})" for target, anchor in sorted(managed.items())]
     rendered_links = "\n".join(links)
     block = f"{_BLOCK_START}\n## Related\n\n{rendered_links}\n{_BLOCK_END}"
-    matches = list(_BLOCK_RE.finditer(content))
-    if len(matches) == 1:
-        match = matches[0]
-        return f"{content[: match.start()]}{block}{content[match.end() :]}"
-    return f"{content.rstrip()}\n\n{block}\n"
+    unmanaged = _without_managed_blocks(content).rstrip()
+    return f"{unmanaged}\n\n{block}\n"
 
 
 def _managed_targets(content: str, *, from_page: str) -> dict[str, str]:
     matches = list(_BLOCK_RE.finditer(content))
-    if len(matches) != 1:
-        return {}
     targets: dict[str, str] = {}
-    for anchor, raw_target in re.findall(r"^- \[([^\]]+)\]\(([^)]+)\)$", matches[0].group("links"), flags=re.MULTILINE):
-        resolved = resolve_page_link_target(from_page=from_page, raw_target=raw_target)
-        if resolved is None:
-            continue
-        targets.setdefault(resolved, anchor)
+    for match in matches:
+        for anchor, raw_target in re.findall(r"^- \[([^\]]+)\]\(([^)]+)\)$", match.group("links"), flags=re.MULTILINE):
+            resolved = resolve_page_link_target(from_page=from_page, raw_target=raw_target)
+            if resolved is None:
+                continue
+            targets.setdefault(resolved, anchor)
     return targets
 
 
