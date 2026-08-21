@@ -19,10 +19,13 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from mdwiki.cross_refs import resolve_page_link_target
 from mdwiki.discover import WIKI_DIR_NAME
+from mdwiki.semantic_pages import INFRASTRUCTURE_PAGE_PATHS, is_semantic_page_path
 from mdwiki.state import connect
 
-INFRASTRUCTURE_PAGES: frozenset[str] = frozenset({"wiki/index.md", "wiki/log.md"})
+# Compatibility alias for callers that imported the old lint-local constant.
+INFRASTRUCTURE_PAGES = INFRASTRUCTURE_PAGE_PATHS
 
 
 @dataclass(frozen=True)
@@ -81,11 +84,7 @@ def _iter_wiki_pages(wiki_root: Path) -> list[Path]:
     wiki_dir = wiki_root / "wiki"
     if not wiki_dir.is_dir():
         return []
-    return [
-        p
-        for p in sorted(wiki_dir.rglob("*.md"))
-        if p.relative_to(wiki_root).as_posix() not in INFRASTRUCTURE_PAGES
-    ]
+    return [p for p in sorted(wiki_dir.rglob("*.md")) if is_semantic_page_path(p.relative_to(wiki_root).as_posix())]
 
 
 def _check_broken_refs(wiki_root: Path) -> list[LintFinding]:
@@ -94,12 +93,12 @@ def _check_broken_refs(wiki_root: Path) -> list[LintFinding]:
         rel_page = page.relative_to(wiki_root).as_posix()
         for match in _LINK_RE.finditer(page.read_text()):
             target = match.group(2)
-            if target.startswith(("http://", "https://", "mailto:")):
+            resolved_target = resolve_page_link_target(from_page=rel_page, raw_target=target)
+            if resolved_target is None:
                 continue
-            if not target.endswith(".md"):
+            if not is_semantic_page_path(resolved_target):
                 continue
-            target_clean = target.split("#", 1)[0]
-            resolved = (page.parent / target_clean).resolve()
+            resolved = (wiki_root / resolved_target).resolve()
             if not resolved.is_file():
                 findings.append(
                     LintFinding(
@@ -120,12 +119,13 @@ def _check_orphans(wiki_root: Path) -> list[LintFinding]:
     rel_paths = {p.relative_to(wiki_root).as_posix() for p in pages}
     inbound: set[str] = set()
     for page in pages:
+        rel_page = page.relative_to(wiki_root).as_posix()
         for match in _LINK_RE.finditer(page.read_text()):
             target = match.group(2)
-            if target.startswith(("http://", "https://", "mailto:")) or not target.endswith(".md"):
+            resolved_target = resolve_page_link_target(from_page=rel_page, raw_target=target)
+            if resolved_target is None or not is_semantic_page_path(resolved_target):
                 continue
-            target_clean = target.split("#", 1)[0]
-            resolved = (page.parent / target_clean).resolve()
+            resolved = (wiki_root / resolved_target).resolve()
             try:
                 rel = resolved.relative_to(wiki_root.resolve()).as_posix()
             except ValueError:

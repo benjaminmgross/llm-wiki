@@ -47,6 +47,24 @@ def test_lint_detects_broken_cross_ref(wiki: Path) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "target_name",
+    ["target with spaces.md", "target (v2).md", "target#section.md", "target%done.md", "café.md"],
+)
+def test_lint_resolves_percent_encoded_semantic_page_targets(wiki: Path, target_name: str) -> None:
+    from urllib.parse import quote
+
+    encoded = quote(target_name, safe="/-._~")
+    _add_page(wiki, path="wiki/concepts/source.md", content=f"# Source\n\n[Target]({encoded})")
+    _add_page(wiki, path=f"wiki/concepts/{target_name}")
+
+    report = lint_wiki(wiki)
+
+    assert not any(f.kind == "broken-ref" for f in report.findings)
+    assert not any(f.kind == "orphan" and f.page_path.endswith(target_name) for f in report.findings)
+
+
+@pytest.mark.unit
 def test_lint_skips_external_links(wiki: Path) -> None:
     _add_page(
         wiki,
