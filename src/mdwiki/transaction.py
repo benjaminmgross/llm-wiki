@@ -112,7 +112,7 @@ class IngestTransaction:
                 self._write_lock_conn = None
         return False
 
-    def write_file(self, path: Path, content: str) -> None:
+    def write_file(self, path: Path, content: str) -> str:
         """Atomically write ``content`` to ``path``.
 
         Writes to ``<path>.tmp-<tx_id>`` first, then ``os.replace`` swaps it
@@ -152,10 +152,10 @@ class IngestTransaction:
         # Embed previous_hash for wiki/ pages. New pages get a "genesis"
         # marker (no previous_hash key) — a missing key is itself meaningful
         # ("this is the first version").
-        if _is_wiki_page(rel) and prev_body is not None:
-            from mdwiki.version_chain import compute_body_hash, embed_previous_hash
+        if _is_wiki_page(rel):
+            from mdwiki.version_chain import prepare_wiki_page_content
 
-            content = embed_previous_hash(body=content, previous_hash=compute_body_hash(prev_body))
+            content = prepare_wiki_page_content(content=content, previous_body=prev_body)
 
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_name(f"{path.name}.tmp-{self._tx_id}")
@@ -173,6 +173,7 @@ class IngestTransaction:
                     pass
             raise
         self._touched_files.append(path)
+        return content
 
     def add_inverse(self, sql: str, params: tuple) -> None:
         """Record an inverse SQL statement to run on undo.

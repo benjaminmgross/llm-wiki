@@ -108,6 +108,17 @@ def embed_previous_hash(*, body: str, previous_hash: str) -> str:
     return f"---\n{new_fm_inner}\n---\n{rest}"
 
 
+def prepare_wiki_page_content(*, content: str, previous_body: str | None) -> str:
+    """Return the exact page text to persist after version-chain preparation.
+
+    This pure boundary is shared by transactional persistence and callers that
+    derive caches such as embeddings from the committed representation.
+    """
+    if previous_body is None:
+        return content
+    return embed_previous_hash(body=content, previous_hash=compute_body_hash(previous_body))
+
+
 def extract_previous_hash(body: str) -> str | None:
     """Return the value of ``previous_hash:`` from ``body``'s frontmatter, or ``None``.
 

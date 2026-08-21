@@ -8,12 +8,14 @@ in ``cli.py`` is a thin shell around this function.
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from mdwiki.chunker import MarkdownChunker
+from mdwiki.cross_refs import CrossRefMaterializationError, materialize_cross_refs
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.embedder import Embedder, get_default_embedder
 from mdwiki.embeddings import deserialize, find_top_k, serialize
@@ -226,19 +228,31 @@ def apply_ingest_plan(
             plan=plan,
         )
 
-    summary = f"ingest {original_path} → {len(plan.updates)} update(s), {len(plan.new_pages)} new page(s)"
+    summary = (
+        f"ingest {original_path} → {len(plan.updates)} update(s), {len(plan.new_pages)} new page(s), {len(plan.cross_refs)} cross-ref(s)"
+    )
     with IngestTransaction(wiki_root=wiki_root, source_id=source_id, summary=summary) as tx:
         if validate_locked is not None:
             validate_locked()
+        try:
+            page_bodies = materialize_cross_refs(wiki_root=wiki_root, plan=plan)
+        except CrossRefMaterializationError as exc:
+            raise IngestError(str(exc)) from exc
         page_embeddings: dict[str, bytes] = {}
-        for new_page in plan.new_pages:
-            tx.write_file(wiki_root / new_page.path, new_page.content)
+        new_page_kinds = {new_page.path: new_page.kind for new_page in plan.new_pages}
+        explicit_write_targets = {*new_page_kinds, *(update.page for update in plan.updates)}
+        touched_at = time.time()
+        for page_path, content in page_bodies.items():
+            committed_content = tx.write_file(wiki_root / page_path, content)
             if embedder is not None:
-                page_embeddings[new_page.path] = _embed_page(embedder, path=new_page.path, content=new_page.content)
-        for update in plan.updates:
-            tx.write_file(wiki_root / update.page, update.content)
-            if embedder is not None:
-                page_embeddings[update.page] = _embed_page(embedder, path=update.page, content=update.content)
+                page_embeddings[page_path] = _embed_page(embedder, path=page_path, content=committed_content)
+            if page_path not in explicit_write_targets:
+                tx.upsert_page(
+                    path=page_path,
+                    kind=_infer_kind(page_path),
+                    embedding=page_embeddings.get(page_path),
+                    last_touched_at=touched_at,
+                )
         _apply_pages_and_backrefs(tx=tx, plan=plan, embeddings=page_embeddings, source_id=source_id)
         tx.write_file(wiki_root / "wiki" / "index.md", build_index(wiki_root))
 
@@ -442,9 +456,7 @@ def _recent_log_entries(wiki_root: Path, *, limit: int) -> list[str]:
 
 
 def _apply_pages_and_backrefs(*, tx: IngestTransaction, plan: Plan, embeddings: dict[str, bytes], source_id: str) -> None:
-    """Insert/update pages and insert backrefs through the transaction's undo-aware helpers."""
-    import time
-
+    """Insert/update planned pages and citation backrefs through undo-aware helpers."""
     now = time.time()
     for new_page in plan.new_pages:
         tx.upsert_page(path=new_page.path, kind=new_page.kind, embedding=embeddings.get(new_page.path), last_touched_at=now)
@@ -513,9 +525,7 @@ def _reject_existing_new_page_paths(*, wiki_root: Path, plan: Plan) -> None:
 
 def _is_recoverable_validation_error(exc: IngestError) -> bool:
     message = str(exc)
-    return ("LLM proposed new page" in message and "already exists" in message) or message.startswith(
-        "Quote verification failed:"
-    )
+    return ("LLM proposed new page" in message and "already exists" in message) or message.startswith("Quote verification failed:")
 
 
 def _response_summary_for_retry(response: Any) -> str:

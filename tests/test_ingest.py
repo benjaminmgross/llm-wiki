@@ -8,10 +8,11 @@ from pathlib import Path
 import pytest
 from pytest_mock import MockerFixture
 
-from mdwiki.ingest import IngestError, ingest_source
+from mdwiki.ingest import IngestError, apply_ingest_plan, ingest_source
 from mdwiki.init import init_wiki
 from mdwiki.llm.base import CompleteResult
 from mdwiki.page_index import rebuild_page_index
+from mdwiki.plan import parse_plan_dict
 from mdwiki.state import connect
 
 
@@ -77,6 +78,15 @@ def _mock_provider(mocker: MockerFixture, plan_json: str) -> None:
 class StubEmbedder:
     def embed_text(self, text: str) -> list[float]:
         return [float("attention" in text.lower()), 0.0, 0.0]
+
+
+class RecordingEmbedder:
+    def __init__(self) -> None:
+        self.inputs: list[str] = []
+
+    def embed_text(self, text: str) -> list[float]:
+        self.inputs.append(text)
+        return [1.0, 0.0, 0.0]
 
 
 @pytest.fixture(autouse=True)
@@ -218,9 +228,7 @@ def test_ingest_aborts_when_quote_verification_fails(wiki_with_one_source: Path,
                     "path": "wiki/concepts/x.md",
                     "kind": "concept",
                     "content": "...",
-                    "claims": [
-                        {"source_section_id": "ai.md/Intro", "quote": "this quote was never in the source"}
-                    ],
+                    "claims": [{"source_section_id": "ai.md/Intro", "quote": "this quote was never in the source"}],
                 }
             ],
             "cross_refs": [],
@@ -268,9 +276,7 @@ def test_ingest_allows_multiple_corrective_plan_retries_by_default(wiki_with_one
         "new_pages": [],
         "cross_refs": [],
     }
-    provider = SequencedProvider(
-        [_tool_result(_good_plan_dict()), _tool_result(_good_plan_dict()), _tool_result(corrected)]
-    )
+    provider = SequencedProvider([_tool_result(_good_plan_dict()), _tool_result(_good_plan_dict()), _tool_result(corrected)])
 
     result = ingest_source(wiki_with_one_source, "ai.md", yes=True, embedder=StubEmbedder(), provider=provider)
 
@@ -417,6 +423,122 @@ def test_ingest_records_backref_for_each_claim(wiki_with_one_source: Path, mocke
 
 
 @pytest.mark.unit
+def test_apply_ingest_plan_materializes_relative_cross_ref_and_undo_restores_source(
+    wiki_with_one_source: Path,
+) -> None:
+    source_page = wiki_with_one_source / "wiki" / "concepts" / "source.md"
+    target_page = wiki_with_one_source / "wiki" / "templates" / "target.md"
+    source_page.parent.mkdir(parents=True)
+    target_page.parent.mkdir(parents=True)
+    source_page.write_text("# Source\n\nExisting body.\n")
+    target_page.write_text("# Target\n\nReusable target.\n")
+    with connect(wiki_with_one_source / ".mdwiki" / "state.db") as conn:
+        source_id = conn.execute("SELECT id FROM sources LIMIT 1").fetchone()["id"]
+    plan = parse_plan_dict(
+        {
+            "verdict": "ingest",
+            "rationale": "Connect related pages.",
+            "updates": [],
+            "new_pages": [],
+            "cross_refs": [
+                {
+                    "from_page": "wiki/concepts/source.md",
+                    "to_page": "wiki/templates/target.md",
+                    "anchor_text": "Target workflow",
+                }
+            ],
+        }
+    )
+
+    result = apply_ingest_plan(
+        wiki_with_one_source,
+        source_id=source_id,
+        original_path="ai.md",
+        plan=plan,
+        embedder=None,
+    )
+
+    assert result.applied is True
+    assert "[Target workflow](../templates/target.md)" in source_page.read_text()
+    from mdwiki.undo import undo_last
+
+    undo_last(wiki_with_one_source)
+    assert source_page.read_text() == "# Source\n\nExisting body.\n"
+
+
+@pytest.mark.unit
+def test_apply_ingest_plan_rejects_missing_cross_ref_endpoint_atomically(wiki_with_one_source: Path) -> None:
+    source_page = wiki_with_one_source / "wiki" / "concepts" / "source.md"
+    source_page.parent.mkdir(parents=True)
+    source_page.write_text("# Source\n\nExisting body.\n")
+    with connect(wiki_with_one_source / ".mdwiki" / "state.db") as conn:
+        source_id = conn.execute("SELECT id FROM sources LIMIT 1").fetchone()["id"]
+    plan = parse_plan_dict(
+        {
+            "verdict": "ingest",
+            "rationale": "Bad missing target.",
+            "updates": [],
+            "new_pages": [],
+            "cross_refs": [
+                {
+                    "from_page": "wiki/concepts/source.md",
+                    "to_page": "wiki/concepts/missing.md",
+                    "anchor_text": "Missing",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(IngestError, match="does not exist"):
+        apply_ingest_plan(
+            wiki_with_one_source,
+            source_id=source_id,
+            original_path="ai.md",
+            plan=plan,
+            embedder=None,
+        )
+
+    assert source_page.read_text() == "# Source\n\nExisting body.\n"
+
+
+@pytest.mark.unit
+def test_cross_ref_embedding_input_equals_committed_version_chained_content(wiki_with_one_source: Path) -> None:
+    source_page = wiki_with_one_source / "wiki" / "concepts" / "source.md"
+    target_page = wiki_with_one_source / "wiki" / "concepts" / "target.md"
+    source_page.parent.mkdir(parents=True)
+    source_page.write_text("# Source\n\nExisting body.\n")
+    target_page.write_text("# Target\n")
+    with connect(wiki_with_one_source / ".mdwiki" / "state.db") as conn:
+        source_id = conn.execute("SELECT id FROM sources LIMIT 1").fetchone()["id"]
+    embedder = RecordingEmbedder()
+    plan = parse_plan_dict(
+        {
+            "verdict": "ingest",
+            "rationale": "Connect pages.",
+            "updates": [],
+            "new_pages": [],
+            "cross_refs": [
+                {
+                    "from_page": "wiki/concepts/source.md",
+                    "to_page": "wiki/concepts/target.md",
+                    "anchor_text": "Target",
+                }
+            ],
+        }
+    )
+
+    apply_ingest_plan(
+        wiki_with_one_source,
+        source_id=source_id,
+        original_path="ai.md",
+        plan=plan,
+        embedder=embedder,
+    )
+
+    assert embedder.inputs == [source_page.read_text()]
+
+
+@pytest.mark.unit
 def test_ingest_update_replaces_entire_page_content(wiki_with_one_source: Path, mocker: MockerFixture) -> None:
     """An update to an existing page must replace its content, not append."""
     page = wiki_with_one_source / "wiki" / "concepts" / "attention.md"
@@ -459,12 +581,8 @@ def test_ingest_update_replaces_entire_page_content(wiki_with_one_source: Path, 
 
 
 @pytest.mark.unit
-def test_ingest_low_quality_verdict_marks_ingested_without_writes(
-    wiki_with_one_source: Path, mocker: MockerFixture
-) -> None:
-    low_quality = json.dumps(
-        {"verdict": "low-quality", "rationale": "not enough signal", "updates": [], "new_pages": [], "cross_refs": []}
-    )
+def test_ingest_low_quality_verdict_marks_ingested_without_writes(wiki_with_one_source: Path, mocker: MockerFixture) -> None:
+    low_quality = json.dumps({"verdict": "low-quality", "rationale": "not enough signal", "updates": [], "new_pages": [], "cross_refs": []})
     _mock_provider(mocker, low_quality)
     result = ingest_source(wiki_with_one_source, "ai.md", yes=True)
     assert result.applied is True
