@@ -30,7 +30,7 @@ import time
 import uuid
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import Literal, Self
 
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.source_state import mirror_source_state
@@ -38,6 +38,7 @@ from mdwiki.state import connect
 
 UNDO_DIR_NAME: str = "undo"
 DELETION_MARKER_DIR: str = "__delete_on_undo__"
+WRITE_LOCK_NAME: str = "write.lock"
 
 
 class TransactionAborted(RuntimeError):
@@ -67,6 +68,7 @@ class IngestTransaction:
         self._undo_dir = wiki_root / WIKI_DIR_NAME / UNDO_DIR_NAME / self._tx_id
         self._touched_files: list[Path] = []
         self._conn: sqlite3.Connection | None = None
+        self._write_lock_conn: sqlite3.Connection | None = None
         self._committed: bool = False
         self._inverses: list[tuple[str, tuple]] = []
         self._prev_source_state: tuple[str, float | None, str | None] | None = None
@@ -76,8 +78,18 @@ class IngestTransaction:
         return self._tx_id
 
     def __enter__(self) -> Self:
-        self._undo_dir.mkdir(parents=True, exist_ok=True)
-        self._conn = connect(self._wiki_root / WIKI_DIR_NAME / "state.db")
+        self._write_lock_conn = _acquire_write_lock(self._wiki_root)
+        try:
+            self._undo_dir.mkdir(parents=True, exist_ok=True)
+            self._conn = connect(self._wiki_root / WIKI_DIR_NAME / "state.db")
+            self._conn.execute("BEGIN IMMEDIATE")
+        except Exception:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+            _release_write_lock(self._write_lock_conn)
+            self._write_lock_conn = None
+            raise
         return self
 
     def __exit__(
@@ -85,7 +97,7 @@ class IngestTransaction:
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
-    ) -> bool:
+    ) -> Literal[False]:
         try:
             if exc_type is None:
                 self._commit()
@@ -95,6 +107,9 @@ class IngestTransaction:
             if self._conn is not None:
                 self._conn.close()
                 self._conn = None
+            if self._write_lock_conn is not None:
+                _release_write_lock(self._write_lock_conn)
+                self._write_lock_conn = None
         return False
 
     def write_file(self, path: Path, content: str) -> None:
@@ -331,3 +346,25 @@ def _is_wiki_page(rel: Path) -> bool:
     if name in {"log.md", "index.md"}:
         return False
     return True
+
+
+def _acquire_write_lock(wiki_root: Path) -> sqlite3.Connection:
+    """Reserve the wiki-wide write boundary for files, state, sidecar, and log."""
+    lock_path = wiki_root / WIKI_DIR_NAME / WRITE_LOCK_NAME
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(lock_path, timeout=30.0)
+    conn.execute("PRAGMA busy_timeout = 30000")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
+def _release_write_lock(conn: sqlite3.Connection) -> None:
+    """Release a lock acquired by :func:`_acquire_write_lock`."""
+    try:
+        conn.rollback()
+    finally:
+        conn.close()

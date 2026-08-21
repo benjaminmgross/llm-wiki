@@ -51,6 +51,30 @@ governs what page kinds exist, when to update vs. create, and how to cite.
    malformed or unanswerable from the wiki, say so explicitly rather
    than padding an answer.
 
+## Multi-agent corpus ingestion (native session entitlement)
+
+Use this protocol when the active Codex or Claude Code session can delegate to
+sub-agents and a corpus has multiple pending sources:
+
+1. Run ``mdwiki session-ingest pending`` once. The parent assigns each listed
+   source to exactly one sub-agent; never duplicate an assignment.
+2. Bound parallel work to the smaller of the source count and the active
+   session's agent-slot limit. Use only native delegation from the active
+   Codex or Claude Code session. Workers must never use separate model APIs or local inference.
+3. Workers are read-only. For one assigned source, run
+   ``mdwiki session-ingest prepare <source> --output .mdwiki/session-plans/<source-id>.json``, inspect
+   source/schema/wiki context, and fill only the envelope's ``plan`` field.
+   Keeping envelopes under ``.mdwiki/`` prevents refresh from registering them
+   as sources. Workers never write ``wiki/``, ``state.db``, ``raw/.sources.json``, or logs.
+4. The parent collects envelopes and runs ``mdwiki session-ingest apply`` one
+   at a time. Parent-only apply serializes wiki/database writes and preserves
+   one transaction and undo record per source.
+5. If apply reports an invalidated plan, the parent prepares fresh context and
+   must retry that source with a fresh sub-agent plan. Cap this at three retries;
+   leave an exhausted source pending/failed and continue the corpus.
+6. Resume an interrupted run from ``session-ingest pending``. Already-ingested
+   sources are absent, while pending or failed sources remain eligible.
+
 ## Page version chain
 
 When you (or any tool) overwrite a page in ``wiki/``, mdwiki automatically

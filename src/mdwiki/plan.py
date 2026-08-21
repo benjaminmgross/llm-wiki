@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 # Baseline page kinds always allowed by every profile. Extra kinds declared
@@ -210,8 +210,18 @@ def parse_plan_dict(payload: dict[str, Any], *, allowed_kinds: frozenset[str] | 
         _validate_page_path(update.page, field="updates[].page")
     for new_page in new_pages:
         _validate_page_path(new_page.path, field="new_pages[].path")
+    _validate_unique_write_targets(updates=updates, new_pages=new_pages)
 
     return Plan(verdict=verdict, rationale=rationale, updates=updates, new_pages=new_pages, cross_refs=cross_refs)
+
+
+def _validate_unique_write_targets(*, updates: tuple[Update, ...], new_pages: tuple[NewPage, ...]) -> None:
+    """Reject plans that would snapshot or overwrite one page more than once."""
+    seen: set[str] = set()
+    for path in [*(update.page for update in updates), *(new_page.path for new_page in new_pages)]:
+        if path in seen:
+            raise PlanValidationError(f"Plan contains duplicate write target {path!r}.")
+        seen.add(path)
 
 
 def _validate_page_path(path: str, *, field: str) -> None:
@@ -239,6 +249,10 @@ def _validate_page_path(path: str, *, field: str) -> None:
     if ".." in path.split("/"):
         raise PlanValidationError(
             f"{field}={path!r} contains a '..' segment; path traversal is not allowed."
+        )
+    if "\\" in path or PurePosixPath(path).as_posix() != path:
+        raise PlanValidationError(
+            f"{field}={path!r} must be a canonical POSIX path without backslashes, repeated separators, or '.' segments."
         )
 
 

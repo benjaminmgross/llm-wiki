@@ -238,6 +238,47 @@ def test_update_page_outside_wiki_is_rejected() -> None:
 
 
 @pytest.mark.unit
+def test_duplicate_update_targets_are_rejected() -> None:
+    payload = _valid_payload()
+    payload["updates"] = [
+        {"page": "wiki/concepts/shared.md", "content": "first", "claims": []},
+        {"page": "wiki/concepts/shared.md", "content": "second", "claims": []},
+    ]
+    payload["new_pages"] = []
+
+    with pytest.raises(PlanValidationError, match="duplicate write target"):
+        parse_plan(json.dumps(payload))
+
+
+@pytest.mark.unit
+def test_update_and_new_page_target_collision_is_rejected() -> None:
+    payload = _valid_payload()
+    payload["updates"] = [{"page": "wiki/concepts/shared.md", "content": "update", "claims": []}]
+    payload["new_pages"] = [
+        {
+            "path": "wiki/concepts/shared.md",
+            "kind": "concept",
+            "content": "replacement",
+            "claims": [],
+        }
+    ]
+
+    with pytest.raises(PlanValidationError, match="duplicate write target"):
+        parse_plan(json.dumps(payload))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("alias", ["wiki/concepts/./shared.md", "wiki/concepts//shared.md"])
+def test_noncanonical_page_target_alias_is_rejected(alias: str) -> None:
+    payload = _valid_payload()
+    payload["updates"] = [{"page": "wiki/concepts/shared.md", "content": "update", "claims": []}]
+    payload["new_pages"] = [{"path": alias, "kind": "concept", "content": "replacement", "claims": []}]
+
+    with pytest.raises(PlanValidationError, match="canonical POSIX path"):
+        parse_plan(json.dumps(payload))
+
+
+@pytest.mark.unit
 def test_dot_dot_segment_in_path_is_rejected() -> None:
     payload = _valid_payload()
     payload["new_pages"][0]["path"] = "wiki/../.mdwiki/state.db"

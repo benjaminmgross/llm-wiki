@@ -133,6 +133,7 @@ state.db
 state.db-journal
 state.db-wal
 state.db-shm
+write.lock
 undo/
 """
 

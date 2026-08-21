@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from pytest_mock import MockerFixture
 
 from mdwiki import __version__
 from mdwiki.cli import main
+from mdwiki.init import init_wiki
 
 
 @pytest.mark.unit
@@ -697,6 +699,58 @@ def test_cli_help_describes_failed_source_status_and_retry(
     assert main(["ingest", "--help"]) == 0
     ingest_help = " ".join(capsys.readouterr().out.split())
     assert "pending or failed" in ingest_help
+
+
+def test_session_ingest_pending_emits_unique_json_manifest(tmp_path: Path, monkeypatch, capsys) -> None:
+    (tmp_path / "b.md").write_text("# B\n\nbody")
+    (tmp_path / "a.md").write_text("# A\n\nbody")
+    init_wiki(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main(["session-ingest", "pending"])
+    manifest = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert [source["original_path"] for source in manifest] == ["a.md", "b.md"]
+    assert len({source["id"] for source in manifest}) == 2
+
+
+def test_session_ingest_prepare_writes_editable_envelope(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "source.md").write_text("# Source\n\n## Evidence\n\nDurable source evidence belongs in the wiki.")
+    init_wiki(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    envelope_path = tmp_path / ".mdwiki" / "session-plans" / "plan.json"
+
+    exit_code = main(["session-ingest", "prepare", "source.md", "--output", str(envelope_path)])
+    envelope = json.loads(envelope_path.read_text())
+
+    assert exit_code == 0
+    assert envelope["source"]["original_path"] == "source.md"
+    assert envelope["plan"] is None
+
+
+def test_session_ingest_apply_returns_distinct_exit_for_invalidated_plan(tmp_path: Path, monkeypatch, capsys) -> None:
+    from mdwiki.session_ingest import prepare_session_plan
+
+    (tmp_path / "source.md").write_text("# Source\n\n## Evidence\n\nDurable source evidence belongs in the wiki.")
+    init_wiki(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    envelope = prepare_session_plan(tmp_path, "source.md").to_dict()
+    envelope["plan"] = {
+        "verdict": "low-quality",
+        "rationale": "No load-bearing content.",
+        "updates": [],
+        "new_pages": [],
+        "cross_refs": [],
+    }
+    (tmp_path / ".mdwiki" / "schema.md").write_text("changed after preparation")
+    envelope_path = tmp_path / "stale-plan.json"
+    envelope_path.write_text(json.dumps(envelope))
+
+    exit_code = main(["session-ingest", "apply", str(envelope_path)])
+
+    assert exit_code == 3
+    assert "invalidated" in capsys.readouterr().err
 
 
 @pytest.mark.integration

@@ -9,6 +9,7 @@ Built on [Karpathy's llm-wiki pattern](https://gist.github.com/karpathy/442a6bf5
 
 **v1.3.0 highlights (new):**
 
+- **Native-session multi-agent corpus ingest** — an active Codex or Claude Code session can assign unique sources to read-only sub-agents for parallel plan generation, then validate and apply those plans serially with optimistic page hashes. This path uses the current session entitlement rather than separate API or local-inference charges.
 - **`mdwiki refresh`** — re-scan an initialized wiki for newly-added files and register them as pending. Pair with `--bootstrap` for one-shot refreshes (`mdwiki refresh --bootstrap`); ideal for daily cron / scheduled-agent workflows. Content-hash dedup means previously-registered files are skipped automatically.
 - **Provider-aware bootstrap ingest** — `init/refresh --bootstrap-batch` honors `.mdwiki/config.toml`. Providers with native batch support use it; other providers explicitly fall back to isolated synchronous ingest with the same backend. There is no silent Anthropic switch.
 - **Durable partial-failure reporting** — failed sources retain their reason in `state.db` and `raw/.sources.json`; `mdwiki status` enumerates them and the next `--pending`/bootstrap run retries only pending or failed sources.
@@ -67,6 +68,7 @@ mdwiki status                        # see "412 pending sources"
 mdwiki doctor                        # verify provider + API ping
 mdwiki ingest one-file.md            # interactive single-source ingest
 mdwiki ingest --pending              # bulk ingest everything pending or previously failed
+mdwiki session-ingest pending        # JSON manifest for native session sub-agent assignment
 mdwiki refresh                       # later: pick up files added since init
 mdwiki refresh --bootstrap           # ...and immediately ingest them (good for cron)
 mdwiki query "what did I conclude about transformer attention sinks?"
@@ -92,6 +94,7 @@ your-folder/
     config.toml          # provider, model, embedder
     schema.md            # the LLM's playbook (page kinds, naming, cite-or-refuse rules)
     state.db             # local sqlite cache (gitignored)
+    write.lock           # sqlite-backed cross-process wiki write lock (gitignored)
     .gitignore           # ignores state.db + undo dirs
   raw/                   # immutable, content-addressed copies of your sources
     .sources.json        # mapping <hash> → original_path metadata
@@ -160,6 +163,9 @@ Refresh is content-hash dedup'd against `state.db`, so re-running it is safe and
 | `mdwiki ingest <source>` | Interactive single-source ingest (prompt → JSON plan → quote-verify → confirm → apply) |
 | `mdwiki ingest --pending` | Bulk-ingest every source in pending or failed status. Resumes cleanly after interruption or partial failure |
 | `mdwiki ingest --all` | Re-ingest every source, including already-ingested ones |
+| `mdwiki session-ingest pending` | Emit a stable JSON manifest of pending/failed sources, once each, for parent-session assignment |
+| `mdwiki session-ingest prepare <source> [-o envelope.json]` | Capture a read-only source/schema/page-hash envelope and plan contract without calling a provider or embedder |
+| `mdwiki session-ingest apply <envelope.json>` | Revalidate a session-produced plan against latest source/schema/target pages and apply one serialized per-source transaction; exit 3 means re-prepare and retry |
 | `mdwiki query "<q>" [--file]` | Cited Q&A from existing wiki pages; `--file` files the answer as a synthesis |
 | `mdwiki synthesize "<topic>" \| --auto` | Explicit synthesis from a topic, or walk the cross-ref graph and propose syntheses |
 | `mdwiki lint [--fix [=full]]` | Health check (broken refs, orphans, stale, coverage gaps). `--fix` strips broken refs deterministically; `--fix=full` re-ingests stale/coverage-gap sources |
@@ -189,6 +195,20 @@ Refresh is content-hash dedup'd against `state.db`, so re-running it is safe and
 7. Apply inside a sqlite transaction with per-tx undo snapshot. `mdwiki undo` reverses it.
 
 The LLM has explicit license to refuse: a source can verdict `low-quality`, `out-of-scope`, or `duplicate-of:<page>` instead of being force-fit into the wiki.
+
+All ingest transactions reserve a separate sqlite-backed wiki write lock before any file snapshot or replacement and hold it through database commit, sidecar mirroring, and log append. This protects page files, `index.md`, `state.db`, `raw/.sources.json`, and `log.md` across concurrent processes.
+
+## Native-session multi-agent corpus ingest
+
+`session-ingest` is the deterministic handoff for an active Codex or Claude Code session. mdwiki does not spawn agents itself, and this path never calls `mdwiki.llm`, a model SDK/HTTP endpoint, or the local embedder.
+
+1. The parent runs `mdwiki session-ingest pending` and assigns every listed source to exactly one native session sub-agent. Planning concurrency is bounded by the active session's actual agent-slot limit.
+2. Each worker stays read-only and runs `mdwiki session-ingest prepare <source> -o .mdwiki/session-plans/<source-id>.json`. Keeping envelopes under `.mdwiki/` prevents a later refresh from registering them as corpus sources. The envelope contains source sections, schema, current page paths/hashes, agent instructions, and the exact plan JSON contract. The worker fills only `plan`.
+3. The parent applies completed envelopes one at a time with `mdwiki session-ingest apply <envelope>.json`.
+4. Apply acquires the wiki-wide write lock, rechecks source/configuration/schema hashes, and compares only target pages with their analysis-time hashes. Unrelated page changes do not invalidate a plan; policy changes, overlapping updates, and new-page races do.
+5. Exit code 3 means the plan was invalidated. The parent re-prepares and re-plans that source, capped at three retries, while continuing other sources. Successful sources remain independently committed and undoable; interrupted or exhausted work remains pending/failed for the next manifest.
+
+Because session plans deliberately avoid local inference, their page rows carry no embedding until a later provider-backed ingest or `mdwiki rebuild --pages` refreshes the derived embedding cache. Page content, citations, transactions, source state, index, log, and undo remain complete.
 
 ## Configuration
 
