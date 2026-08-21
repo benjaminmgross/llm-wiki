@@ -60,6 +60,24 @@ def test_skill_guide_describes_failed_source_status_and_retry(tmp_path: Path, mo
 
 
 @pytest.mark.unit
+def test_skill_guide_defines_safe_native_session_multi_agent_protocol(tmp_path: Path, monkeypatch, capsys) -> None:
+    init_wiki(tmp_path, profile="working-dir")
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["skill"]) == 0
+    out = capsys.readouterr().out
+
+    assert "session-ingest" in out
+    assert "exactly one sub-agent" in out
+    assert "active Codex or Claude Code session" in out
+    assert "never use separate model APIs or local inference" in out
+    assert "read-only" in out
+    assert "agent-slot limit" in out
+    assert "parent" in out and "apply" in out
+    assert "invalidated" in out and "retry" in out
+
+
+@pytest.mark.unit
 def test_skill_emits_initiative_schema_when_initiative_profile_used(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

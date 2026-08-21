@@ -7,6 +7,7 @@ in ``cli.py`` is a thin shell around this function.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -184,21 +185,7 @@ def ingest_source(
     if plan is None:
         raise last_plan_error or IngestError("LLM did not return an ingest plan.")
 
-    if plan.is_empty():
-        with IngestTransaction(
-            wiki_root=wiki_root,
-            source_id=source_row["id"],
-            summary=f"{plan.verdict}: {source_row['original_path']} — {plan.rationale}",
-        ):
-            pass
-        return IngestResult(
-            source_id=source_row["id"],
-            applied=True,
-            message=f"Verdict: {plan.verdict}. {plan.rationale} (no edits applied)",
-            plan=plan,
-        )
-
-    if not yes:
+    if not plan.is_empty() and not yes:
         chooser = confirm or _terminal_confirm
         if not chooser(plan):
             return IngestResult(
@@ -208,24 +195,54 @@ def ingest_source(
                 plan=plan,
             )
 
-    summary = f"ingest {source_row['original_path']} → {len(plan.updates)} update(s), {len(plan.new_pages)} new page(s)"
-    with IngestTransaction(wiki_root=wiki_root, source_id=source_row["id"], summary=summary) as tx:
+    return apply_ingest_plan(
+        wiki_root,
+        source_id=source_row["id"],
+        original_path=source_row["original_path"],
+        plan=plan,
+        embedder=embedder,
+    )
+
+
+def apply_ingest_plan(
+    wiki_root: Path,
+    *,
+    source_id: str,
+    original_path: str,
+    plan: Plan,
+    embedder: Embedder | None,
+    validate_locked: Callable[[], None] | None = None,
+) -> IngestResult:
+    """Apply one already-validated plan through the normal per-source transaction."""
+    if plan.is_empty():
+        summary = f"{plan.verdict}: {original_path} — {plan.rationale}"
+        with IngestTransaction(wiki_root=wiki_root, source_id=source_id, summary=summary):
+            if validate_locked is not None:
+                validate_locked()
+        return IngestResult(
+            source_id=source_id,
+            applied=True,
+            message=f"Verdict: {plan.verdict}. {plan.rationale} (no edits applied)",
+            plan=plan,
+        )
+
+    summary = f"ingest {original_path} → {len(plan.updates)} update(s), {len(plan.new_pages)} new page(s)"
+    with IngestTransaction(wiki_root=wiki_root, source_id=source_id, summary=summary) as tx:
+        if validate_locked is not None:
+            validate_locked()
         page_embeddings: dict[str, bytes] = {}
         for new_page in plan.new_pages:
             tx.write_file(wiki_root / new_page.path, new_page.content)
-            page_embeddings[new_page.path] = _embed_page(embedder, path=new_page.path, content=new_page.content)
+            if embedder is not None:
+                page_embeddings[new_page.path] = _embed_page(embedder, path=new_page.path, content=new_page.content)
         for update in plan.updates:
-            # update.content is the COMPLETE revised page (per the prompt
-            # contract) — write it verbatim. Previous releases concatenated
-            # update.content onto the existing file, which silently violated
-            # the spec and made wiki pages grow without bound.
-            full_target = wiki_root / update.page
-            tx.write_file(full_target, update.content)
-            page_embeddings[update.page] = _embed_page(embedder, path=update.page, content=update.content)
-        _apply_pages_and_backrefs(tx=tx, plan=plan, embeddings=page_embeddings, source_id=source_row["id"])
+            tx.write_file(wiki_root / update.page, update.content)
+            if embedder is not None:
+                page_embeddings[update.page] = _embed_page(embedder, path=update.page, content=update.content)
+        _apply_pages_and_backrefs(tx=tx, plan=plan, embeddings=page_embeddings, source_id=source_id)
         tx.write_file(wiki_root / "wiki" / "index.md", build_index(wiki_root))
 
-    return IngestResult(source_id=source_row["id"], applied=True, message=summary, plan=plan)
+    return IngestResult(source_id=source_id, applied=True, message=summary, plan=plan)
 
 
 def _embed_page(embedder: Embedder, *, path: str, content: str) -> bytes:
@@ -317,11 +334,16 @@ def ingest_many(
     return results
 
 
-def _resolve_source(wiki_root: Path, source_id_or_path: str) -> dict[str, Any]:
+def _resolve_source(wiki_root: Path, source_id_or_path: str, *, read_only: bool = False) -> dict[str, Any]:
     db_path = wiki_root / WIKI_DIR_NAME / "state.db"
     candidates = _candidate_paths(source_id_or_path, wiki_root=wiki_root)
 
-    with connect(db_path) as conn:
+    if read_only:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    else:
+        conn = connect(db_path)
+    with conn:
         for candidate in candidates:
             row = conn.execute(
                 "SELECT id, original_path, raw_path, status FROM sources WHERE original_path = ?",

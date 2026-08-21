@@ -8,9 +8,11 @@ embedded contexts.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Literal
 
 import anthropic
 import openai
@@ -30,6 +32,13 @@ from mdwiki.query import QueryError, query_wiki
 from mdwiki.rebuild import RebuildError, rebuild_wiki
 from mdwiki.rebuild_log import rebuild_log
 from mdwiki.refresh import refresh_wiki
+from mdwiki.session_ingest import (
+    PlanInvalidatedError,
+    SessionPlanError,
+    apply_session_plan,
+    list_session_sources,
+    prepare_session_plan,
+)
 from mdwiki.skill import WikiNotFoundForSkill, run_skill
 from mdwiki.source import find_matching_sources, format_disambiguation, format_source_info, get_source_info
 from mdwiki.status import format_status, get_status
@@ -201,6 +210,30 @@ def _build_parser() -> argparse.ArgumentParser:
     bulk.add_argument("--pending", action="store_true", help="Ingest every source whose status is pending or failed.")
     ingest_p.add_argument("--yes", "-y", action="store_true", help="Apply LLM plans without confirmation (default ON for --all/--pending).")
     ingest_p.set_defaults(_handler=_cmd_ingest)
+
+    session_p = subparsers.add_parser(
+        "session-ingest",
+        help="Prepare and apply plans produced by native Codex/Claude session sub-agents without model API calls.",
+    )
+    session_subparsers = session_p.add_subparsers(dest="session_action", required=True, metavar="<action>")
+    session_pending_p = session_subparsers.add_parser(
+        "pending",
+        help="Emit the unique pending/failed source manifest as JSON for parent assignment.",
+    )
+    session_pending_p.set_defaults(_handler=_cmd_session_ingest)
+    session_prepare_p = session_subparsers.add_parser(
+        "prepare",
+        help="Capture a read-only source plan envelope for one native session sub-agent.",
+    )
+    session_prepare_p.add_argument("source", help="Registered source id, unique prefix, or original path.")
+    session_prepare_p.add_argument("--output", "-o", type=Path, help="Write the envelope to this file instead of stdout.")
+    session_prepare_p.set_defaults(_handler=_cmd_session_ingest)
+    session_apply_p = session_subparsers.add_parser(
+        "apply",
+        help="Validate an agent-filled envelope against latest state and apply one source transaction.",
+    )
+    session_apply_p.add_argument("envelope", type=Path, help="JSON envelope whose plan field was filled by a session sub-agent.")
+    session_apply_p.set_defaults(_handler=_cmd_session_ingest)
 
     query_p = subparsers.add_parser("query", help="Ask a question; get a cited answer drawn from existing wiki pages.")
     query_p.add_argument("question", help="The natural-language question to answer.")
@@ -484,7 +517,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         if args.source is not None:
             print("error: <source> cannot be combined with --all/--pending.", file=sys.stderr)
             return 2
-        scope = "all" if args.all_sources else "pending"
+        scope: Literal["all", "pending"] = "all" if args.all_sources else "pending"
         try:
             results = ingest_many(
                 wiki_root,
@@ -523,6 +556,51 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         return 1
     print(result.message)
     return 0  # rejection is not an error
+
+
+def _cmd_session_ingest(args: argparse.Namespace) -> int:
+    """Handle deterministic native-session plan preparation and apply."""
+    try:
+        wiki_root = find_wiki()
+    except WikiNotFound as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.session_action == "pending":
+        manifest = [source.to_dict() for source in list_session_sources(wiki_root)]
+        print(json.dumps(manifest, indent=2, sort_keys=True))
+        return 0
+
+    if args.session_action == "prepare":
+        try:
+            encoded = prepare_session_plan(wiki_root, args.source).to_json()
+        except (IngestError, OSError, UnicodeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if args.output is None:
+            print(encoded)
+        else:
+            try:
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(encoded + "\n")
+            except OSError as exc:
+                print(f"error: could not write session envelope — {exc}", file=sys.stderr)
+                return 1
+        return 0
+
+    try:
+        payload = json.loads(args.envelope.read_text())
+        if not isinstance(payload, dict):
+            raise SessionPlanError("Session envelope must be a JSON object.")
+        result = apply_session_plan(wiki_root, payload)
+    except PlanInvalidatedError as exc:
+        print(f"invalidated: {exc}", file=sys.stderr)
+        return 3
+    except (OSError, UnicodeError, IngestError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(result.message)
+    return 0
 
 
 def _cmd_query(args: argparse.Namespace) -> int:

@@ -315,6 +315,25 @@ output:
 
 ## Integration Patterns
 
+### Native Codex / Claude Code multi-agent corpus ingestion
+
+When this repository is used as an mdwiki CLI, prefer the runtime `mdwiki skill`
+guide as the authoritative agent protocol. In summary:
+
+1. The parent runs `mdwiki session-ingest pending` and assigns each source to
+   exactly one read-only native sub-agent, bounded by the active session's
+   agent-slot limit.
+2. Sub-agents use the current Codex or Claude Code session entitlement only.
+   Never call separate model APIs, configured mdwiki providers, or local
+   inference for this workflow.
+3. Each worker prepares one envelope under `.mdwiki/session-plans/`, inspects
+   source/wiki context, and fills only its `plan` field. Keeping envelopes under
+   `.mdwiki/` prevents refresh from registering them as sources. The parent
+   alone runs `session-ingest apply`, serially.
+4. An invalidated apply must be re-prepared and retried from latest state, up to
+   three times. Per-source transactions preserve failure isolation, resume, and
+   undo.
+
 ### With Claude Code Sessions
 
 Add to your CLAUDE.md:

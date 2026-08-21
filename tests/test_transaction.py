@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
+from pytest_mock import MockerFixture
 
 from mdwiki.init import init_wiki
 from mdwiki.state import connect
@@ -25,6 +27,57 @@ def test_successful_tx_writes_file(wiki: Path) -> None:
     with IngestTransaction(wiki_root=wiki, source_id=None, summary="test") as tx:
         tx.write_file(target, "## Foo\n\nhello")
     assert target.read_text() == "## Foo\n\nhello"
+
+
+@pytest.mark.unit
+def test_transaction_reserves_single_writer_before_file_mutation(wiki: Path) -> None:
+    lock_path = wiki / ".mdwiki" / "write.lock"
+
+    with IngestTransaction(wiki_root=wiki, source_id=None, summary="first writer"):
+        contender = sqlite3.connect(lock_path)
+        try:
+            contender.execute("PRAGMA busy_timeout = 0")
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                contender.execute("BEGIN IMMEDIATE")
+        finally:
+            contender.close()
+
+    contender = sqlite3.connect(lock_path)
+    try:
+        contender.execute("BEGIN IMMEDIATE")
+        contender.rollback()
+    finally:
+        contender.close()
+
+
+@pytest.mark.unit
+def test_transaction_enter_failure_closes_state_connection_and_releases_write_lock(
+    wiki: Path,
+    mocker: MockerFixture,
+) -> None:
+    class FailingConnection:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def execute(self, _sql: str) -> None:
+            raise sqlite3.OperationalError("state lock failed")
+
+        def close(self) -> None:
+            self.closed = True
+
+    state_conn = FailingConnection()
+    mocker.patch("mdwiki.transaction.connect", return_value=state_conn)
+
+    with pytest.raises(sqlite3.OperationalError, match="state lock failed"):
+        IngestTransaction(wiki_root=wiki, source_id=None, summary="fails on enter").__enter__()
+
+    assert state_conn.closed is True
+    lock_conn = sqlite3.connect(wiki / ".mdwiki" / "write.lock")
+    try:
+        lock_conn.execute("BEGIN IMMEDIATE")
+        lock_conn.rollback()
+    finally:
+        lock_conn.close()
 
 
 @pytest.mark.unit

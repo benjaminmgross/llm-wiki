@@ -7,6 +7,7 @@ status: locked
 tags: [mdwiki, design, llm-wiki, karpathy-pattern, multi-filetype, batch-api, local-providers, profiles, version-chain]
 supersedes: v0 design
 changelog:
+  - post-1.3 (2026-08-21) — Added native-session multi-agent corpus ingestion. Read-only Codex/Claude sub-agents may plan unique sources concurrently using the active session entitlement; the parent validates target-scoped source/schema/page hashes and applies one transaction at a time. A sqlite-backed cross-process lock protects filesystem, DB, sidecar, index, and log writes. Invalidated overlapping plans are re-prepared and retried without separate model APIs or local inference.
   - post-1.3 (2026-08-05) — Synchronous ingest now validates quotes inside the corrective-plan loop. Schema errors, existing-page collisions, invalid section ids, and non-verbatim quotes receive up to three corrective attempts before the source is persisted as failed. Validation remains strict; no claim is applied unless the final plan verifies.
   - post-1.3 (2026-07-22) — Provider-capability routing for `init/refresh --bootstrap-batch`: native batch when the configured provider supports it, otherwise an explicit synchronous fallback through that same provider. Added durable per-source failure reasons, failed-source status enumeration, and pending+failed-only retry semantics. No silent provider substitution.
   - 1.2.0 (2026-04-30) — Corpus-aware profiles (`mdwiki init --profile=working-dir|initiative|transcripts|framework`) layered on a Profile + deep-merge config-overlay foundation. New profile contents under `src/mdwiki/profiles/`. `MarkdownChunker` fallback tiers (H2 → H1 → paragraph → sliding-window). `_normalize(mode="transcripts")` strips `[HH:MM:SS]` and `Speaker:` prefixes for transcripts mode. New `TranscriptLoader` (VTT / SRT / Fathom-md). Page version chain (`previous_hash:` SHA-256 in YAML frontmatter, auto-embedded by `transaction.write_file()` for `wiki/` paths). Profile-aware plan validation (`allowed_kinds_for_wiki()`); legacy `pages.kind` CHECK constraint dropped via inline migration. New `mdwiki skill` command (runtime agent guide). Phase-5 quality primitives (`state.db.rejections`, `state.db.cost_ledger`, `mdwiki.rejection_memory`, `mdwiki.cost_guard`, `[unverified-quote]` lint check) — primitives only; ingest-path wiring is v1.2.1. New `scripts/run_canary.py` for real-corpus structural + live scorecards. Schema is forward-compatible; existing wikis auto-migrate on first connect (drops the kind CHECK; adds rejections + cost_ledger tables). 29 new tests, 416 total passing, 0 regressions.
@@ -142,6 +143,7 @@ Then the user picks how to bootstrap:
 | Incremental | `mdwiki ingest <file>` or `--pending` | Default; one source at a time, or only outstanding pending/failed sources |
 | Synchronous bootstrap | `mdwiki init --bootstrap` | Cold start through the configured provider, one independently committed source at a time |
 | Batch-preferred bootstrap | `mdwiki init --bootstrap-batch` | Use configured-provider native batch when supported; otherwise announce and use same-provider synchronous ingest |
+| Native session agents | `mdwiki session-ingest pending/prepare/apply` | Parallel read-only planning through the active Codex/Claude session entitlement; parent-only conflict-safe apply |
 | Lazy | (do nothing) | Sources stay `pending`; only ingested when referenced by a query |
 
 Bootstrap is where today's `clustering` + `synthesis` modules earn their keep — they solve the cold-start problem the wiki pattern is weakest at.
@@ -199,6 +201,33 @@ Step by step:
 7. Apply edits to `wiki/`; append to `log.md`; insert `events` + `backrefs` rows in `state.db`; mark source `ingested`. All within a single sqlite transaction.
 
 Periodically run `mdwiki lint` (or `--lint-after`) to catch drift.
+
+## Multi-agent corpus ingest through the active session
+
+The native-session workflow separates non-mutating plan generation from deterministic apply:
+
+```mermaid
+flowchart LR
+    P[Parent session] --> M[Unique pending source manifest]
+    M --> A1[Read-only sub-agent: source A]
+    M --> A2[Read-only sub-agent: source B]
+    M --> AN[Read-only sub-agent: source N]
+    A1 --> E1[Plan envelope + base hashes]
+    A2 --> E2[Plan envelope + base hashes]
+    AN --> EN[Plan envelope + base hashes]
+    E1 --> V[Parent latest-state validator]
+    E2 --> V
+    EN --> V
+    V -->|valid, serialized| T[Per-source IngestTransaction]
+    V -->|target changed| R[Fresh prepare + bounded retry]
+```
+
+- The parent assigns a source ID once and caps workers at the active session's real agent limit.
+- Workers use only native Codex/Claude delegation. They never invoke provider SDKs, model HTTP endpoints, or local inference, and never mutate wiki/database state.
+- Preparation records the immutable source, configuration-policy, and schema hashes plus all current non-generated page hashes. Apply validates only pages the plan will update or create, so disjoint plans survive unrelated commits.
+- Existing-page updates use compare-at-apply semantics; new pages require absent-at-analysis and absent-at-apply. A conflict produces a distinct invalidation, no partial writes, and a fresh planning attempt.
+- `IngestTransaction` reserves `.mdwiki/write.lock` before any file operation and holds it through DB commit, source-sidecar mirroring, and log append. This protects shared files even though SQLite WAL alone only serializes database writers.
+- Plan validation rejects duplicate or colliding write targets before apply, so one transaction snapshots each page at most once. Every successful source retains its existing transaction, inverse SQL, file snapshot, event, source state, resume, and undo semantics.
 
 ## The LLM call
 
@@ -342,6 +371,7 @@ Default `.gitignore` for the wiki folder:
 ```
 .mdwiki/state.db
 .mdwiki/state.db-journal
+.mdwiki/write.lock
 .mdwiki/undo/
 ```
 
@@ -384,6 +414,7 @@ Each implementation phase ends in a manual-testing gate where the user runs conc
 | `mdwiki init [--bootstrap\|--bootstrap-batch]` | Scaffold, register sources, and optionally ingest through the configured provider |
 | `mdwiki refresh [--bootstrap\|--bootstrap-batch]` | Register new sources and optionally ingest outstanding pending/failed sources |
 | `mdwiki ingest [<file>\|--all\|--pending] [--yes]` | Incremental ingest; `--pending` includes retryable failures |
+| `mdwiki session-ingest pending\|prepare\|apply` | Native-session parallel plan handoff with parent-owned latest-state validation and serialized per-source apply |
 | `mdwiki query "<q>" [--file]` | Search + synthesize, optionally file findings as a new page |
 | `mdwiki lint [--fix]` | Contradictions, orphans, stale, focus, headers, gaps |
 | `mdwiki status` | Pending/failed/ingested counts, failed-source reasons, last lint, recent events |

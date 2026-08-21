@@ -140,6 +140,7 @@ def test_init_gitignore_protects_state_db_and_undo(fresh_target: Path) -> None:
     # They're per-process journal files and must not be committed.
     assert "state.db-wal" in gi
     assert "state.db-shm" in gi
+    assert "write.lock" in gi
 
 
 @pytest.mark.unit
