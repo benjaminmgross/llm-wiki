@@ -13,13 +13,12 @@ remediation) are deferred to v1.1.
 
 from __future__ import annotations
 
-import re
 import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from mdwiki.cross_refs import resolve_page_link_target
+from mdwiki.cross_refs import markdown_inline_links, resolve_page_link_target
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.semantic_pages import INFRASTRUCTURE_PAGE_PATHS, is_semantic_page_path
 from mdwiki.state import connect
@@ -76,9 +75,6 @@ def lint_wiki(wiki_root: Path) -> LintReport:
     return LintReport(findings=tuple(findings), findings_by_kind=by_kind)
 
 
-_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
-
-
 def _iter_wiki_pages(wiki_root: Path) -> list[Path]:
     """Every regular page under ``wiki/`` (excludes index.md and log.md)."""
     wiki_dir = wiki_root / "wiki"
@@ -91,8 +87,7 @@ def _check_broken_refs(wiki_root: Path) -> list[LintFinding]:
     findings: list[LintFinding] = []
     for page in _iter_wiki_pages(wiki_root):
         rel_page = page.relative_to(wiki_root).as_posix()
-        for match in _LINK_RE.finditer(page.read_text()):
-            target = match.group(2)
+        for link_text, target in markdown_inline_links(page.read_text()):
             resolved_target = resolve_page_link_target(from_page=rel_page, raw_target=target)
             if resolved_target is None:
                 continue
@@ -104,9 +99,9 @@ def _check_broken_refs(wiki_root: Path) -> list[LintFinding]:
                     LintFinding(
                         kind="broken-ref",
                         page_path=rel_page,
-                        message=f"link [{match.group(1)}]({target}) → not found at {resolved}",
+                        message=f"link [{link_text}]({target}) → not found at {resolved}",
                         severity="warn",
-                        link_text=match.group(1),
+                        link_text=link_text,
                         link_target=target,
                     )
                 )
@@ -120,8 +115,7 @@ def _check_orphans(wiki_root: Path) -> list[LintFinding]:
     inbound: set[str] = set()
     for page in pages:
         rel_page = page.relative_to(wiki_root).as_posix()
-        for match in _LINK_RE.finditer(page.read_text()):
-            target = match.group(2)
+        for _, target in markdown_inline_links(page.read_text()):
             resolved_target = resolve_page_link_target(from_page=rel_page, raw_target=target)
             if resolved_target is None or not is_semantic_page_path(resolved_target):
                 continue

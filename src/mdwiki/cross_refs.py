@@ -10,7 +10,7 @@ from urllib.parse import quote, unquote
 
 from mdwiki.plan import CrossRef, Plan
 
-_LINK_OPEN_RE = re.compile(r"\[[^\]\n]+\]\(")
+_LINK_OPEN_RE = re.compile(r"\[([^\]\n]+)\]\(")
 _MANAGED_LINK_RE = re.compile(r"^- \[([^\]]+)\]\(([^)]+)\)$", flags=re.MULTILINE)
 _BLOCK_START = "<!-- mdwiki:cross-refs -->"
 _BLOCK_END = "<!-- /mdwiki:cross-refs -->"
@@ -181,21 +181,32 @@ def _links_to(content: str, *, from_page: str, to_page: str) -> bool:
 
 def _markdown_link_targets(content: str) -> list[str]:
     """Extract inline link destinations, including balanced and ``<...>`` forms."""
-    targets: list[str] = []
+    return [target for _, target in markdown_inline_links(content)]
+
+
+def markdown_inline_links(content: str) -> list[tuple[str, str]]:
+    """Extract ``(link text, destination)`` pairs from inline Markdown links.
+
+    CommonMark permits an optional quoted or parenthesized title after either a
+    bare destination or an angle-bracket destination.  Titles are deliberately
+    excluded from the returned destination so link consumers compare the edge,
+    not its presentation metadata.
+    """
+    links: list[tuple[str, str]] = []
     for match in _LINK_OPEN_RE.finditer(content):
         start = match.end()
         if start >= len(content):
             continue
         if content[start] == "<":
             end = _angle_destination_end(content, start=start + 1)
-            if end is not None:
-                targets.append(content[start + 1 : end])
+            if end is not None and _optional_title_end(content, start=end + 1) is not None:
+                links.append((match.group(1), content[start + 1 : end]))
             continue
 
-        end = _balanced_destination_end(content, start=start)
+        end = _bare_destination_end(content, start=start)
         if end is not None and end > start:
-            targets.append(content[start:end])
-    return targets
+            links.append((match.group(1), content[start:end]))
+    return links
 
 
 def _angle_destination_end(content: str, *, start: int) -> int | None:
@@ -212,14 +223,11 @@ def _angle_destination_end(content: str, *, start: int) -> int | None:
             continue
         if character != ">":
             continue
-        closing = index + 1
-        while closing < len(content) and content[closing] in " \t":
-            closing += 1
-        return index if closing < len(content) and content[closing] == ")" else None
+        return index
     return None
 
 
-def _balanced_destination_end(content: str, *, start: int) -> int | None:
+def _bare_destination_end(content: str, *, start: int) -> int | None:
     depth = 1
     escaped = False
     for index in range(start, len(content)):
@@ -237,7 +245,45 @@ def _balanced_destination_end(content: str, *, start: int) -> int | None:
             depth -= 1
             if depth == 0:
                 return index
+        elif character in " \t" and depth == 1 and _optional_title_end(content, start=index) is not None:
+            return index
     return None
+
+
+def _optional_title_end(content: str, *, start: int) -> int | None:
+    """Return the outer link's closing ``)`` when a valid optional title follows."""
+    cursor = start
+    while cursor < len(content) and content[cursor] in " \t":
+        cursor += 1
+    if cursor >= len(content) or content[cursor] in "\r\n":
+        return None
+    if content[cursor] == ")":
+        return cursor
+    if cursor == start or content[cursor] not in {'"', "'", "("}:
+        return None
+
+    opener = content[cursor]
+    closer = ")" if opener == "(" else opener
+    cursor += 1
+    escaped = False
+    while cursor < len(content):
+        character = content[cursor]
+        if character in "\r\n":
+            return None
+        if escaped:
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == closer:
+            cursor += 1
+            break
+        cursor += 1
+    else:
+        return None
+
+    while cursor < len(content) and content[cursor] in " \t":
+        cursor += 1
+    return cursor if cursor < len(content) and content[cursor] == ")" else None
 
 
 def encode_page_link_target(*, from_page: str, to_page: str) -> str:

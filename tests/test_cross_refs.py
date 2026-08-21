@@ -48,6 +48,60 @@ def test_ordinary_markdown_link_prevents_redundant_managed_link(wiki: Path) -> N
 
 
 @pytest.mark.parametrize(
+    ("destination", "target_name"),
+    [
+        ('target.md "Helpful title"', "target.md"),
+        ("target.md 'Helpful title'", "target.md"),
+        ("target.md (Helpful title)", "target.md"),
+        ('target(v2).md "Helpful title"', "target(v2).md"),
+        ('<target.md> "Helpful title"', "target.md"),
+        ("<target.md> 'Helpful title'", "target.md"),
+        ("<target.md> (Helpful title)", "target.md"),
+    ],
+)
+def test_ordinary_markdown_link_title_prevents_redundant_managed_link(wiki: Path, destination: str, target_name: str) -> None:
+    source = wiki / "wiki/concepts/source.md"
+    (wiki / "wiki" / "concepts" / target_name).write_text("# Target\n")
+    original = f"# Source\n\nSee [the target]({destination}).\n"
+    source.write_text(original)
+    ref = CrossRef("wiki/concepts/source.md", f"wiki/concepts/{target_name}", "Target")
+
+    first = materialize_cross_refs(wiki_root=wiki, plan=_plan(ref))["wiki/concepts/source.md"]
+    source.write_text(first)
+    second = materialize_cross_refs(wiki_root=wiki, plan=_plan(ref))["wiki/concepts/source.md"]
+
+    assert first == original
+    assert second == first
+    assert "mdwiki:cross-refs" not in first
+
+
+@pytest.mark.parametrize(
+    "destination",
+    ['target.md "Helpful title"', "target.md 'Helpful title'", "target.md (Helpful title)", '<target.md> "Helpful title"'],
+)
+def test_ordinary_titled_link_removes_redundant_existing_managed_link(wiki: Path, destination: str) -> None:
+    source = wiki / "wiki/concepts/source.md"
+    source.write_text(
+        f"# Source\n\nSee [the target]({destination}).\n\n"
+        "<!-- mdwiki:cross-refs -->\n"
+        "## Related\n\n"
+        "- [Redundant target](target.md)\n"
+        "- [Other](other.md)\n"
+        "<!-- /mdwiki:cross-refs -->\n"
+    )
+    ref = CrossRef("wiki/concepts/source.md", "wiki/concepts/target.md", "Target")
+
+    first = materialize_cross_refs(wiki_root=wiki, plan=_plan(ref))["wiki/concepts/source.md"]
+    source.write_text(first)
+    second = materialize_cross_refs(wiki_root=wiki, plan=_plan(ref))["wiki/concepts/source.md"]
+
+    assert second == first
+    assert first.count("- [Redundant target](target.md)") == 0
+    assert destination in first
+    assert "- [Other](other.md)" in first
+
+
+@pytest.mark.parametrize(
     "destination",
     ["target (v2).md", "<target (v2).md>"],
 )
@@ -111,14 +165,7 @@ def test_link_inside_fenced_example_does_not_suppress_real_edge(wiki: Path) -> N
 
 def test_complete_managed_block_inside_fence_is_preserved_idempotently(wiki: Path) -> None:
     source = wiki / "wiki/concepts/source.md"
-    fenced_block = (
-        "```md\n"
-        "<!-- mdwiki:cross-refs -->\n"
-        "## Related\n\n"
-        "- [Example](other.md)\n"
-        "<!-- /mdwiki:cross-refs -->\n"
-        "```\n"
-    )
+    fenced_block = "```md\n<!-- mdwiki:cross-refs -->\n## Related\n\n- [Example](other.md)\n<!-- /mdwiki:cross-refs -->\n```\n"
     source.write_text(f"# Source\n\n{fenced_block}")
     ref = CrossRef("wiki/concepts/source.md", "wiki/concepts/target.md", "Target")
 

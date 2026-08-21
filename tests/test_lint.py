@@ -65,6 +65,21 @@ def test_lint_resolves_percent_encoded_semantic_page_targets(wiki: Path, target_
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "destination",
+    ['target.md "Helpful title"', "target.md 'Helpful title'", "target.md (Helpful title)", '<target.md> "Helpful title"'],
+)
+def test_lint_recognizes_inline_links_with_optional_titles(wiki: Path, destination: str) -> None:
+    _add_page(wiki, path="wiki/concepts/source.md", content=f"# Source\n\n[Target]({destination})")
+    _add_page(wiki, path="wiki/concepts/target.md")
+
+    report = lint_wiki(wiki)
+
+    assert not any(f.kind == "broken-ref" for f in report.findings)
+    assert not any(f.kind == "orphan" and f.page_path.endswith("target.md") for f in report.findings)
+
+
+@pytest.mark.unit
 def test_lint_skips_external_links(wiki: Path) -> None:
     _add_page(
         wiki,
