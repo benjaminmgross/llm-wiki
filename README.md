@@ -194,6 +194,18 @@ Refresh is content-hash dedup'd against `state.db`, so re-running it is safe and
 6. Show the plan; you approve, edit, or reject (`--yes` to skip).
 7. Apply inside a sqlite transaction with per-tx undo snapshot. Planned `cross_refs` become relative Markdown links in their source pages, so readers and `mdwiki lint` observe the same graph. `mdwiki undo` reverses every page and link edit.
 
+mdwiki delegates CommonMark interpretation—including inline and reference-style
+links, titles, escapes, and code fences—to
+[`markdown-it-py`](https://markdown-it-py.readthedocs.io/). Its own
+cross-reference code is limited to wiki path policy and byte-preserving edits
+inside `<!-- mdwiki:cross-refs -->` blocks. This boundary is intentional:
+standardized syntax belongs to a maintained parser library, while mdwiki owns
+only its domain-specific semantics. The same parser supplies exact source forms
+for deterministic broken-link fixes. A fix is applied only when that source
+form occurs uniquely, so identical examples in code spans or fences fail closed
+instead of being rewritten. Transactional writes preserve explicit LF/CRLF
+content and existing frontmatter newline style.
+
 The LLM has explicit license to refuse: a source can verdict `low-quality`, `out-of-scope`, or `duplicate-of:<page>` instead of being force-fit into the wiki.
 
 All ingest transactions reserve a separate sqlite-backed wiki write lock before any file snapshot or replacement and hold it through database commit, sidecar mirroring, and log append. This protects page files, `index.md`, `state.db`, `raw/.sources.json`, and `log.md` across concurrent processes.

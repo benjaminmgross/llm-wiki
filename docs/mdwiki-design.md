@@ -290,6 +290,22 @@ an equivalent existing edge is not duplicated. Cross-reference-only changes use
 the same transaction, page metadata, version-chain, embedding, and undo paths as
 ordinary page updates.
 
+CommonMark syntax is parsed by `markdown-it-py`; mdwiki does not maintain a
+parallel link, title, escape, reference, or fence grammar. The parser's token
+stream identifies semantic links and the source-line boundaries of mdwiki's
+exact HTML ownership markers. mdwiki then applies only domain policy (endpoint
+resolution, deduplication, ordering, and URI-safe relative targets) and edits
+only owned block byte ranges. As an architecture rule, mature libraries own
+standardized formats and protocols unless a documented constraint makes that
+impossible; project code should remain a thin policy adapter.
+
+`lint --fix` uses source forms captured by the same parser rule rather than
+reconstructing Markdown from normalized semantic tokens. It rewrites only a
+unique exact occurrence and fails closed when the form is ambiguous, such as an
+identical example inside code. The transactional text boundary preserves
+explicit newlines, and version-chain frontmatter updates retain the page's LF or
+CRLF convention.
+
 Verification stack (cheapest → most expensive):
 
 1. **Schema-validated JSON.** Invalid plans enter a bounded corrective loop (up to three retries by default).

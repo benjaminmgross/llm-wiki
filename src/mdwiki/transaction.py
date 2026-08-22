@@ -70,7 +70,7 @@ class IngestTransaction:
         self._conn: sqlite3.Connection | None = None
         self._write_lock_conn: sqlite3.Connection | None = None
         self._committed: bool = False
-        self._inverses: list[tuple[str, tuple]] = []
+        self._inverses: list[tuple[str, tuple[object, ...]]] = []
         self._prev_source_state: tuple[str, float | None, str | None] | None = None
 
     @property
@@ -141,7 +141,8 @@ class IngestTransaction:
             # the os.replace below clobbers the file.
             if _is_wiki_page(rel):
                 try:
-                    prev_body = path.read_text()
+                    with path.open(encoding="utf-8", newline="") as previous_file:
+                        prev_body = previous_file.read()
                 except OSError:
                     prev_body = None
         else:
@@ -160,7 +161,8 @@ class IngestTransaction:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_name(f"{path.name}.tmp-{self._tx_id}")
         try:
-            tmp_path.write_text(content)
+            with tmp_path.open("w", encoding="utf-8", newline="") as temp_file:
+                _ = temp_file.write(content)
             import os
 
             os.replace(tmp_path, path)
@@ -175,7 +177,7 @@ class IngestTransaction:
         self._touched_files.append(path)
         return content
 
-    def add_inverse(self, sql: str, params: tuple) -> None:
+    def add_inverse(self, sql: str, params: tuple[object, ...]) -> None:
         """Record an inverse SQL statement to run on undo.
 
         Inverses are appended in apply order; ``mdwiki undo`` runs them in reverse

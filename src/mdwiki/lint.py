@@ -2,7 +2,7 @@
 
 Four deterministic rules ship in v1.0.0:
 
-- **broken-ref**  — markdown link `[text](path.md)` whose target doesn't exist
+- **broken-ref**  — parsed CommonMark link whose local target doesn't exist
 - **orphan**      — page that no other wiki page links to
 - **stale**       — page whose underlying source was modified after the page was last touched
 - **coverage-gap** — source marked `ingested` but with zero ``backrefs`` rows
@@ -18,8 +18,9 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from mdwiki.cross_refs import markdown_inline_links, resolve_page_link_target
+from mdwiki.cross_refs import resolve_page_link_target
 from mdwiki.discover import WIKI_DIR_NAME
+from mdwiki.markdown import markdown_inline_links, markdown_links
 from mdwiki.semantic_pages import INFRASTRUCTURE_PAGE_PATHS, is_semantic_page_path
 from mdwiki.state import connect
 
@@ -35,9 +36,10 @@ class LintFinding:
     ----------
     kind, page_path, message, severity
         Stable fields used by every rule.
-    link_text, link_target
+    link_text, link_target, link_source, link_source_text
         Populated by ``broken-ref`` findings so ``lint_fix`` can repair the link
-        without re-parsing the human-readable message. ``None`` for other rules.
+        without re-parsing or reconstructing Markdown source. ``None`` for other
+        rules.
     """
 
     kind: str
@@ -46,6 +48,8 @@ class LintFinding:
     severity: str
     link_text: str | None = None
     link_target: str | None = None
+    link_source: str | None = None
+    link_source_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -87,8 +91,8 @@ def _check_broken_refs(wiki_root: Path) -> list[LintFinding]:
     findings: list[LintFinding] = []
     for page in _iter_wiki_pages(wiki_root):
         rel_page = page.relative_to(wiki_root).as_posix()
-        for link_text, target in markdown_inline_links(page.read_text()):
-            resolved_target = resolve_page_link_target(from_page=rel_page, raw_target=target)
+        for link in markdown_links(page.read_text()):
+            resolved_target = resolve_page_link_target(from_page=rel_page, raw_target=link.target)
             if resolved_target is None:
                 continue
             if not is_semantic_page_path(resolved_target):
@@ -99,10 +103,12 @@ def _check_broken_refs(wiki_root: Path) -> list[LintFinding]:
                     LintFinding(
                         kind="broken-ref",
                         page_path=rel_page,
-                        message=f"link [{link_text}]({target}) → not found at {resolved}",
+                        message=f"link [{link.text}]({link.target}) → not found at {resolved}",
                         severity="warn",
-                        link_text=link_text,
-                        link_target=target,
+                        link_text=link.text,
+                        link_target=link.target,
+                        link_source=link.source_markup,
+                        link_source_text=link.source_text,
                     )
                 )
     return findings
