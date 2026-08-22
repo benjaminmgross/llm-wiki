@@ -59,6 +59,7 @@ def refresh_wiki(target: Path) -> InitResult:
         raw_dir=raw_dir,
         db_path=wiki_dir / "state.db",
         registry=registry,
+        exclude_globs=config.get("exclude", {}).get("globs", []),
     )
 
     suffix_parts: list[str] = []
@@ -77,8 +78,5 @@ def refresh_wiki(target: Path) -> InitResult:
         dedup_skipped=dedup_skipped,
         empty_load_skipped=empty_load_skipped,
         wiki_root=wiki_root,
-        message=(
-            f"Refreshed wiki at {wiki_root}/{WIKI_DIR_NAME}/. "
-            f"Registered {registered} new source(s)" + suffix
-        ),
+        message=(f"Refreshed wiki at {wiki_root}/{WIKI_DIR_NAME}/. Registered {registered} new source(s)" + suffix),
     )

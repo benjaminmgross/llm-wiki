@@ -257,7 +257,11 @@ def init_wiki(target: Path, *, profile: str = "working-dir") -> InitResult:
     registry = build_registry(config=merged_config, provider=None)
 
     registered, skipped, dedup_skipped, empty_load_skipped = _register_sources(
-        target=target, raw_dir=raw_dir, db_path=wiki_dir / "state.db", registry=registry
+        target=target,
+        raw_dir=raw_dir,
+        db_path=wiki_dir / "state.db",
+        registry=registry,
+        exclude_globs=merged_config.get("exclude", {}).get("globs", []),
     )
 
     suffix_parts: list[str] = []
@@ -276,10 +280,7 @@ def init_wiki(target: Path, *, profile: str = "working-dir") -> InitResult:
         dedup_skipped=dedup_skipped,
         empty_load_skipped=empty_load_skipped,
         wiki_root=target,
-        message=(
-            f"Initialized wiki at {target}/{WIKI_DIR_NAME}/. "
-            f"Registered {registered} source(s) as pending" + suffix
-        ),
+        message=(f"Initialized wiki at {target}/{WIKI_DIR_NAME}/. Registered {registered} source(s) as pending" + suffix),
     )
 
 
@@ -303,6 +304,7 @@ def _register_sources(
     raw_dir: Path,
     db_path: Path,
     registry: tuple[Loader, ...],
+    exclude_globs: list[str] | None = None,
 ) -> tuple[int, int, int, int]:
     """Walk ``target``, register every loadable file as a pending source.
 
@@ -330,6 +332,7 @@ def _register_sources(
     import sys
 
     spec = _load_gitignore(target)
+    config_spec = pathspec.PathSpec.from_lines("gitwildmatch", exclude_globs or [])
     source_paths = sorted(_iter_loadable_files(target, registry=registry))
     registered = 0
     skipped = 0
@@ -350,8 +353,7 @@ def _register_sources(
             # to an empty dict — that would clobber the corrupt-but-recoverable
             # sidecar on the next write.
             raise SidecarCorruptError(
-                f"raw/{SOURCES_SIDECAR_NAME} is not valid JSON ({exc}). "
-                "Restore it from version control, or delete raw/ and re-run init."
+                f"raw/{SOURCES_SIDECAR_NAME} is not valid JSON ({exc}). Restore it from version control, or delete raw/ and re-run init."
             ) from exc
     else:
         sidecar = {}
@@ -360,7 +362,7 @@ def _register_sources(
         for source_path in source_paths:
             try:
                 rel_posix = source_path.relative_to(target).as_posix()
-                if spec is not None and spec.match_file(rel_posix):
+                if (spec is not None and spec.match_file(rel_posix)) or config_spec.match_file(rel_posix):
                     skipped += 1
                     continue
 
@@ -378,9 +380,7 @@ def _register_sources(
                 # raw/<hash>-<slug>.md filenames; the second copy lands on
                 # disk before INSERT OR IGNORE drops the row, leaving an
                 # orphan file with no DB row and no sidecar entry.
-                already_registered = conn.execute(
-                    "SELECT 1 FROM sources WHERE id = ?", (short_hash,)
-                ).fetchone()
+                already_registered = conn.execute("SELECT 1 FROM sources WHERE id = ?", (short_hash,)).fetchone()
                 if already_registered is not None:
                     dedup_skipped += 1
                     continue
@@ -435,9 +435,7 @@ def _register_sources(
 _EXCLUDED_DIR_NAMES: frozenset[str] = frozenset({WIKI_DIR_NAME, "wiki", "raw"})
 
 
-def _iter_loadable_files(
-    target: Path, *, registry: tuple[Loader, ...]
-) -> list[Path]:
+def _iter_loadable_files(target: Path, *, registry: tuple[Loader, ...]) -> list[Path]:
     """Return every file under ``target`` that some registered loader claims.
 
     Parameters

@@ -73,3 +73,27 @@ def test_refresh_wiki_preserves_sidecar_merge(tmp_path: Path) -> None:
     sidecar = json.loads((tmp_path / "raw" / ".sources.json").read_text())
     paths = {entry["original_path"] for entry in sidecar.values()}
     assert paths == {"alpha.md", "beta.md"}
+
+
+@pytest.mark.unit
+def test_refresh_wiki_respects_persisted_config_exclude_globs(tmp_path: Path) -> None:
+    _seed_wiki(tmp_path)
+    config_path = tmp_path / ".mdwiki" / "config.toml"
+    config = config_path.read_text()
+    config_path.write_text(
+        config.replace(
+            "globs = []",
+            'globs = ["**/*", "!/*.md", "!/allowed/**/*.md"]',
+        )
+    )
+    (tmp_path / "allowed").mkdir()
+    (tmp_path / "allowed" / "keep.md").write_text("# Keep")
+    (tmp_path / "excluded").mkdir()
+    (tmp_path / "excluded" / "drop.md").write_text("# Drop")
+
+    result = refresh_wiki(tmp_path)
+
+    assert result.files_registered == 1
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        paths = {row["original_path"] for row in conn.execute("SELECT original_path FROM sources")}
+    assert paths == {"alpha.md", "allowed/keep.md"}

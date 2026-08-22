@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from mdwiki.init import NestedWikiError, _register_sources, init_wiki
+from mdwiki.init import DEFAULT_CONFIG, NestedWikiError, _register_sources, init_wiki
 from mdwiki.loaders import build_registry
 from mdwiki.state import connect
 
@@ -75,6 +75,23 @@ def test_fresh_init_respects_gitignore(fresh_target: Path) -> None:
     (ignored / "secret.md").write_text("# secret")
     result = init_wiki(fresh_target)
     assert result.files_registered == 3, "ignored/secret.md should not have been registered"
+
+
+@pytest.mark.unit
+def test_fresh_init_respects_config_exclude_globs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "top.md").write_text("# Top")
+    (tmp_path / "allowed").mkdir()
+    (tmp_path / "allowed" / "keep.md").write_text("# Keep")
+    (tmp_path / "excluded").mkdir()
+    (tmp_path / "excluded" / "drop.md").write_text("# Drop")
+    monkeypatch.setitem(DEFAULT_CONFIG["exclude"], "globs", ["**/*", "!/*.md", "!/allowed/**/*.md"])
+
+    result = init_wiki(tmp_path)
+
+    assert result.files_registered == 2
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        paths = {row["original_path"] for row in conn.execute("SELECT original_path FROM sources")}
+    assert paths == {"top.md", "allowed/keep.md"}
 
 
 @pytest.mark.unit
