@@ -20,9 +20,9 @@ from mdwiki.ingest import IngestResult, _chunk_or_whole, _recent_log_entries, _r
 from mdwiki.ingest_tool import INGEST_TOOL_DEFINITION
 from mdwiki.plan import Plan, allowed_kinds_for_wiki, parse_plan_dict
 from mdwiki.quote import min_quote_words_for_wiki, quote_normalize_mode_for_wiki, verify_plan
+from mdwiki.semantic_pages import is_semantic_page_path
 
 SESSION_ENVELOPE_VERSION: int = 1
-_GENERATED_PAGE_NAMES: frozenset[str] = frozenset({"index.md", "log.md"})
 SESSION_AGENT_INSTRUCTIONS: str = (
     "Analyze only this assigned source using the active Codex or Claude Code session. "
     "Remain read-only, inspect current wiki pages as needed, and fill only the plan field. "
@@ -98,8 +98,7 @@ def list_session_sources(wiki_root: Path) -> list[SessionSource]:
     with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT id, original_path, raw_path FROM sources "
-            "WHERE status IN ('pending', 'failed') ORDER BY original_path, id"
+            "SELECT id, original_path, raw_path FROM sources WHERE status IN ('pending', 'failed') ORDER BY original_path, id"
         ).fetchall()
     return [SessionSource(source_id=row["id"], original_path=row["original_path"], raw_path=row["raw_path"]) for row in rows]
 
@@ -239,6 +238,22 @@ def _validate_latest_state(
     for new_page in plan.new_pages:
         if new_page.path in page_sha256 or (wiki_root / new_page.path).exists():
             raise PlanInvalidatedError(f"New-page target {new_page.path} changed after plan preparation; prepare and retry.")
+    planned_new_pages = {new_page.path for new_page in plan.new_pages}
+    explicit_write_paths = planned_new_pages | {update.page for update in plan.updates}
+    for cross_ref in plan.cross_refs:
+        if cross_ref.from_page not in explicit_write_paths:
+            _require_fresh_cross_ref_endpoint(wiki_root, page_sha256, cross_ref.from_page)
+        if cross_ref.to_page not in explicit_write_paths and not (wiki_root / cross_ref.to_page).is_file():
+            raise PlanInvalidatedError(
+                f"Cross-reference endpoint {cross_ref.to_page} disappeared after plan preparation; prepare and retry."
+            )
+
+
+def _require_fresh_cross_ref_endpoint(wiki_root: Path, page_sha256: dict[str, str], endpoint: str) -> None:
+    expected = page_sha256.get(endpoint)
+    target = wiki_root / endpoint
+    if expected is None or not target.is_file() or _hash_file(target) != expected:
+        raise PlanInvalidatedError(f"Cross-reference endpoint {endpoint} changed after plan preparation; prepare and retry.")
 
 
 def _snapshot_pages(wiki_root: Path) -> dict[str, str]:
@@ -248,7 +263,7 @@ def _snapshot_pages(wiki_root: Path) -> dict[str, str]:
     paths = sorted(
         path
         for path in wiki_dir.rglob("*")
-        if path.is_file() and path.suffix.lower() in {".md", ".markdown"} and path.name.lower() not in _GENERATED_PAGE_NAMES
+        if path.is_file() and is_semantic_page_path(path.relative_to(wiki_root).as_posix())
     )
     return {path.relative_to(wiki_root).as_posix(): _hash_file(path) for path in paths}
 

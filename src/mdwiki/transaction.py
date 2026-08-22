@@ -70,7 +70,7 @@ class IngestTransaction:
         self._conn: sqlite3.Connection | None = None
         self._write_lock_conn: sqlite3.Connection | None = None
         self._committed: bool = False
-        self._inverses: list[tuple[str, tuple]] = []
+        self._inverses: list[tuple[str, tuple[object, ...]]] = []
         self._prev_source_state: tuple[str, float | None, str | None] | None = None
 
     @property
@@ -112,7 +112,7 @@ class IngestTransaction:
                 self._write_lock_conn = None
         return False
 
-    def write_file(self, path: Path, content: str) -> None:
+    def write_file(self, path: Path, content: str) -> str:
         """Atomically write ``content`` to ``path``.
 
         Writes to ``<path>.tmp-<tx_id>`` first, then ``os.replace`` swaps it
@@ -141,7 +141,8 @@ class IngestTransaction:
             # the os.replace below clobbers the file.
             if _is_wiki_page(rel):
                 try:
-                    prev_body = path.read_text()
+                    with path.open(encoding="utf-8", newline="") as previous_file:
+                        prev_body = previous_file.read()
                 except OSError:
                     prev_body = None
         else:
@@ -152,15 +153,16 @@ class IngestTransaction:
         # Embed previous_hash for wiki/ pages. New pages get a "genesis"
         # marker (no previous_hash key) — a missing key is itself meaningful
         # ("this is the first version").
-        if _is_wiki_page(rel) and prev_body is not None:
-            from mdwiki.version_chain import compute_body_hash, embed_previous_hash
+        if _is_wiki_page(rel):
+            from mdwiki.version_chain import prepare_wiki_page_content
 
-            content = embed_previous_hash(body=content, previous_hash=compute_body_hash(prev_body))
+            content = prepare_wiki_page_content(content=content, previous_body=prev_body)
 
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_name(f"{path.name}.tmp-{self._tx_id}")
         try:
-            tmp_path.write_text(content)
+            with tmp_path.open("w", encoding="utf-8", newline="") as temp_file:
+                _ = temp_file.write(content)
             import os
 
             os.replace(tmp_path, path)
@@ -173,8 +175,9 @@ class IngestTransaction:
                     pass
             raise
         self._touched_files.append(path)
+        return content
 
-    def add_inverse(self, sql: str, params: tuple) -> None:
+    def add_inverse(self, sql: str, params: tuple[object, ...]) -> None:
         """Record an inverse SQL statement to run on undo.
 
         Inverses are appended in apply order; ``mdwiki undo`` runs them in reverse
@@ -340,7 +343,7 @@ def _is_wiki_page(rel: Path) -> bool:
     """
     if not rel.parts or rel.parts[0] != "wiki":
         return False
-    if rel.suffix.lower() not in {".md", ".markdown"}:
+    if rel.suffix.lower() != ".md":
         return False
     name = rel.name.lower()
     if name in {"log.md", "index.md"}:

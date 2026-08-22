@@ -74,6 +74,16 @@ def test_embed_previous_hash_on_page_with_existing_frontmatter() -> None:
 
 
 @pytest.mark.unit
+def test_embed_previous_hash_preserves_crlf_frontmatter_and_body() -> None:
+    body = "---\r\ntitle: My Page\r\n---\r\n# Hello\r\nbody\r\n"
+
+    embedded = embed_previous_hash(body=body, previous_hash="abc123")
+
+    assert embedded == ("---\r\ntitle: My Page\r\nprevious_hash: abc123\r\n---\r\n# Hello\r\nbody\r\n")
+    assert extract_previous_hash(embedded) == "abc123"
+
+
+@pytest.mark.unit
 def test_embed_previous_hash_replaces_existing_previous_hash() -> None:
     """A second embed replaces the first ``previous_hash:`` rather than duplicating it."""
     first = embed_previous_hash(body="# Hello\nbody", previous_hash="OLD")

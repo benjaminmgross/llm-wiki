@@ -64,6 +64,85 @@ def test_lint_fix_strips_broken_links_in_default_mode(wiki_with_broken_ref: Path
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("source_link", "definition", "bare_text"),
+    [
+        ("[Broken][ref]", "\n\n[ref]: missing.md\n", "Broken"),
+        ('[Broken](<missing file.md> "Title")', "", "Broken"),
+        (r"[Bro\*ken](missing.md)", "", r"Bro\*ken"),
+    ],
+)
+def test_lint_fix_uses_parser_backed_source_forms(
+    tmp_path: Path,
+    source_link: str,
+    definition: str,
+    bare_text: str,
+) -> None:
+    init_wiki(tmp_path)
+    _add_page(
+        tmp_path,
+        path="wiki/concepts/a.md",
+        content=f"# A\n\nBefore {source_link} after.{definition}",
+    )
+
+    result = lint_fix(tmp_path, mode="default", yes=True)
+
+    assert result.fixed_count == 1
+    page = (tmp_path / "wiki/concepts/a.md").read_text()
+    assert source_link not in page
+    assert f"Before {bare_text} after." in page
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "example",
+    [
+        "`[Broken](missing.md)`",
+        "```md\n[Broken](missing.md)\n```",
+    ],
+)
+def test_lint_fix_fails_closed_when_source_form_is_not_unique(tmp_path: Path, example: str) -> None:
+    init_wiki(tmp_path)
+    page = tmp_path / "wiki/concepts/a.md"
+    original = f"# A\n\n[Broken](missing.md)\n\n{example}\n"
+    _add_page(tmp_path, path="wiki/concepts/a.md", content=original)
+
+    result = lint_fix(tmp_path, mode="default", yes=True)
+
+    assert result.fixed_count == 0
+    assert page.read_text() == original
+
+
+@pytest.mark.unit
+def test_lint_fix_preserves_crlf_outside_exact_replacement(tmp_path: Path) -> None:
+    init_wiki(tmp_path)
+    page = tmp_path / "wiki/concepts/a.md"
+    _add_page(tmp_path, path="wiki/concepts/a.md", content="# placeholder\n")
+    page.write_bytes(b"# A\r\n\r\n[Broken](missing.md)\r\n")
+
+    result = lint_fix(tmp_path, mode="default", yes=True)
+
+    assert result.fixed_count == 1
+    assert b"# A\r\n\r\nBroken\r\n" in page.read_bytes()
+
+
+@pytest.mark.unit
+def test_lint_fix_preserves_existing_crlf_frontmatter(tmp_path: Path) -> None:
+    init_wiki(tmp_path)
+    page = tmp_path / "wiki/concepts/a.md"
+    _add_page(tmp_path, path="wiki/concepts/a.md", content="# placeholder\n")
+    page.write_bytes(b"---\r\ntitle: A\r\n---\r\n# A\r\n\r\n[Broken](missing.md)\r\n")
+
+    result = lint_fix(tmp_path, mode="default", yes=True)
+
+    assert result.fixed_count == 1
+    written = page.read_bytes()
+    assert written.count(b"---\r\n") == 2
+    assert b"title: A\r\nprevious_hash: " in written
+    assert b"# A\r\n\r\nBroken\r\n" in written
+
+
+@pytest.mark.unit
 def test_lint_fix_user_can_skip_a_finding(wiki_with_broken_ref: Path) -> None:
     """When ``confirm`` returns False, the finding is left alone and counted as skipped."""
     result = lint_fix(
@@ -99,8 +178,7 @@ def test_lint_fix_default_mode_skips_stale_findings(tmp_path: Path, mocker: Mock
     db_path = tmp_path / ".mdwiki" / "state.db"
     with connect(db_path) as conn:
         conn.execute(
-            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) VALUES (?, ?, ?, ?, ?, ?)",
             ("src-aaa", "doc.md", "raw/aaa-doc.md", "abc" * 10, 2000.0, "ingested"),
         )
         conn.execute(
@@ -108,8 +186,7 @@ def test_lint_fix_default_mode_skips_stale_findings(tmp_path: Path, mocker: Mock
             ("wiki/concepts/x.md", "concept", 1000.0),
         )
         conn.execute(
-            "INSERT INTO backrefs (page_path, source_id, section_anchor, quote) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT INTO backrefs (page_path, source_id, section_anchor, quote) VALUES (?, ?, ?, ?)",
             ("wiki/concepts/x.md", "src-aaa", "doc.md/Intro", "q"),
         )
         conn.commit()
@@ -130,8 +207,7 @@ def test_lint_fix_full_mode_re_ingests_stale(tmp_path: Path, mocker: MockerFixtu
     db_path = tmp_path / ".mdwiki" / "state.db"
     with connect(db_path) as conn:
         conn.execute(
-            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) VALUES (?, ?, ?, ?, ?, ?)",
             ("src-aaa", "doc.md", "raw/aaa-doc.md", "abc" * 10, 2000.0, "ingested"),
         )
         conn.execute(
@@ -139,8 +215,7 @@ def test_lint_fix_full_mode_re_ingests_stale(tmp_path: Path, mocker: MockerFixtu
             ("wiki/concepts/x.md", "concept", 1000.0),
         )
         conn.execute(
-            "INSERT INTO backrefs (page_path, source_id, section_anchor, quote) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT INTO backrefs (page_path, source_id, section_anchor, quote) VALUES (?, ?, ?, ?)",
             ("wiki/concepts/x.md", "src-aaa", "doc.md/Intro", "q"),
         )
         conn.commit()
@@ -170,8 +245,7 @@ def test_lint_fix_full_mode_stops_after_consecutive_failures(tmp_path: Path, moc
             source_id = f"src-{index}"
             original_path = f"doc-{index}.md"
             conn.execute(
-                "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status) VALUES (?, ?, ?, ?, ?, ?)",
                 (source_id, original_path, f"raw/{source_id}.md", f"{index}" * 64, 1000.0, "ingested"),
             )
         conn.commit()

@@ -47,6 +47,54 @@ def test_lint_detects_broken_cross_ref(wiki: Path) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "target_name",
+    ["target with spaces.md", "target (v2).md", "target#section.md", "target%done.md", "café.md"],
+)
+def test_lint_resolves_percent_encoded_semantic_page_targets(wiki: Path, target_name: str) -> None:
+    from urllib.parse import quote
+
+    encoded = quote(target_name, safe="/-._~")
+    _add_page(wiki, path="wiki/concepts/source.md", content=f"# Source\n\n[Target]({encoded})")
+    _add_page(wiki, path=f"wiki/concepts/{target_name}")
+
+    report = lint_wiki(wiki)
+
+    assert not any(f.kind == "broken-ref" for f in report.findings)
+    assert not any(f.kind == "orphan" and f.page_path.endswith(target_name) for f in report.findings)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "destination",
+    ['target.md "Helpful title"', "target.md 'Helpful title'", "target.md (Helpful title)", '<target.md> "Helpful title"'],
+)
+def test_lint_recognizes_inline_links_with_optional_titles(wiki: Path, destination: str) -> None:
+    _add_page(wiki, path="wiki/concepts/source.md", content=f"# Source\n\n[Target]({destination})")
+    _add_page(wiki, path="wiki/concepts/target.md")
+
+    report = lint_wiki(wiki)
+
+    assert not any(f.kind == "broken-ref" for f in report.findings)
+    assert not any(f.kind == "orphan" and f.page_path.endswith("target.md") for f in report.findings)
+
+
+@pytest.mark.unit
+def test_lint_recognizes_reference_style_links(wiki: Path) -> None:
+    _add_page(
+        wiki,
+        path="wiki/concepts/source.md",
+        content='# Source\n\n[Target][target-ref]\n\n[target-ref]: target.md "Context"\n',
+    )
+    _add_page(wiki, path="wiki/concepts/target.md")
+
+    report = lint_wiki(wiki)
+
+    assert not any(f.kind == "broken-ref" for f in report.findings)
+    assert not any(f.kind == "orphan" and f.page_path.endswith("target.md") for f in report.findings)
+
+
+@pytest.mark.unit
 def test_lint_skips_external_links(wiki: Path) -> None:
     _add_page(
         wiki,
@@ -69,6 +117,17 @@ def test_lint_detects_orphan_pages(wiki: Path) -> None:
     assert "wiki/concepts/orphan.md" in orphans
     assert "wiki/concepts/a.md" not in orphans  # linked from b
     assert "wiki/concepts/b.md" not in orphans  # linked from a
+
+
+@pytest.mark.unit
+def test_lint_self_link_does_not_hide_orphan(wiki: Path) -> None:
+    """Only links from another semantic page satisfy the inbound-edge rule."""
+    page_path = "wiki/concepts/self-linked.md"
+    _add_page(wiki, path=page_path, content="# Self-linked\n\n[Self](self-linked.md)")
+
+    report = lint_wiki(wiki)
+
+    assert any(f.kind == "orphan" and f.page_path == page_path for f in report.findings)
 
 
 @pytest.mark.unit

@@ -30,6 +30,17 @@ def test_successful_tx_writes_file(wiki: Path) -> None:
 
 
 @pytest.mark.unit
+def test_transaction_preserves_explicit_newlines_in_content(wiki: Path) -> None:
+    target = wiki / "raw-output.txt"
+    content = "first\r\nsecond\nthird\r\n"
+
+    with IngestTransaction(wiki_root=wiki, source_id=None, summary="test") as tx:
+        tx.write_file(target, content)
+
+    assert target.read_bytes() == content.encode("utf-8")
+
+
+@pytest.mark.unit
 def test_transaction_reserves_single_writer_before_file_mutation(wiki: Path) -> None:
     lock_path = wiki / ".mdwiki" / "write.lock"
 

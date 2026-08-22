@@ -9,6 +9,7 @@ import pytest
 from pytest_mock import MockerFixture
 
 from mdwiki.init import init_wiki
+from mdwiki.lint import lint_wiki
 from mdwiki.session_ingest import (
     PlanInvalidatedError,
     apply_session_plan,
@@ -325,3 +326,88 @@ def test_same_source_envelope_cannot_be_applied_twice(session_wiki: Path) -> Non
 
     with pytest.raises(PlanInvalidatedError, match="already ingested"):
         apply_session_plan(session_wiki, payload)
+
+
+@pytest.mark.unit
+def test_session_cross_ref_materializes_link_visible_to_lint(session_wiki: Path) -> None:
+    target = session_wiki / "wiki" / "concepts" / "target.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Target\n\nExisting target.\n")
+    envelope = prepare_session_plan(session_wiki, "a.md").to_dict()
+    plan = _plan_for_new_page(
+        page="wiki/concepts/source.md",
+        section_id="a.md/Evidence",
+        content="# Source\n\nSource A evidence.\n",
+    )
+    plan["cross_refs"] = [
+        {
+            "from_page": "wiki/concepts/source.md",
+            "to_page": "wiki/concepts/target.md",
+            "anchor_text": "Existing target",
+        }
+    ]
+
+    apply_session_plan(session_wiki, _with_plan(envelope, plan))
+
+    assert "[Existing target](target.md)" in (session_wiki / "wiki" / "concepts" / "source.md").read_text()
+    orphan_paths = {finding.page_path for finding in lint_wiki(session_wiki).findings if finding.kind == "orphan"}
+    assert "wiki/concepts/target.md" not in orphan_paths
+
+
+@pytest.mark.unit
+def test_session_cross_ref_invalidates_when_existing_from_page_changed(session_wiki: Path) -> None:
+    source = session_wiki / "wiki" / "concepts" / "source.md"
+    target = session_wiki / "wiki" / "concepts" / "target.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("# Source\n\nOriginal.\n")
+    target.write_text("# Target\n\nOriginal.\n")
+    envelope = prepare_session_plan(session_wiki, "a.md").to_dict()
+    source.write_text("# Source\n\nChanged concurrently.\n")
+    plan = _plan_for_new_page(
+        page="wiki/concepts/evidence.md",
+        section_id="a.md/Evidence",
+        content="# Evidence\n\nSource A evidence.\n",
+    )
+    plan["cross_refs"] = [
+        {
+            "from_page": "wiki/concepts/source.md",
+            "to_page": "wiki/concepts/target.md",
+            "anchor_text": "Target",
+        }
+    ]
+
+    with pytest.raises(PlanInvalidatedError, match="source.md"):
+        apply_session_plan(session_wiki, _with_plan(envelope, plan))
+
+
+@pytest.mark.unit
+def test_session_cross_ref_accepts_target_only_content_change(session_wiki: Path) -> None:
+    source = session_wiki / "wiki" / "concepts" / "source.md"
+    target = session_wiki / "wiki" / "concepts" / "target.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("# Source\n\nOriginal.\n")
+    target.write_text("# Target\n\nOriginal.\n")
+    envelope = prepare_session_plan(session_wiki, "a.md").to_dict()
+    target.write_text("# Target\n\nChanged concurrently.\n")
+    plan = _plan_for_new_page(page="wiki/concepts/evidence.md", section_id="a.md/Evidence", content="# Evidence\n\nSource A evidence.\n")
+    plan["cross_refs"] = [{"from_page": "wiki/concepts/source.md", "to_page": "wiki/concepts/target.md", "anchor_text": "Target"}]
+
+    apply_session_plan(session_wiki, _with_plan(envelope, plan))
+
+    assert "[Target](target.md)" in source.read_text()
+
+
+@pytest.mark.unit
+def test_session_cross_ref_rejects_deleted_target_only_page(session_wiki: Path) -> None:
+    source = session_wiki / "wiki" / "concepts" / "source.md"
+    target = session_wiki / "wiki" / "concepts" / "target.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("# Source\n")
+    target.write_text("# Target\n")
+    envelope = prepare_session_plan(session_wiki, "a.md").to_dict()
+    target.unlink()
+    plan = _plan_for_new_page(page="wiki/concepts/evidence.md", section_id="a.md/Evidence", content="# Evidence\n\nSource A evidence.\n")
+    plan["cross_refs"] = [{"from_page": "wiki/concepts/source.md", "to_page": "wiki/concepts/target.md", "anchor_text": "Target"}]
+
+    with pytest.raises(PlanInvalidatedError, match="target.md"):
+        apply_session_plan(session_wiki, _with_plan(envelope, plan))

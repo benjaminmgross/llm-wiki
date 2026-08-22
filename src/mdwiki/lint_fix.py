@@ -1,7 +1,8 @@
 """Interactive remediation of lint findings.
 
 Default mode handles ONLY deterministic fixes:
-- ``broken-ref`` → strip the broken markdown link, keep the link's text as bare prose.
+- ``broken-ref`` → strip one uniquely identifiable broken CommonMark link and
+  keep its source label as bare prose. Ambiguous source forms fail closed.
 
 ``mode="full"`` adds LLM-touching fixes:
 - ``stale`` → re-ingest the source via ``ingest_source(force=True)``.
@@ -107,9 +108,7 @@ def lint_fix(
                 f"  ! lint-fix failed for {finding.kind} on {finding.page_path}: {exc}",
                 file=sys.stderr,
             )
-            logger.exception(
-                "lint-fix failed for %s on %s", finding.kind, finding.page_path
-            )
+            logger.exception("lint-fix failed for %s on %s", finding.kind, finding.page_path)
             failed += 1
             consecutive_failures += 1
             if max_consecutive_failures is not None and consecutive_failures >= max_consecutive_failures:
@@ -159,32 +158,39 @@ _BROKEN_REF_TARGET_RE = re.compile(r"link \[([^\]]+)\]\(([^)]+)\) → not found"
 def _fix_broken_ref(finding: LintFinding, *, wiki_root: Path) -> bool:
     """Replace ``[text](broken-target)`` with bare ``text`` in the linking page.
 
-    Prefers the structured ``link_text`` / ``link_target`` fields populated by
-    ``_check_broken_refs``. Falls back to parsing the human-readable message
-    only when those fields are absent (e.g. findings produced by older lint
-    runs persisted somewhere or hand-built test fixtures).
+    Prefers parser-derived source forms populated by ``_check_broken_refs``.
+    Falls back to structured semantic fields and then the human-readable
+    message only for findings created by older versions or hand-built fixtures.
     """
-    if finding.link_text is not None and finding.link_target is not None:
+    if finding.link_source is not None and finding.link_source_text is not None and finding.link_target is not None:
+        needle = finding.link_source
+        replacement = finding.link_source_text
+        target = finding.link_target
+    elif finding.link_text is not None and finding.link_target is not None:
         link_text = finding.link_text
         target = finding.link_target
+        needle = f"[{link_text}]({target})"
+        replacement = link_text
     else:
         match = _BROKEN_REF_TARGET_RE.search(finding.message)
         if match is None:
             return False
         link_text = match.group(1)
         target = match.group(2)
+        needle = f"[{link_text}]({target})"
+        replacement = link_text
 
     page_path = wiki_root / finding.page_path
     if not page_path.is_file():
         return False
-    original = page_path.read_text()
-    # Replace the specific link occurrence; an exact substring match keeps us
-    # from accidentally rewriting a different link with the same text but a
-    # different (still-valid) target.
-    needle = f"[{link_text}]({target})"
-    if needle not in original:
+    with page_path.open(encoding="utf-8", newline="") as page_file:
+        original = page_file.read()
+    # Parser tokens supply the exact source form but not an absolute character
+    # offset. Fail closed when that form is ambiguous (for example, duplicated
+    # inside a code span or fence) rather than rewriting unparsed examples.
+    if original.count(needle) != 1:
         return False
-    rewritten = original.replace(needle, link_text)
+    rewritten = original.replace(needle, replacement, 1)
 
     summary = f"lint-fix broken-ref in {finding.page_path}: drop link to {target}"
     with IngestTransaction(wiki_root=wiki_root, source_id=None, summary=summary) as tx:

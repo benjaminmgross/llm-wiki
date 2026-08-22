@@ -192,7 +192,19 @@ Refresh is content-hash dedup'd against `state.db`, so re-running it is safe and
 4. Single LLM call: schema + `index.md` + candidate pages + sections → JSON plan of `{verdict, updates, new_pages, cross_refs}`.
 5. **Verify every quote** in the plan against the source — pure Python, no extra LLM call. Hallucinations get rejected.
 6. Show the plan; you approve, edit, or reject (`--yes` to skip).
-7. Apply inside a sqlite transaction with per-tx undo snapshot. `mdwiki undo` reverses it.
+7. Apply inside a sqlite transaction with per-tx undo snapshot. Planned `cross_refs` become relative Markdown links in their source pages, so readers and `mdwiki lint` observe the same graph. `mdwiki undo` reverses every page and link edit.
+
+mdwiki delegates CommonMark interpretation—including inline and reference-style
+links, titles, escapes, and code fences—to
+[`markdown-it-py`](https://markdown-it-py.readthedocs.io/). Its own
+cross-reference code is limited to wiki path policy and byte-preserving edits
+inside `<!-- mdwiki:cross-refs -->` blocks. This boundary is intentional:
+standardized syntax belongs to a maintained parser library, while mdwiki owns
+only its domain-specific semantics. The same parser supplies exact source forms
+for deterministic broken-link fixes. A fix is applied only when that source
+form occurs uniquely, so identical examples in code spans or fences fail closed
+instead of being rewritten. Transactional writes preserve explicit LF/CRLF
+content and existing frontmatter newline style.
 
 The LLM has explicit license to refuse: a source can verdict `low-quality`, `out-of-scope`, or `duplicate-of:<page>` instead of being force-fit into the wiki.
 
@@ -205,10 +217,10 @@ All ingest transactions reserve a separate sqlite-backed wiki write lock before 
 1. The parent runs `mdwiki session-ingest pending` and assigns every listed source to exactly one native session sub-agent. Planning concurrency is bounded by the active session's actual agent-slot limit.
 2. Each worker stays read-only and runs `mdwiki session-ingest prepare <source> -o .mdwiki/session-plans/<source-id>.json`. Keeping envelopes under `.mdwiki/` prevents a later refresh from registering them as corpus sources. The envelope contains source sections, schema, current page paths/hashes, agent instructions, and the exact plan JSON contract. The worker fills only `plan`.
 3. The parent applies completed envelopes one at a time with `mdwiki session-ingest apply <envelope>.json`.
-4. Apply acquires the wiki-wide write lock, rechecks source/configuration/schema hashes, and compares only target pages with their analysis-time hashes. Unrelated page changes do not invalidate a plan; policy changes, overlapping updates, and new-page races do.
+4. Apply acquires the wiki-wide write lock, rechecks source/configuration/schema hashes, and compares every write/read-modify-write page (including a cross-reference `from_page`) with its analysis-time hash. A target-only cross-reference endpoint needs only to continue existing under the lock. Unrelated and target-only content changes do not invalidate a plan; policy changes, overlapping writes, deleted endpoints, and new-page races do.
 5. Exit code 3 means the plan was invalidated. The parent re-prepares and re-plans that source, capped at three retries, while continuing other sources. Successful sources remain independently committed and undoable; interrupted or exhausted work remains pending/failed for the next manifest.
 
-Because session plans deliberately avoid local inference, their page rows carry no embedding until a later provider-backed ingest or `mdwiki rebuild --pages` refreshes the derived embedding cache. Page content, citations, transactions, source state, index, log, and undo remain complete.
+Because session plans deliberately avoid local inference, their page rows carry no embedding until a later provider-backed ingest or `mdwiki rebuild --pages` refreshes the derived embedding cache. Page content, citations, relative cross-reference links, transactions, source state, index, log, and undo remain complete.
 
 ## Configuration
 
