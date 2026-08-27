@@ -220,8 +220,7 @@ def parse_plan_dict(payload: dict[str, Any], *, allowed_kinds: frozenset[str] | 
                 raise PlanValidationError(f"cross_refs[].{field}={endpoint!r} is {reason}, not a semantic endpoint.")
         if cross_ref.from_page == cross_ref.to_page:
             raise PlanValidationError(
-                "cross_refs[] endpoints must identify distinct semantic pages; "
-                f"from_page and to_page are both {cross_ref.from_page!r}."
+                f"cross_refs[] endpoints must identify distinct semantic pages; from_page and to_page are both {cross_ref.from_page!r}."
             )
         if not cross_ref.anchor_text.strip():
             raise PlanValidationError("cross_refs[].anchor_text must not be blank.")
@@ -292,7 +291,7 @@ def _extract_json_object(raw: str) -> str:
 def _validate_verdict(verdict: str) -> None:
     if verdict in VALID_BARE_VERDICTS:
         return
-    if verdict.startswith("duplicate-of:") and len(verdict) > len("duplicate-of:"):
+    if verdict.startswith("duplicate-of:") and verdict[len("duplicate-of:") :].strip():
         return
     raise PlanValidationError(f"Invalid verdict {verdict!r}. Must be one of {sorted(VALID_BARE_VERDICTS)} or 'duplicate-of:<page-path>'.")
 

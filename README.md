@@ -206,7 +206,7 @@ form occurs uniquely, so identical examples in code spans or fences fail closed
 instead of being rewritten. Transactional writes preserve explicit LF/CRLF
 content and existing frontmatter newline style.
 
-The LLM has explicit license to refuse: a source can verdict `low-quality`, `out-of-scope`, or `duplicate-of:<page>` instead of being force-fit into the wiki.
+The LLM has explicit license to refuse: a source can verdict `low-quality`, `out-of-scope`, or `duplicate-of:<page>` instead of being force-fit into the wiki. Because an intentional refusal correctly produces no page backrefs, `mdwiki lint` does not report it as a coverage gap when the source's latest durable rejection or ingest event records one of those bounded verdicts. Matching is case-sensitive, `duplicate-of:` requires a non-whitespace page, and ingest events must match the complete production summary envelope (`<verdict>: <original_path> — <rationale>`). An ingest event wins when cross-store timestamps tie. An arbitrary verdict, a malformed summary, an older superseded refusal, or an ingested source with zero backrefs and no bounded refusal remains a coverage-gap finding.
 
 All ingest transactions reserve a separate sqlite-backed wiki write lock before any file snapshot or replacement and hold it through database commit, sidecar mirroring, and log append. This protects page files, `index.md`, `state.db`, `raw/.sources.json`, and `log.md` across concurrent processes.
 
