@@ -205,15 +205,72 @@ def _check_unverified_quotes(wiki_root: Path) -> list[LintFinding]:
     return findings
 
 
+def _has_ingest_refusal_envelope(summary_body: str) -> bool:
+    """Return whether a refusal summary body has the producer's path envelope."""
+    original_path, delimiter, _rationale = summary_body.partition(" — ")
+    return bool(delimiter and original_path.strip())
+
+
+def _is_intentional_refusal(record_store: str | None, record_value: str | None) -> bool:
+    """Parse the bounded refusal formats stored by production writers."""
+    if record_store == "rejection":
+        if record_value in {"low-quality", "out-of-scope"}:
+            return True
+        duplicate_prefix = "duplicate-of:"
+        return bool(record_value and record_value.startswith(duplicate_prefix) and record_value[len(duplicate_prefix) :].strip())
+
+    if record_store != "ingest-event" or record_value is None:
+        return False
+
+    for verdict in ("low-quality", "out-of-scope"):
+        prefix = f"{verdict}: "
+        if record_value.startswith(prefix):
+            return _has_ingest_refusal_envelope(record_value[len(prefix) :])
+
+    duplicate_prefix = "duplicate-of:"
+    if not record_value.startswith(duplicate_prefix):
+        return False
+    summary_head, delimiter, _rationale = record_value.partition(" — ")
+    if not delimiter:
+        return False
+    duplicate_target, path_separator, original_path = summary_head[len(duplicate_prefix) :].rpartition(": ")
+    return bool(path_separator and duplicate_target.strip() and original_path.strip())
+
+
 def _check_coverage_gaps(wiki_root: Path) -> list[LintFinding]:
-    """Sources marked ingested but contributing zero backrefs."""
+    """Sources marked ingested but contributing zero backrefs.
+
+    An explicit non-ingest verdict resolves a source without creating
+    backrefs. Those intentional refusals are not coverage gaps; a source is
+    exempt only when its latest durable resolution records one of the bounded
+    verdicts that semantically declines ingestion. Ingest events win ties
+    across the two durable stores because they represent transaction outcomes.
+    """
     db_path = wiki_root / WIKI_DIR_NAME / "state.db"
     with connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT s.id, s.original_path FROM sources s "
+            "WITH resolution_records AS ("
+            "  SELECT source_id, ts, 0 AS store_rank, id AS record_id, "
+            "    'rejection' AS record_store, verdict AS record_value "
+            "  FROM rejections "
+            "  UNION ALL "
+            "  SELECT source_id, ts, 1 AS store_rank, id AS record_id, "
+            "    'ingest-event' AS record_store, summary AS record_value "
+            "  FROM events WHERE kind = 'ingest'"
+            "), ranked_resolutions AS ("
+            "  SELECT source_id, record_store, record_value, "
+            "    ROW_NUMBER() OVER ("
+            "      PARTITION BY source_id "
+            "      ORDER BY ts DESC, store_rank DESC, record_id DESC"
+            "    ) AS resolution_rank "
+            "  FROM resolution_records"
+            ") "
+            "SELECT s.id, s.original_path, lr.record_store, lr.record_value FROM sources s "
             "LEFT JOIN backrefs b ON b.source_id = s.id "
+            "LEFT JOIN ranked_resolutions lr "
+            "  ON lr.source_id = s.id AND lr.resolution_rank = 1 "
             "WHERE s.status = 'ingested' "
-            "GROUP BY s.id, s.original_path "
+            "GROUP BY s.id, s.original_path, lr.record_store, lr.record_value "
             "HAVING COUNT(b.rowid) = 0"
         ).fetchall()
     return [
@@ -224,6 +281,7 @@ def _check_coverage_gaps(wiki_root: Path) -> list[LintFinding]:
             severity="info",
         )
         for row in rows
+        if not _is_intentional_refusal(row["record_store"], row["record_value"])
     ]
 
 

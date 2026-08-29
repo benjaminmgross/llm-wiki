@@ -214,6 +214,21 @@ def test_parse_handles_duplicate_of_verdict() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("verdict", ["duplicate-of: ", "duplicate-of:\t"])
+def test_parse_rejects_whitespace_only_duplicate_target(verdict: str) -> None:
+    payload = {
+        "verdict": verdict,
+        "rationale": "No actual duplicate target was supplied.",
+        "updates": [],
+        "new_pages": [],
+        "cross_refs": [],
+    }
+
+    with pytest.raises(PlanValidationError, match="duplicate-of:<page-path>"):
+        parse_plan_dict(payload)
+
+
+@pytest.mark.unit
 def test_plan_helpers_handle_empty_collections() -> None:
     payload = {
         "verdict": "out-of-scope",

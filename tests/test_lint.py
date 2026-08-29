@@ -184,6 +184,179 @@ def test_lint_detects_coverage_gap_zero_backrefs(wiki: Path) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("verdict", ["low-quality", "out-of-scope", "duplicate-of:wiki/concepts/existing.md"])
+@pytest.mark.parametrize("verdict_record", ["rejection", "ingest-event"])
+def test_lint_does_not_report_intentionally_rejected_source_as_coverage_gap(wiki: Path, verdict: str, verdict_record: str) -> None:
+    """A recorded non-ingest verdict is a resolved source, not missing coverage."""
+    db_path = wiki / ".mdwiki" / "state.db"
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status, ingested_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("refused12345", "placeholder.md", "raw/placeholder.md", "h" * 64, 1.0, "ingested", 2.0),
+        )
+        if verdict_record == "rejection":
+            conn.execute(
+                "INSERT INTO rejections (source_id, reason, verdict, ts) VALUES (?, ?, ?, ?)",
+                ("refused12345", "intentionally rejected", verdict, 3.0),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO events (ts, kind, source_id, summary) VALUES (?, ?, ?, ?)",
+                (3.0, "ingest", "refused12345", f"{verdict}: placeholder.md — intentionally rejected"),
+            )
+        conn.commit()
+
+    report = lint_wiki(wiki)
+
+    assert [finding for finding in report.findings if finding.kind == "coverage-gap"] == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("older_store", "older_value", "newer_store", "newer_value", "expected_gap"),
+    [
+        ("rejection", "low-quality", "ingest-event", "ingest placeholder.md", True),
+        ("ingest-event", "low-quality: placeholder.md", "rejection", "quote-failed", True),
+        ("rejection", "quote-failed", "ingest-event", "out-of-scope: placeholder.md — intentionally rejected", False),
+        ("ingest-event", "ingest placeholder.md", "rejection", "duplicate-of:wiki/existing.md", False),
+    ],
+)
+def test_lint_uses_latest_resolution_across_rejections_and_ingest_events(
+    wiki: Path,
+    older_store: str,
+    older_value: str,
+    newer_store: str,
+    newer_value: str,
+    expected_gap: bool,
+) -> None:
+    """Only the latest durable resolution across both stores controls coverage."""
+    db_path = wiki / ".mdwiki" / "state.db"
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status, ingested_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("latest123456", "placeholder.md", "raw/placeholder.md", "h" * 64, 1.0, "ingested", 2.0),
+        )
+        for store, value, ts in ((older_store, older_value, 3.0), (newer_store, newer_value, 4.0)):
+            if store == "rejection":
+                conn.execute(
+                    "INSERT INTO rejections (source_id, reason, verdict, ts) VALUES (?, ?, ?, ?)",
+                    ("latest123456", "resolution", value, ts),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO events (ts, kind, source_id, summary) VALUES (?, ?, ?, ?)",
+                    (ts, "ingest", "latest123456", value),
+                )
+        conn.commit()
+
+    gaps = [finding for finding in lint_wiki(wiki).findings if finding.kind == "coverage-gap"]
+
+    assert bool(gaps) is expected_gap
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("rejection_verdict", "event_summary", "expected_gap"),
+    [
+        ("low-quality", "ingest placeholder.md", True),
+        ("quote-failed", "out-of-scope: placeholder.md — intentionally rejected", False),
+    ],
+)
+def test_lint_prefers_ingest_event_when_cross_store_timestamps_match(
+    wiki: Path, rejection_verdict: str, event_summary: str, expected_gap: bool
+) -> None:
+    """Equal timestamps resolve deterministically in favor of the ingest event."""
+    db_path = wiki / ".mdwiki" / "state.db"
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status, ingested_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("tied12345678", "placeholder.md", "raw/placeholder.md", "h" * 64, 1.0, "ingested", 2.0),
+        )
+        conn.execute(
+            "INSERT INTO rejections (source_id, reason, verdict, ts) VALUES (?, ?, ?, ?)",
+            ("tied12345678", "resolution", rejection_verdict, 3.0),
+        )
+        conn.execute(
+            "INSERT INTO events (ts, kind, source_id, summary) VALUES (?, ?, ?, ?)",
+            (3.0, "ingest", "tied12345678", event_summary),
+        )
+        conn.commit()
+
+    gaps = [finding for finding in lint_wiki(wiki).findings if finding.kind == "coverage-gap"]
+
+    assert bool(gaps) is expected_gap
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("record_store", "value"),
+    [
+        ("rejection", None),
+        ("rejection", "arbitrary"),
+        ("rejection", "LOW-QUALITY"),
+        ("rejection", "duplicate-of:"),
+        ("rejection", "duplicate-of: "),
+        ("rejection", "duplicate-of:\t"),
+        ("ingest-event", None),
+        ("ingest-event", "arbitrary: placeholder.md"),
+        ("ingest-event", "LOW-QUALITY: placeholder.md"),
+        ("ingest-event", "duplicate-of:: placeholder.md"),
+        ("ingest-event", "low-quality: "),
+        ("ingest-event", "out-of-scope: no-delimiter"),
+        ("ingest-event", "duplicate-of: : placeholder.md — intentionally rejected"),
+        ("ingest-event", "duplicate-of:\t: placeholder.md — intentionally rejected"),
+        ("ingest-event", "duplicate-of:wiki/concepts/existing.md: placeholder.md"),
+    ],
+)
+def test_lint_reports_malformed_or_unbounded_resolution_as_coverage_gap(wiki: Path, record_store: str, value: str | None) -> None:
+    """Malformed, case-variant, and unbounded resolution values fail closed."""
+    db_path = wiki / ".mdwiki" / "state.db"
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status, ingested_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("invalid123456", "placeholder.md", "raw/placeholder.md", "h" * 64, 1.0, "ingested", 2.0),
+        )
+        if record_store == "rejection":
+            conn.execute(
+                "INSERT INTO rejections (source_id, reason, verdict, ts) VALUES (?, ?, ?, ?)",
+                ("invalid123456", "resolution", value, 3.0),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO events (ts, kind, source_id, summary) VALUES (?, ?, ?, ?)",
+                (3.0, "ingest", "invalid123456", value),
+            )
+        conn.commit()
+
+    gaps = [finding for finding in lint_wiki(wiki).findings if finding.kind == "coverage-gap"]
+
+    assert len(gaps) == 1
+
+
+@pytest.mark.unit
+def test_lint_keeps_genuine_gap_when_another_source_has_valid_refusal(wiki: Path) -> None:
+    """A valid refusal exempts only its own source, not unrelated gaps."""
+    db_path = wiki / ".mdwiki" / "state.db"
+    with connect(db_path) as conn:
+        conn.executemany(
+            "INSERT INTO sources (id, original_path, raw_path, content_hash, mtime, status, ingested_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("refused12345", "refused.md", "raw/refused.md", "h" * 64, 1.0, "ingested", 2.0),
+                ("gap123456789", "genuine-gap.md", "raw/genuine-gap.md", "i" * 64, 1.0, "ingested", 2.0),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO rejections (source_id, reason, verdict, ts) VALUES (?, ?, ?, ?)",
+            ("refused12345", "resolution", "low-quality", 3.0),
+        )
+        conn.commit()
+
+    gaps = [finding.page_path for finding in lint_wiki(wiki).findings if finding.kind == "coverage-gap"]
+
+    assert gaps == ["genuine-gap.md"]
+
+
+@pytest.mark.unit
 def test_lint_records_event_when_run(wiki: Path) -> None:
     db_path = wiki / ".mdwiki" / "state.db"
     with connect(db_path) as conn:
