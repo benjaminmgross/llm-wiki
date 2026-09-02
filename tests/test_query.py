@@ -146,5 +146,79 @@ def test_query_filed_synthesis_records_event_and_log(wiki_with_pages: Path, mock
     with connect(db_path) as conn:
         events = conn.execute("SELECT kind, summary FROM events").fetchall()
     assert len(events) == 1
-    assert events[0]["kind"] == "ingest"  # synthesis goes through the same tx mechanism
+    assert events[0]["kind"] == "query-filed"  # same tx mechanism as ingest, labeled so status can tell them apart
     assert "query" in events[0]["summary"].lower() or "synthesis" in events[0]["summary"].lower()
+
+
+# --- v1.4.0: confidence, filing suggestion, stubs, event kind ------------------
+
+
+@pytest.mark.unit
+def test_query_prompt_requests_confidence_line() -> None:
+    from mdwiki.prompts import QUERY_SYSTEM_PROMPT
+
+    assert "Confidence:" in QUERY_SYSTEM_PROMPT
+    assert "NO_COVERAGE:" in QUERY_SYSTEM_PROMPT
+
+
+@pytest.mark.unit
+def test_query_parses_confidence_and_suggests_filing_when_three_pages_cited(wiki_with_pages: Path, mocker: MockerFixture) -> None:
+    answer = (
+        "## Answer\n\n[KV cache](../concepts/kv-cache.md), [Attention](../concepts/attention.md) and "
+        "[Some Paper](../entities/some-paper.md) agree.\n\nConfidence: high — three corroborating pages\n"
+    )
+    _mock_query_response(mocker, answer)
+    result = query_wiki(wiki_with_pages, "how do these relate?", file=False)
+    assert result.confidence == "high"
+    assert result.file_suggested is True
+
+    _mock_query_response(mocker, "## Answer\n\nOnly [Attention](../concepts/attention.md).\n\nConfidence: medium — single page\n")
+    result = query_wiki(wiki_with_pages, "what is attention?", file=False)
+    assert result.confidence == "medium" and result.file_suggested is False
+
+    _mock_query_response(mocker, "## Answer\n\nNo confidence line here.")
+    assert query_wiki(wiki_with_pages, "x?", file=False).confidence is None
+
+
+@pytest.mark.unit
+def test_query_stub_creates_needs_sources_page_on_no_coverage(wiki_with_pages: Path, mocker: MockerFixture) -> None:
+    from mdwiki.frontmatter import read_frontmatter
+
+    _mock_query_response(mocker, "NO_COVERAGE: the wiki has nothing on quantum error correction.")
+    result = query_wiki(wiki_with_pages, "What is quantum error correction?", stub=True)
+
+    assert result.stub_path == "wiki/concepts/what-is-quantum-error-correction.md"
+    text = (wiki_with_pages / result.stub_path).read_text()
+    meta, body = read_frontmatter(text)
+    assert meta["tags"] == ["stub", "needs-sources"] and meta["type"] == "concept"
+    assert "quantum error correction" in body.lower()
+    with connect(wiki_with_pages / ".mdwiki" / "state.db") as conn:
+        assert conn.execute("SELECT kind FROM pages WHERE path = ?", (result.stub_path,)).fetchone()["kind"] == "concept"
+        assert conn.execute("SELECT kind FROM events ORDER BY id DESC LIMIT 1").fetchone()["kind"] == "query-stub"
+
+    _mock_query_response(mocker, "NO_COVERAGE: nothing here either.")
+    assert query_wiki(wiki_with_pages, "Another gap?", stub=False).stub_path is None
+
+
+@pytest.mark.unit
+def test_query_file_logs_query_filed_event(wiki_with_pages: Path, mocker: MockerFixture) -> None:
+    _mock_query_response(mocker, "## Answer\n\nFiled answer.\n\nConfidence: low — inference\n")
+    result = query_wiki(wiki_with_pages, "file me?", file=True, yes=True)
+    assert result.filed_path is not None
+    with connect(wiki_with_pages / ".mdwiki" / "state.db") as conn:
+        assert conn.execute("SELECT kind FROM events ORDER BY id DESC LIMIT 1").fetchone()["kind"] == "query-filed"
+
+
+@pytest.mark.unit
+def test_query_cli_prints_confidence_and_filing_hint(wiki_with_pages: Path, mocker: MockerFixture, monkeypatch, capsys) -> None:
+    from mdwiki.cli import main
+
+    monkeypatch.chdir(wiki_with_pages)
+    _mock_query_response(
+        mocker,
+        "## Answer\n\n[A](../concepts/kv-cache.md) [B](../concepts/attention.md) [C](../entities/some-paper.md)\n\nConfidence: high — corroborated\n",
+    )
+    assert main(["query", "relate?"]) == 0
+    out = capsys.readouterr().out
+    assert "Confidence: high" in out
+    assert "--file" in out

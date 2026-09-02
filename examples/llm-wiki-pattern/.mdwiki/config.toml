@@ -1,0 +1,25 @@
+[llm]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[embedder]
+model = "sentence-transformers/all-MiniLM-L6-v2"
+
+[ingest]
+candidate_top_k = 8
+max_undo_history = 50
+
+[exclude]
+globs = []
+
+[loaders.image]
+enabled = false
+
+[loaders.pdf]
+vision_fallback = false
+
+[pointers]
+files = [
+    "CLAUDE.md",
+    "AGENTS.md",
+]

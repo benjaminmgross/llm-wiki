@@ -124,6 +124,10 @@ Propose a `synthesis` page when:
 Synthesis pages are short cross-cutting essays (300–800 words). They are
 NOT meeting summaries.
 
+## Language
+
+Write page prose in the language of the source. Keep YAML frontmatter keys, `kind` values, file names, and section headings in English so tooling and cross-language corpora keep working.
+
 ## Lint policies
 
 Transcripts-specific lint rules (kind-aware checks for `meeting`, `decision`,

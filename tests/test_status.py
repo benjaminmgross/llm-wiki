@@ -166,3 +166,21 @@ def test_status_report_is_immutable_dataclass() -> None:
     )
     with pytest.raises(Exception):
         report.pending = 99  # type: ignore[misc]
+
+
+@pytest.mark.unit
+def test_status_reports_pending_contradictions(populated_wiki: Path) -> None:
+    db_path = populated_wiki / ".mdwiki" / "state.db"
+    with connect(db_path) as conn:
+        conn.execute("INSERT INTO pages (path, kind, last_touched_at) VALUES ('wiki/concepts/foo.md', 'concept', ?)", (time.time(),))
+        for resolution in ("pending", "pending", "source-wins"):
+            conn.execute(
+                "INSERT INTO contradictions (page_path, source_id, existing_claim, source_claim, resolution, ts) "
+                "VALUES ('wiki/concepts/foo.md', NULL, 'a', 'b', ?, ?)",
+                (resolution, time.time()),
+            )
+        conn.commit()
+
+    report = get_status(populated_wiki)
+    assert report.contradictions_pending == 2
+    assert "Contradictions: 2 pending" in format_status(report, wiki_root=populated_wiki)

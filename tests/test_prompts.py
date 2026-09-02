@@ -150,3 +150,16 @@ def test_user_prompt_handles_empty_sections_list() -> None:
         recent_log_entries=[],
     )
     assert "ai/notes.md" in prompt
+
+
+@pytest.mark.unit
+def test_language_preservation_rule_present_in_prompt_and_every_schema() -> None:
+    from mdwiki.init import DEFAULT_SCHEMA
+    from mdwiki.profiles import list_profile_names, load_profile
+
+    assert "language of the source" in INGEST_SYSTEM_PROMPT_HEAD
+    assert "headings in English" in INGEST_SYSTEM_PROMPT_HEAD
+    assert "language" in DEFAULT_SCHEMA.lower()
+    for name in list_profile_names():
+        schema = load_profile(name=name).schema_text
+        assert "## Language" in schema, f"profile {name} lacks a Language section"

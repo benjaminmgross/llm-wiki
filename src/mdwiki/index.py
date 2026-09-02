@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from mdwiki.page_kinds import page_kind_folders_for_wiki
+from mdwiki.version_chain import strip_frontmatter
 
 
 def regenerate_index(wiki_root: Path) -> None:
@@ -33,10 +34,12 @@ def build_index(wiki_root: Path) -> str:
         "",
     ]
 
-    for _kind, heading, folder in page_kind_folders_for_wiki(wiki_root):
+    for kind, heading, folder in page_kind_folders_for_wiki(wiki_root):
+        entries = _collect_pages(wiki_root, folder)
+        if kind == "source" and not entries:
+            continue  # generated provenance section only appears once a source has been ingested
         lines.append(f"## {heading}")
         lines.append("")
-        entries = _collect_pages(wiki_root, folder)
         if entries:
             lines.extend(entries)
         else:
@@ -56,7 +59,7 @@ def _collect_pages(wiki_root: Path, folder: str) -> list[str]:
         if page_path.name in {"index.md", "log.md"}:
             continue
         title = _extract_title(page_path)
-        summary = summarize_first_paragraph(page_path.read_text())
+        summary = summarize_first_paragraph(strip_frontmatter(page_path.read_text()))
         rel_link = f"{folder}/{page_path.name}"
         if summary:
             entries.append(f"- [{title}]({rel_link}) — {summary}")
@@ -67,7 +70,7 @@ def _collect_pages(wiki_root: Path, folder: str) -> list[str]:
 
 def _extract_title(page_path: Path) -> str:
     """Return the first ``# H1`` heading, or fall back to the filename stem."""
-    for line in page_path.read_text().splitlines():
+    for line in strip_frontmatter(page_path.read_text()).splitlines():
         if line.startswith("# "):
             return line[2:].strip()
     return page_path.stem.replace("-", " ").title()
@@ -80,6 +83,7 @@ _PARAGRAPH_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 
 def summarize_first_paragraph(page_text: str, *, max_chars: int = 200) -> str:
     """Return the first body paragraph stripped of markdown formatting, truncated."""
+    page_text = strip_frontmatter(page_text)
     if not page_text.strip():
         return ""
     blocks = [b.strip() for b in page_text.split("\n\n") if b.strip()]

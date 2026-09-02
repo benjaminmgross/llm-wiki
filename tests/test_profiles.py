@@ -156,6 +156,9 @@ def test_profile_overlay_merges_into_default_config(tmp_path: Path) -> None:
     import tomllib
 
     written_config = tomllib.loads((tmp_path / ".mdwiki" / "config.toml").read_text())
+    # ``[pointers].files`` records the runtime pointer files init wrote; it is
+    # the only key outside DEFAULT_CONFIG for the working-dir profile.
+    assert written_config.pop("pointers") == {"files": ["CLAUDE.md", "AGENTS.md"]}
     assert written_config == DEFAULT_CONFIG
 
 
@@ -291,3 +294,22 @@ def test_initiative_profile_has_overlay_with_higher_top_k(tmp_path: Path) -> Non
     # pages worth showing the LLM. The exact value can shift in tuning, but
     # it must be strictly greater than the default to be load-bearing.
     assert written_config["ingest"]["candidate_top_k"] > DEFAULT_CONFIG["ingest"]["candidate_top_k"]
+
+
+# --- v1.4.0: research profile --------------------------------------------------
+
+
+@pytest.mark.unit
+def test_research_profile_loads_with_paper_claim_method_dataset_kinds(tmp_path: Path) -> None:
+    profile = load_profile(name="research")
+    assert profile.name == "research"
+    assert profile.config_overlay["profile"]["research"]["extra_page_kinds"] == ["paper", "claim", "method", "dataset"]
+    for kind in ("paper", "claim", "method", "dataset"):
+        assert f"`{kind}`" in profile.schema_text
+    assert "research" in list_profile_names()
+
+    from mdwiki.plan import allowed_kinds_for_wiki
+
+    init_wiki(tmp_path, profile="research", pointers=())
+    assert {"paper", "claim", "method", "dataset"} <= allowed_kinds_for_wiki(tmp_path)
+    assert "language" in (tmp_path / ".mdwiki" / "schema.md").read_text().lower()

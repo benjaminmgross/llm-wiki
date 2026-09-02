@@ -7,6 +7,7 @@ source remains an isolated transaction; failures are persisted for status and re
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,7 @@ from mdwiki.chunker import MarkdownChunker
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.embedder import Embedder, get_default_embedder
 from mdwiki.embeddings import serialize
-from mdwiki.index import build_index
+from mdwiki.frontmatter import apply_page_metadata
 from mdwiki.ingest import (
     IngestError,
     _apply_pages_and_backrefs,
@@ -24,7 +25,9 @@ from mdwiki.ingest import (
     _find_candidate_pages,
     _recent_log_entries,
     _reject_existing_new_page_paths,
+    _write_source_page,
     ingest_many,
+    materialize_plan_pages,
 )
 from mdwiki.ingest_tool import INGEST_TOOL_CHOICE, INGEST_TOOL_DEFINITION
 from mdwiki.llm import build_provider_from_config
@@ -34,6 +37,7 @@ from mdwiki.llm.base import (
     Message,
     Provider,
 )
+from mdwiki.page_kinds import infer_kind_from_page_path
 from mdwiki.plan import PlanValidationError, allowed_kinds_for_wiki, parse_plan, parse_plan_dict
 from mdwiki.prompts import INGEST_SYSTEM_PROMPT, INGEST_SYSTEM_PROMPT_TOOL_USE, build_ingest_user_prompt
 from mdwiki.quote import min_quote_words_for_wiki, quote_normalize_mode_for_wiki, verify_plan
@@ -428,22 +432,26 @@ def _apply_one_result(
             wiki_root=wiki_root,
             source_id=source_row["id"],
             summary=f"{plan.verdict}: {source_row['original_path']} — {plan.rationale}",
-        ):
-            pass
+        ) as tx:
+            _write_source_page(tx, wiki_root=wiki_root, source_id=source_row["id"], original_path=source_row["original_path"], plan=plan)
         return "skipped", ""
 
     summary = f"ingest {source_row['original_path']} → {len(plan.updates)} update(s), {len(plan.new_pages)} new page(s) [batch]"
     with IngestTransaction(wiki_root=wiki_root, source_id=source_row["id"], summary=summary) as tx:
+        page_bodies = materialize_plan_pages(wiki_root=wiki_root, plan=plan, source_id=source_row["id"])
+        explicit_write_targets = {*(new_page.path for new_page in plan.new_pages), *(update.page for update in plan.updates)}
         page_embeddings: dict[str, bytes] = {}
-        for new_page in plan.new_pages:
-            tx.write_file(wiki_root / new_page.path, new_page.content)
-            page_embeddings[new_page.path] = serialize(embedder.embed_text(new_page.content))
-        for update in plan.updates:
-            full_target = wiki_root / update.page
-            tx.write_file(full_target, update.content)
-            page_embeddings[update.page] = serialize(embedder.embed_text(update.content))
+        touched_at = time.time()
+        new_page_kinds = {new_page.path: new_page.kind for new_page in plan.new_pages}
+        for page_path, content in page_bodies.items():
+            kind = new_page_kinds.get(page_path) or infer_kind_from_page_path(page_path) or "concept"
+            content = apply_page_metadata(content, path=page_path, kind=kind, source_ids=(source_row["id"],))
+            committed = tx.write_file(wiki_root / page_path, content)
+            page_embeddings[page_path] = serialize(embedder.embed_text(committed))
+            if page_path not in explicit_write_targets:
+                tx.upsert_page(path=page_path, kind=kind, embedding=page_embeddings[page_path], last_touched_at=touched_at)
         _apply_pages_and_backrefs(tx=tx, plan=plan, embeddings=page_embeddings, source_id=source_row["id"])
-        tx.write_file(wiki_root / "wiki" / "index.md", build_index(wiki_root))
+        _write_source_page(tx, wiki_root=wiki_root, source_id=source_row["id"], original_path=source_row["original_path"], plan=plan)
 
     return "applied", ""
 

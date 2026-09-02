@@ -749,3 +749,45 @@ def test_cli_init_bootstrap_batch_handles_unexpected_status_error(
     assert exit_code == 1
     assert "expired" in captured.err
     assert "error:" in captured.err
+
+
+@pytest.mark.unit
+def test_native_batch_materializes_contradiction_blocks(tmp_path: Path) -> None:
+    """The batch apply path shares the sync path's materialization (cross-refs + contradictions)."""
+    import time
+
+    from mdwiki.transaction import IngestTransaction
+
+    wiki = _three_source_corpus(tmp_path)
+    page = "wiki/concepts/attention-sinks.md"
+    with IngestTransaction(wiki_root=wiki, source_id=None, summary="seed") as tx:
+        tx.write_file(wiki / page, "# Attention sinks\n\nSinks appeared in 2024.\n")
+        tx.upsert_page(path=page, kind="concept", embedding=None, last_touched_at=time.time())
+    with connect(wiki / ".mdwiki" / "state.db") as conn:
+        alpha_id = conn.execute("SELECT id FROM sources WHERE original_path = 'alpha.md'").fetchone()["id"]
+    plan = json.dumps(
+        {
+            "verdict": "ingest",
+            "rationale": "Alpha disagrees on the date.",
+            "updates": [],
+            "new_pages": [],
+            "cross_refs": [],
+            "contradictions": [
+                {
+                    "page": page,
+                    "existing_claim": "Sinks appeared in 2024.",
+                    "source_claim": "Alpha discusses attention sinks for long contexts.",
+                    "claims": [{"source_section_id": "alpha.md/Intro", "quote": "alpha discusses attention sinks for long contexts"}],
+                }
+            ],
+        }
+    )
+    provider = NonAnthropicBatchProvider([BatchResult(custom_id=alpha_id, text=plan)])
+
+    result = bootstrap_batch(wiki, yes=True, provider=provider, embedder=StubEmbedder(), poll_interval=0.0)  # type: ignore[arg-type]
+
+    assert result.applied >= 1
+    body = (wiki / page).read_text()
+    assert "<!-- mdwiki:contradictions -->" in body and "[pending]" in body
+    with connect(wiki / ".mdwiki" / "state.db") as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM contradictions WHERE page_path = ?", (page,)).fetchone()["c"] == 1

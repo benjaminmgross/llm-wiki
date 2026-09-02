@@ -60,6 +60,7 @@ def refresh_wiki(target: Path) -> InitResult:
         db_path=wiki_dir / "state.db",
         registry=registry,
         exclude_globs=config.get("exclude", {}).get("globs", []),
+        skip_paths=config.get("pointers", {}).get("files", []),
     )
 
     suffix_parts: list[str] = []

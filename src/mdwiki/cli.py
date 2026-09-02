@@ -21,17 +21,19 @@ from mdwiki import __version__
 from mdwiki.discover import WikiNotFound, find_wiki
 from mdwiki.doctor import format_report, run_doctor
 from mdwiki.ingest import IngestError, ingest_many, ingest_source
-from mdwiki.init import NestedWikiError, SidecarCorruptError, init_wiki
-from mdwiki.lint import lint_wiki
+from mdwiki.init import DEFAULT_POINTERS, POINTER_FILES, NestedWikiError, SidecarCorruptError, UnknownPointerError, init_wiki
+from mdwiki.lint import SEVERITY_ORDER, lint_wiki, order_findings
 from mdwiki.lint_fix import lint_fix
 from mdwiki.llm import UnknownProviderError
 from mdwiki.llm.anthropic import BatchTimeoutError, BatchUnexpectedStatusError, MissingAPIKeyError
+from mdwiki.overview import OverviewError, generate_overview
 from mdwiki.page_index import rebuild_page_index
 from mdwiki.profiles import UnknownProfileError, list_profile_names
 from mdwiki.query import QueryError, query_wiki
 from mdwiki.rebuild import RebuildError, rebuild_wiki
 from mdwiki.rebuild_log import rebuild_log
 from mdwiki.refresh import refresh_wiki
+from mdwiki.search import DEFAULT_SEARCH_LIMIT, search_pages
 from mdwiki.session_ingest import (
     PlanInvalidatedError,
     SessionPlanError,
@@ -39,7 +41,7 @@ from mdwiki.session_ingest import (
     list_session_sources,
     prepare_session_plan,
 )
-from mdwiki.skill import WikiNotFoundForSkill, run_skill
+from mdwiki.skill import UnknownWorkflowError, WikiNotFoundForSkill, list_workflows, run_skill
 from mdwiki.source import find_matching_sources, format_disambiguation, format_source_info, get_source_info
 from mdwiki.status import format_status, get_status
 from mdwiki.synthesize import SynthesisError, synthesize_auto, synthesize_topic
@@ -136,6 +138,16 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=list_profile_names(),
         help="Corpus-aware profile (default: working-dir). Determines the seed schema and config overlay.",
     )
+    init_p.add_argument(
+        "--pointers",
+        default=",".join(DEFAULT_POINTERS),
+        metavar="RUNTIMES",
+        help=(
+            "Comma-separated runtime pointer files to write into the wiki root "
+            f"({', '.join(POINTER_FILES)}; default: {','.join(DEFAULT_POINTERS)}). Use 'none' to write nothing. "
+            "Existing files are never overwritten."
+        ),
+    )
     init_p.set_defaults(_handler=_cmd_init)
 
     refresh_p = subparsers.add_parser(
@@ -169,6 +181,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "-y",
         action="store_true",
         help="With --bootstrap-batch, skip the cost-estimate confirmation prompt (no effect with --bootstrap).",
+    )
+    refresh_p.add_argument(
+        "--overview",
+        action="store_true",
+        help="With --bootstrap/--bootstrap-batch, refresh wiki/overview.md once after the batch (one provider call).",
     )
     refresh_p.set_defaults(_handler=_cmd_refresh)
 
@@ -209,7 +226,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     bulk.add_argument("--pending", action="store_true", help="Ingest every source whose status is pending or failed.")
     ingest_p.add_argument("--yes", "-y", action="store_true", help="Apply LLM plans without confirmation (default ON for --all/--pending).")
+    ingest_p.add_argument(
+        "--overview",
+        action="store_true",
+        help="With --all/--pending, refresh wiki/overview.md once after the batch (one provider call).",
+    )
     ingest_p.set_defaults(_handler=_cmd_ingest)
+
+    overview_p = subparsers.add_parser("overview", help="Write or refresh wiki/overview.md — the model-written top-level synthesis.")
+    overview_p.set_defaults(_handler=_cmd_overview)
 
     session_p = subparsers.add_parser(
         "session-ingest",
@@ -235,21 +260,38 @@ def _build_parser() -> argparse.ArgumentParser:
     session_apply_p.add_argument("envelope", type=Path, help="JSON envelope whose plan field was filled by a session sub-agent.")
     session_apply_p.set_defaults(_handler=_cmd_session_ingest)
 
+    search_p = subparsers.add_parser(
+        "search",
+        help="Lexical (FTS5) search over page sections — exact names, dates, identifiers. No model, no embedder.",
+    )
+    search_p.add_argument("terms", nargs="+", help="Search terms (ANDed; last term prefix-expanded; quote a phrase to require adjacency).")
+    search_p.add_argument("--limit", "-n", type=int, default=DEFAULT_SEARCH_LIMIT, help=f"Maximum hits (default {DEFAULT_SEARCH_LIMIT}).")
+    search_p.add_argument("--json", action="store_true", dest="as_json", help="Print hits as a JSON array (path, heading, snippet, score).")
+    search_p.set_defaults(_handler=_cmd_search)
+
     query_p = subparsers.add_parser("query", help="Ask a question; get a cited answer drawn from existing wiki pages.")
     query_p.add_argument("question", help="The natural-language question to answer.")
     query_p.add_argument("--file", action="store_true", help="File the answer as a synthesis page (wiki/syntheses/<slug>.md).")
     query_p.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation prompt when --file is set.")
+    query_p.add_argument(
+        "--stub",
+        action="store_true",
+        help="If the wiki cannot answer, create a stub concept page tagged `stub, needs-sources` so the gap is visible.",
+    )
     query_p.set_defaults(_handler=_cmd_query)
 
-    lint_p = subparsers.add_parser("lint", help="Health-check the wiki: broken refs, orphans, stale pages, coverage gaps.")
+    lint_p = subparsers.add_parser(
+        "lint",
+        help="Health-check the wiki: broken refs, orphans, stale pages, coverage gaps, contradictions, duplicates, isolated clusters.",
+    )
     lint_p.add_argument(
         "--fix",
         nargs="?",
         const="default",
-        choices=("default", "full"),
         default=None,
-        help="Interactively remediate findings. `--fix` (=default) handles broken-refs only; "
-        "`--fix=full` also re-ingests stale and coverage-gap sources (LLM round-trips).",
+        metavar="MODE|N[,N...]",
+        help="Remediate findings. `--fix` (=default) handles broken-refs only; `--fix=full` also re-ingests stale and "
+        "coverage-gap sources (LLM round-trips); `--fix=1,3,7` applies only those numbered findings from the report.",
     )
     lint_p.add_argument("--yes", "-y", action="store_true", help="Skip per-finding prompts; apply every applicable fix.")
     lint_p.set_defaults(_handler=_cmd_lint)
@@ -270,7 +312,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     skill_p = subparsers.add_parser(
         "skill",
-        help="Print this wiki's schema + an agent how-to guide to stdout (for AI agent self-orientation).",
+        help="Print this wiki's schema + the packaged mdwiki skill (intent router and per-operation workflows) to stdout.",
+    )
+    skill_p.add_argument(
+        "--workflow",
+        "-w",
+        default=None,
+        metavar="NAME",
+        help=f"Print only one reference workflow. Available: {', '.join(list_workflows())}.",
     )
     skill_p.set_defaults(_handler=_cmd_skill)
 
@@ -278,9 +327,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
-    """Handler for ``mdwiki init [--profile=<name>] [--bootstrap | --bootstrap-batch]``."""
+    """Handler for ``mdwiki init [--profile=<name>] [--pointers=...] [--bootstrap | --bootstrap-batch]``."""
+    raw_pointers = (getattr(args, "pointers", None) or "none").strip()
+    pointers: tuple[str, ...] = () if raw_pointers.lower() == "none" else tuple(p.strip() for p in raw_pointers.split(",") if p.strip())
     try:
-        result = init_wiki(args.path, profile=args.profile)
+        result = init_wiki(args.path, profile=args.profile, pointers=pointers)
+    except UnknownPointerError as exc:
+        print(f"error: --pointers: {exc}", file=sys.stderr)
+        return 2
     except NestedWikiError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -426,13 +480,41 @@ def _cmd_refresh(args: argparse.Namespace) -> int:
     # new. Skipping the chain there would silently drop the user's recovery
     # intent. Both ``ingest_many(scope='pending')`` and ``bootstrap_batch``
     # handle the empty-pending case gracefully (no-op + exit 0).
+    exit_code = 0
     if args.bootstrap_batch:
-        return _run_bootstrap_batch(wiki_root, yes=args.yes)
+        exit_code = _run_bootstrap_batch(wiki_root, yes=args.yes)
+    elif args.bootstrap:
+        exit_code = _run_bootstrap_sync(wiki_root, files_registered=result.files_registered)
+    if getattr(args, "overview", False) and (args.bootstrap or args.bootstrap_batch):
+        exit_code = max(exit_code, _refresh_overview(wiki_root))
+    return exit_code
 
-    if args.bootstrap:
-        return _run_bootstrap_sync(wiki_root, files_registered=result.files_registered)
 
+def _refresh_overview(wiki_root: Path) -> int:
+    """Run one overview refresh and print the outcome; used by ``overview`` and the ``--overview`` flags."""
+    try:
+        result = generate_overview(wiki_root)
+    except OverviewError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except (MissingAPIKeyError, UnknownProviderError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except _FATAL_API_ERRORS as exc:
+        print(_fatal_api_error_message(exc), file=sys.stderr)
+        return 1
+    print(result.message)
     return 0
+
+
+def _cmd_overview(_args: argparse.Namespace) -> int:
+    """Handler for ``mdwiki overview``."""
+    try:
+        wiki_root = find_wiki()
+    except WikiNotFound as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return _refresh_overview(wiki_root)
 
 
 def _cmd_status(_args: argparse.Namespace) -> int:
@@ -477,7 +559,8 @@ def _cmd_rebuild(args: argparse.Namespace) -> int:
         print(
             "Page index rebuilt: "
             f"{result.added} added, {result.updated} updated, {result.pruned} pruned, "
-            f"{result.skipped} skipped, {result.embedded} embedded."
+            f"{result.skipped} skipped, {result.embedded} embedded, {result.search_indexed} search row(s), "
+            f"{result.backrefs_restored} backref(s) and {result.contradictions_restored} contradiction(s) restored from wiki/sources/."
         )
         return 0
 
@@ -534,7 +617,10 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
             return 1
         applied = sum(1 for r in results if r.applied)
         print(f"\nDone: {applied} of {len(results)} applied.")
-        return 0 if applied == len(results) else 1
+        exit_code = 0 if applied == len(results) else 1
+        if getattr(args, "overview", False):
+            exit_code = max(exit_code, _refresh_overview(wiki_root))
+        return exit_code
 
     if args.source is None:
         print("error: provide a <source> or use --all / --pending.", file=sys.stderr)
@@ -603,6 +689,31 @@ def _cmd_session_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_search(args: argparse.Namespace) -> int:
+    """Handler for ``mdwiki search <terms...> [--limit N] [--json]``."""
+    try:
+        wiki_root = find_wiki()
+    except WikiNotFound as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    result = search_pages(wiki_root, " ".join(args.terms), limit=args.limit)
+    if args.as_json:
+        print(json.dumps([hit.to_dict() for hit in result.hits], indent=2))
+        return 0
+    if not result.hits:
+        if result.indexed_rows == 0 and any((wiki_root / "wiki").rglob("*.md")):
+            print("No matches — the search index is empty. Run `mdwiki rebuild --pages` to build it from wiki/.")
+        else:
+            print("No matches.")
+        return 0
+    print(f"{len(result.hits)} hit(s) for {result.match_query}:")
+    for hit in result.hits:
+        heading = f" — {hit.heading}" if hit.heading else ""
+        print(f"  {hit.path}{heading}")
+        print(f"      {hit.snippet}")
+    return 0
+
+
 def _cmd_query(args: argparse.Namespace) -> int:
     """Handler for ``mdwiki query <question> [--file] [--yes]``."""
     try:
@@ -611,7 +722,7 @@ def _cmd_query(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     try:
-        result = query_wiki(wiki_root, args.question, file=args.file, yes=args.yes)
+        result = query_wiki(wiki_root, args.question, file=args.file, yes=args.yes, stub=getattr(args, "stub", False))
     except QueryError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -630,8 +741,20 @@ def _cmd_query(args: argparse.Namespace) -> int:
         print("\nCited pages:")
         for path in result.cited_pages:
             print(f"  - {path}")
+    if result.confidence and "Confidence:" not in result.answer:
+        print(f"\nConfidence: {result.confidence}")
     if result.filed_path:
         print(f"\nFiled as synthesis page: {result.filed_path}")
+    elif result.file_suggested:
+        print(
+            f"\nThis answer draws on {len(result.cited_pages)} pages and looks file-worthy. "
+            "Re-run with --file to keep it as a synthesis page."
+        )
+    if result.no_coverage:
+        if result.stub_path:
+            print(f"\nStub page created: {result.stub_path} (tags: stub, needs-sources)")
+        else:
+            print("\nThe wiki does not cover this. Re-run with --stub to record the gap as a stub page.")
     return 0
 
 
@@ -643,26 +766,47 @@ def _cmd_lint(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    if getattr(args, "fix", None) is not None:
-        result = lint_fix(wiki_root, mode=args.fix, yes=args.yes)
-        print(f"Lint --fix={args.fix}: applied {result.fixed_count}, skipped {result.skipped_count}, failed {result.failed_count}.")
+    raw_fix = getattr(args, "fix", None)
+    if raw_fix is not None:
+        mode: Literal["default", "full"] = "default"
+        select: frozenset[int] | None = None
+        if raw_fix in ("default", "full"):
+            mode = raw_fix
+        else:
+            try:
+                numbers = {int(part.strip()) for part in raw_fix.split(",") if part.strip()}
+            except ValueError:
+                print(f"error: --fix expects 'full', no value, or comma-separated finding numbers; got {raw_fix!r}.", file=sys.stderr)
+                return 2
+            if not numbers or any(n < 1 for n in numbers):
+                print(f"error: --fix finding numbers must be positive integers; got {raw_fix!r}.", file=sys.stderr)
+                return 2
+            select = frozenset(numbers)
+        result = lint_fix(wiki_root, mode=mode, yes=args.yes, select=select)
+        print(f"Lint --fix={raw_fix}: applied {result.fixed_count}, skipped {result.skipped_count}, failed {result.failed_count}.")
         return 0 if result.failed_count == 0 else 1
 
     report = lint_wiki(wiki_root)
     if not report.findings:
         print("Lint: clean — no findings.")
         return 0
-    print(
-        f"Lint: {len(report.findings)} finding(s) "
-        + ", ".join(f"{kind}={count}" for kind, count in sorted(report.findings_by_kind.items()))
-    )
+    ordered = order_findings(report.findings)
+    by_severity = {severity: sum(1 for f in ordered if f.severity == severity) for severity in SEVERITY_ORDER}
+    counts = ", ".join(f"{severity}={count}" for severity, count in by_severity.items() if count)
+    kinds = ", ".join(f"{kind}={count}" for kind, count in sorted(report.findings_by_kind.items()))
+    print(f"Lint: {len(ordered)} finding(s) — {counts} ({kinds})")
     print()
-    for kind in sorted(report.findings_by_kind):
-        print(f"## {kind}")
-        for finding in report.findings:
-            if finding.kind == kind:
-                print(f"  - {finding.page_path}: {finding.message}")
+    number = 0
+    for severity in SEVERITY_ORDER:
+        group = [f for f in ordered if f.severity == severity]
+        if not group:
+            continue
+        print(f"## {severity}")
+        for finding in group:
+            number += 1
+            print(f"  [{number}] {finding.kind} — {finding.page_path}: {finding.message}")
         print()
+    print("Fix: `mdwiki lint --fix` (deterministic fixes), `--fix=full` (also re-ingest stale/coverage-gap sources), or `--fix=<n>[,<n>...]` for specific numbers above.")
     return 0
 
 
@@ -723,8 +867,16 @@ def _cmd_synthesize(args: argparse.Namespace) -> int:
         return 1
 
 
-def _cmd_skill(_args: argparse.Namespace) -> int:
-    """Handler for ``mdwiki skill`` — print schema + agent guide to stdout."""
+def _cmd_skill(args: argparse.Namespace) -> int:
+    """Handler for ``mdwiki skill [--workflow NAME]`` — print schema + packaged skill to stdout."""
+    workflow = getattr(args, "workflow", None)
+    if workflow is not None:
+        try:
+            print(run_skill(Path.cwd(), workflow=workflow))
+        except UnknownWorkflowError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        return 0
     try:
         wiki_root = find_wiki()
     except WikiNotFound as exc:

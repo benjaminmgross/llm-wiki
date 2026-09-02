@@ -20,12 +20,15 @@ from mdwiki.ingest import IngestResult, _chunk_or_whole, _recent_log_entries, _r
 from mdwiki.ingest_tool import INGEST_TOOL_DEFINITION
 from mdwiki.plan import Plan, allowed_kinds_for_wiki, parse_plan_dict
 from mdwiki.quote import min_quote_words_for_wiki, quote_normalize_mode_for_wiki, verify_plan
+from mdwiki.search import lexical_candidates_for_text
 from mdwiki.semantic_pages import is_semantic_page_path
 
 SESSION_ENVELOPE_VERSION: int = 1
 SESSION_AGENT_INSTRUCTIONS: str = (
     "Analyze only this assigned source using the active Codex or Claude Code session. "
     "Remain read-only, inspect current wiki pages as needed, and fill only the plan field. "
+    "Start from wiki.lexical_candidates and run `mdwiki search \"<name or term>\"` for every named subject before proposing a "
+    "new page; update an existing page when one exists. "
     "Do not call model APIs, mdwiki providers, or local inference. Every claim must quote the source verbatim."
 )
 
@@ -63,6 +66,7 @@ class PreparedSessionPlan:
     schema_sha256: str
     source_sha256: str
     page_sha256: dict[str, str]
+    lexical_candidates: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -76,6 +80,7 @@ class PreparedSessionPlan:
                 "schema": self.schema_text,
                 "recent_log_entries": list(self.recent_log_entries),
                 "page_paths": sorted(self.page_sha256),
+                "lexical_candidates": list(self.lexical_candidates),
             },
             "agent_instructions": SESSION_AGENT_INSTRUCTIONS,
             "plan_contract": INGEST_TOOL_DEFINITION["input_schema"],
@@ -131,6 +136,7 @@ def prepare_session_plan(wiki_root: Path, source_id_or_path: str) -> PreparedSes
         schema_sha256=_sha256(schema_bytes),
         source_sha256=_sha256(source_bytes),
         page_sha256=_snapshot_pages(wiki_root),
+        lexical_candidates=lexical_candidates_for_text(wiki_root, source_text),
     )
 
 
@@ -240,6 +246,9 @@ def _validate_latest_state(
             raise PlanInvalidatedError(f"New-page target {new_page.path} changed after plan preparation; prepare and retry.")
     planned_new_pages = {new_page.path for new_page in plan.new_pages}
     explicit_write_paths = planned_new_pages | {update.page for update in plan.updates}
+    for contradiction in plan.contradictions:
+        if contradiction.page not in explicit_write_paths:
+            _require_fresh_cross_ref_endpoint(wiki_root, page_sha256, contradiction.page)
     for cross_ref in plan.cross_refs:
         if cross_ref.from_page not in explicit_write_paths:
             _require_fresh_cross_ref_endpoint(wiki_root, page_sha256, cross_ref.from_page)

@@ -8,10 +8,10 @@ end users: set ``provider = "openai-compatible"`` in ``[llm]`` plus a
 
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
 from typing import Any
 
+from mdwiki.config import load_config
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.llm.anthropic import AnthropicProvider
 from mdwiki.llm.base import CompleteResult, Message, PingResult, Provider
@@ -43,6 +43,9 @@ def build_provider_from_config(wiki_root: Path) -> Provider:
 
     Provider-specific kwargs come from a per-provider config block (e.g.
     ``[llm.openai_compatible]``); each provider class chooses what it consumes.
+    The user-level ``${XDG_CONFIG_HOME:-~/.config}/mdwiki/config.toml`` is
+    layered underneath (see ``mdwiki.config``) so a shared provider block or
+    API key need not be repeated per wiki.
 
     Raises
     ------
@@ -53,7 +56,7 @@ def build_provider_from_config(wiki_root: Path) -> Provider:
         (e.g. ``base_url`` for openai-compatible).
     """
     config_path = wiki_root / WIKI_DIR_NAME / "config.toml"
-    config = tomllib.loads(config_path.read_text())
+    config = load_config(wiki_root)
     llm_section = config.get("llm", {})
     provider_name = llm_section.get("provider", "anthropic")
     model = llm_section.get("model", "claude-sonnet-4-6")

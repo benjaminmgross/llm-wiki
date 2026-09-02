@@ -6,6 +6,34 @@ This document outlines recent major changes to this repository.
 
 The v1.1 notes below describe when Anthropic batch support was introduced. Current `mdwiki init/refresh --bootstrap-batch` always honors `[llm].provider`: a provider with native batch capability uses it, while other providers receive an explicit same-provider synchronous fallback. In particular, `provider = "openai-compatible"` does not require or silently substitute Anthropic. Each source commits independently; failed sources retain a reason in `state.db` and `raw/.sources.json`, appear in `mdwiki status`, and are the only sources retried alongside pending sources by `mdwiki ingest --pending` or a later bootstrap run.
 
+## v1.4.0 — Agent skill, lexical search, contradictions, navigation, provenance pages (2026-09-02)
+
+Closes the gap list from the comparison with `nanzhipro/Karpathy-llm-wiki-bootstrap-skill` (research and plan in `$THOUGHTS_PATH/repos/llm-wiki/`, 2026.09.02). Infrastructure the reference lacks is unchanged: quote anchoring, transactions and undo, loaders, batch bootstrap, refresh, profiles, native-session ingest, cost guard, test suite.
+
+### Breaking
+
+- The consolidator-era modules `consolidator`, `clustering`, `inventory`, `tree_builder`, `synthesis`, `relationships`, `keywords`, `summarizer`, `encapsulation`, and `manifest` and their tests are removed. `mdwiki.__init__` no longer re-exports `consolidate`, `cluster_files`, `inventory_directory`, `analyze_file`, `analyze_relationships`, or `synthesize_cluster`; it exports `MarkdownChunker` and `Section` only.
+- `skill/` is now a symlink to `src/mdwiki/skill/` (the `mdwiki` skill); the `markdown-consolidator` `SKILL.md` and `references/{ALGORITHMS,CONFLICT-RESOLUTION,INTEGRATION}.md` are gone.
+- `mdwiki init` writes `CLAUDE.md` and `AGENTS.md` by default (`--pointers=none` to opt out) and records them under `[pointers].files` in `config.toml`.
+- Every page write now carries `title/type/created/updated/sources/tags` frontmatter; `wiki/concept-table.md` and `wiki/sources/*.md` appear on the first transaction; `index.md` gains a `## Sources` section once a source is ingested. Tests that compared page bodies byte-for-byte were updated.
+- `lint --fix` no longer restricts its value to `default|full`; `--fix=<n>[,<n>...]` selects numbered findings from the severity-ordered report.
+
+### What ships
+
+- `mdwiki skill [--workflow NAME]` prints the schema plus the packaged intent router and per-operation references (`src/mdwiki/skill/references/*.md`).
+- `mdwiki search "<terms>" [--limit N] [--json]` — FTS5 `page_chunks_fts` in `state.db`, refreshed per transaction, rebuilt by `undo` and `rebuild --pages`; `session-ingest prepare` adds `wiki.lexical_candidates`.
+- Plan field `contradictions[]` (parser, tool schema, retry messages), managed `<!-- mdwiki:contradictions -->` block, `contradictions` table with undo inverses, `status` pending count, lint `unresolved-contradiction`, session-ingest freshness on contradiction pages, batch path routed through the same materializer as sync ingest.
+- `wiki/concept-table.md` regenerated with `index.md` from inside `IngestTransaction` (using the transaction's own connection); `mdwiki overview` and `--overview` on `ingest --pending/--all` and `refresh --bootstrap*`; `wiki/concept-table.md` and `wiki/overview.md` are infrastructure pages.
+- `wiki/sources/<id>-<slug>.md` per ingested source (also for refusals); `source` is a baseline page kind reserved for mdwiki; `rebuild --pages` restores `backrefs` and `contradictions` from those pages and the managed blocks (previously documented as unrecoverable).
+- Lint `duplicate-candidate` and `isolated-cluster`, `order_findings`, severity-grouped numbered report, `[lint].duplicate_similarity` and `[lint].unresolved_contradiction_after`.
+- `research` profile; `## Language` section in every schema and the language rule in the ingest prompt; `query` `Confidence:` line, `file_suggested`, `--stub` (`stub, needs-sources` page), `query-filed`/`query-stub`/`overview` event kinds via `IngestTransaction(event_kind=...)`; `mdwiki.config.load_config` with the XDG user layer used by the provider factory and `doctor`; `examples/llm-wiki-pattern/` built by `scripts/build_example_wiki.py` and checked by `tests/test_example_wiki.py`.
+- `pyproject.toml` URLs point at `benjaminmgross/llm-wiki`; `CONTRIBUTING.md` rewritten for `uv`.
+
+### Migration
+
+- Existing wikis: `CREATE ... IF NOT EXISTS` adds the `contradictions` and `page_chunks_fts` tables on first open; run `mdwiki rebuild --pages` once to populate the search index. Pages gain frontmatter on their next write only. Run `mdwiki init --pointers=claude,codex` is not needed; copy `CLAUDE.md` from a fresh init if you want pointers in an existing wiki (and add it to `[pointers].files`).
+- Rollback: revert the commit; older code ignores the new tables and frontmatter keys.
+
 ## v1.1.0 — Multi-filetype ingest, batch API, local providers (2026-04-30)
 
 **v1.1.0 broadens what `mdwiki` can ingest, where it can run, and how cheaply it can build a wiki.** All changes are additive — existing v1.0 wikis upgrade transparently (`pip install -U` is enough; no schema migration required).

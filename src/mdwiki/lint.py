@@ -1,14 +1,18 @@
 """Wiki health checks — ``mdwiki lint``.
 
-Four deterministic rules ship in v1.0.0:
+Deterministic rules:
 
 - **broken-ref**  — parsed CommonMark link whose local target doesn't exist
 - **orphan**      — page that no other wiki page links to
 - **stale**       — page whose underlying source was modified after the page was last touched
-- **coverage-gap** — source marked `ingested` but with zero ``backrefs`` rows
+- **coverage-gap** — source marked `ingested` but with zero ``backrefs`` rows and no bounded refusal
+- **unverified-quote** — page containing the ``[unverified-quote]`` marker
+- **unresolved-contradiction** — a ``pending`` contradiction older than N later ingests (v1.4.0)
+- **duplicate-candidate** — two same-kind pages whose embeddings are near-identical (v1.4.0)
+- **isolated-cluster** — a group of linked pages disconnected from the main link graph (v1.4.0)
 
-Contradiction detection, header-focus scoring, and ``--fix`` (interactive
-remediation) are deferred to v1.1.
+Findings carry a ``severity`` (``error`` > ``warn`` > ``info``); ``order_findings``
+gives the stable severity-first order the CLI numbers and ``lint --fix=<n>`` selects by.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from pathlib import Path
 
 from mdwiki.cross_refs import resolve_page_link_target
 from mdwiki.discover import WIKI_DIR_NAME
+from mdwiki.embeddings import cosine_similarity, deserialize
 from mdwiki.markdown import markdown_inline_links, markdown_links
 from mdwiki.semantic_pages import INFRASTRUCTURE_PAGE_PATHS, is_semantic_page_path
 from mdwiki.state import connect
@@ -72,11 +77,26 @@ def lint_wiki(wiki_root: Path) -> LintReport:
     findings.extend(_check_stale_pages(wiki_root))
     findings.extend(_check_coverage_gaps(wiki_root))
     findings.extend(_check_unverified_quotes(wiki_root))
+    findings.extend(_check_unresolved_contradictions(wiki_root))
+    findings.extend(_check_duplicate_candidates(wiki_root))
+    findings.extend(_check_isolated_clusters(wiki_root))
 
     _record_lint_event(wiki_root, findings_count=len(findings))
 
     by_kind = dict(Counter(f.kind for f in findings))
     return LintReport(findings=tuple(findings), findings_by_kind=by_kind)
+
+
+SEVERITY_ORDER: dict[str, int] = {"error": 0, "warn": 1, "info": 2}
+
+
+def order_findings(findings: tuple[LintFinding, ...] | list[LintFinding]) -> tuple[LintFinding, ...]:
+    """Stable severity-first order (error, warn, info), then kind, page, message.
+
+    The CLI numbers findings in this order and ``lint --fix=<n>`` resolves
+    numbers against it, so both must call this function.
+    """
+    return tuple(sorted(findings, key=lambda f: (SEVERITY_ORDER.get(f.severity, len(SEVERITY_ORDER)), f.kind, f.page_path, f.message)))
 
 
 def _iter_wiki_pages(wiki_root: Path) -> list[Path]:
@@ -142,8 +162,9 @@ def _check_orphans(wiki_root: Path) -> list[LintFinding]:
         )
         for rel in sorted(rel_paths - inbound)
         # Syntheses are cross-cutting writeups; concept/entity pages typically don't
-        # link back to them, so an orphan finding on a synthesis is noise.
-        if not rel.startswith("wiki/syntheses/")
+        # link back to them, so an orphan finding on a synthesis is noise. Generated
+        # source pages are provenance, linked from index.md only.
+        if not rel.startswith(("wiki/syntheses/", "wiki/sources/"))
     ]
 
 
@@ -283,6 +304,132 @@ def _check_coverage_gaps(wiki_root: Path) -> list[LintFinding]:
         for row in rows
         if not _is_intentional_refusal(row["record_store"], row["record_value"])
     ]
+
+
+DEFAULT_UNRESOLVED_CONTRADICTION_AFTER: int = 3
+
+
+def lint_config(wiki_root: Path) -> dict[str, object]:
+    """Return the ``[lint]`` table from ``.mdwiki/config.toml`` (empty when absent or unreadable)."""
+    import tomllib
+
+    config_path = wiki_root / WIKI_DIR_NAME / "config.toml"
+    if not config_path.is_file():
+        return {}
+    try:
+        section = tomllib.loads(config_path.read_text()).get("lint", {})
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    return dict(section) if isinstance(section, dict) else {}
+
+
+def _check_unresolved_contradictions(wiki_root: Path) -> list[LintFinding]:
+    """``pending`` contradictions that have outlived N later ingest events."""
+    raw_threshold = lint_config(wiki_root).get("unresolved_contradiction_after", DEFAULT_UNRESOLVED_CONTRADICTION_AFTER)
+    threshold = raw_threshold if isinstance(raw_threshold, int) and raw_threshold >= 0 else DEFAULT_UNRESOLVED_CONTRADICTION_AFTER
+    db_path = wiki_root / WIKI_DIR_NAME / "state.db"
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT c.page_path, c.existing_claim, c.source_claim, "
+            "  (SELECT COUNT(*) FROM events e WHERE e.kind = 'ingest' AND e.ts > c.ts) AS later_ingests "
+            "FROM contradictions c WHERE c.resolution = 'pending' ORDER BY c.page_path, c.id"
+        ).fetchall()
+    return [
+        LintFinding(
+            kind="unresolved-contradiction",
+            page_path=row["page_path"],
+            message=(
+                f"pending for {row['later_ingests']} later ingest(s) (threshold {threshold}): "
+                f"wiki says \"{row['existing_claim']}\" but a source says \"{row['source_claim']}\""
+            ),
+            severity="warn",
+        )
+        for row in rows
+        if row["later_ingests"] >= threshold
+    ]
+
+
+DEFAULT_DUPLICATE_SIMILARITY: float = 0.92
+
+
+def _check_duplicate_candidates(wiki_root: Path) -> list[LintFinding]:
+    """Same-kind page pairs whose embeddings are more similar than the configured threshold.
+
+    Pure cache read: pages without an embedding (session-applied, generated)
+    are skipped, and ``rebuild --pages`` fills the gaps. Starting threshold
+    0.92 is a conservative default; tune ``[lint].duplicate_similarity``.
+    """
+    raw = lint_config(wiki_root).get("duplicate_similarity", DEFAULT_DUPLICATE_SIMILARITY)
+    threshold = float(raw) if isinstance(raw, int | float) and 0.0 < float(raw) <= 1.0 else DEFAULT_DUPLICATE_SIMILARITY
+    db_path = wiki_root / WIKI_DIR_NAME / "state.db"
+    with connect(db_path) as conn:
+        rows = conn.execute("SELECT path, kind, embedding FROM pages WHERE embedding IS NOT NULL AND kind != 'source' ORDER BY path").fetchall()
+    by_kind: dict[str, list[tuple[str, list[float]]]] = {}
+    for row in rows:
+        if not (wiki_root / row["path"]).is_file():
+            continue
+        by_kind.setdefault(row["kind"], []).append((row["path"], deserialize(row["embedding"])))
+    findings: list[LintFinding] = []
+    for kind, pages in sorted(by_kind.items()):
+        for i, (first_path, first_vec) in enumerate(pages):
+            for second_path, second_vec in pages[i + 1 :]:
+                score = cosine_similarity(first_vec, second_vec)
+                if score >= threshold:
+                    findings.append(
+                        LintFinding(
+                            kind="duplicate-candidate",
+                            page_path=second_path,
+                            message=f"near-duplicate of {first_path} ({kind}, cosine {score:.3f} ≥ {threshold}); consider merging via an update",
+                            severity="info",
+                        )
+                    )
+    return findings
+
+
+def _check_isolated_clusters(wiki_root: Path) -> list[LintFinding]:
+    """Groups of ≥ 2 mutually linked pages that are disconnected from the largest link component."""
+    pages = _iter_wiki_pages(wiki_root)
+    nodes = {p.relative_to(wiki_root).as_posix() for p in pages}
+    adjacency: dict[str, set[str]] = {node: set() for node in nodes}
+    for page in pages:
+        rel_page = page.relative_to(wiki_root).as_posix()
+        for _, target in markdown_inline_links(page.read_text()):
+            resolved = resolve_page_link_target(from_page=rel_page, raw_target=target)
+            if resolved is None or resolved == rel_page or resolved not in nodes:
+                continue
+            adjacency[rel_page].add(resolved)
+            adjacency[resolved].add(rel_page)
+    components: list[list[str]] = []
+    seen: set[str] = set()
+    for node in sorted(nodes):
+        if node in seen:
+            continue
+        stack = [node]
+        component: list[str] = []
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            component.append(current)
+            stack.extend(sorted(adjacency[current] - seen))
+        components.append(sorted(component))
+    linked = [c for c in components if len(c) >= 2]
+    if len(linked) < 2:
+        return []
+    linked.sort(key=lambda c: (-len(c), c[0]))
+    findings: list[LintFinding] = []
+    for component in linked[1:]:
+        others = ", ".join(component[1:])
+        findings.append(
+            LintFinding(
+                kind="isolated-cluster",
+                page_path=component[0],
+                message=f"{len(component)} page(s) link only to each other ({others}) and not to the main graph of {len(linked[0])} page(s); add a cross-reference or synthesis",
+                severity="info",
+            )
+        )
+    return findings
 
 
 def _record_lint_event(wiki_root: Path, *, findings_count: int) -> None:

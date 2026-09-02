@@ -18,7 +18,7 @@ from pathlib import Path
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.embedder import Embedder, get_default_embedder
 from mdwiki.embeddings import deserialize, find_top_k, serialize
-from mdwiki.index import build_index
+from mdwiki.frontmatter import apply_page_metadata
 from mdwiki.llm import build_provider_from_config
 from mdwiki.llm.anthropic import OutputTruncatedError
 from mdwiki.llm.base import Message, Provider
@@ -324,11 +324,11 @@ def _file_synthesis(*, wiki_root: Path, topic: str, body: str, embedder: Embedde
     target = wiki_root / rel_path
     summary = f"synthesize topic: {topic[:80]}"
 
+    body = apply_page_metadata(body if body.endswith("\n") else body + "\n", path=rel_path, kind="synthesis", source_ids=())
     with IngestTransaction(wiki_root=wiki_root, source_id=None, summary=summary) as tx:
-        tx.write_file(target, body if body.endswith("\n") else body + "\n")
+        tx.write_file(target, body)
         embedding_blob = serialize(embedder.embed_text(body))
         tx.upsert_page(path=rel_path, kind="synthesis", embedding=embedding_blob, last_touched_at=_now_ts())
-        tx.write_file(wiki_root / "wiki" / "index.md", build_index(wiki_root))
     return rel_path
 
 

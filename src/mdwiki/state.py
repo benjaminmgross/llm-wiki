@@ -22,6 +22,8 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         # Phase 5 — Q1 quality compounding.
         "rejections",
         "cost_ledger",
+        # v1.4.0
+        "contradictions",
     }
 )
 
@@ -122,6 +124,25 @@ CREATE TABLE IF NOT EXISTS cost_ledger (
     FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_cost_ledger_ts ON cost_ledger(ts);
+
+-- v1.4.0: contradictions recorded by ingest plans. ``resolution`` mirrors the
+-- managed block in the page; lint reads ``pending`` rows, status counts them.
+CREATE TABLE IF NOT EXISTS contradictions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    page_path       TEXT NOT NULL,
+    source_id       TEXT,
+    existing_claim  TEXT NOT NULL,
+    source_claim    TEXT NOT NULL,
+    resolution      TEXT NOT NULL DEFAULT 'pending',
+    ts              REAL NOT NULL,
+    FOREIGN KEY (page_path) REFERENCES pages(path) ON DELETE CASCADE,
+    FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_contradictions_page ON contradictions(page_path);
+
+-- v1.4.0: lexical search. One row per heading-bounded page section; refreshed
+-- inside every IngestTransaction and rebuilt by undo / rebuild --pages.
+CREATE VIRTUAL TABLE IF NOT EXISTS page_chunks_fts USING fts5(path UNINDEXED, heading, body, tokenize = 'unicode61 remove_diacritics 2');
 """
 
 

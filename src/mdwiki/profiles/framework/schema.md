@@ -113,6 +113,10 @@ Propose a `synthesis` when:
 - The framework's procedure should change based on accumulated learnings, OR
 - A pattern emerges that warrants a position statement beyond a learning
 
+## Language
+
+Write page prose in the language of the source. Keep YAML frontmatter keys, `kind` values, file names, and section headings in English so tooling and cross-language corpora keep working.
+
 ## Lint policies
 
 Strict DAG enforcement is deferred to a follow-up phase (requires dropping

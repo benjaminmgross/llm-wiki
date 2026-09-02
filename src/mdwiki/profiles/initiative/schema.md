@@ -141,6 +141,10 @@ Propose a `synthesis` page when:
 Synthesis pages are short cross-cutting essays (300–800 words) with heavy
 cross-reference density.
 
+## Language
+
+Write page prose in the language of the source. Keep YAML frontmatter keys, `kind` values, file names, and section headings in English so tooling and cross-language corpora keep working.
+
 ## Lint policies
 
 - Pages with no inbound `cross_refs` are flagged as orphans

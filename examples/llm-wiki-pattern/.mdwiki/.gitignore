@@ -1,0 +1,7 @@
+# mdwiki local cache (rebuildable from raw/ + wiki/ + log.md)
+state.db
+state.db-journal
+state.db-wal
+state.db-shm
+write.lock
+undo/

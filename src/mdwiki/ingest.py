@@ -15,11 +15,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from mdwiki.chunker import MarkdownChunker
+from mdwiki.contradictions import ContradictionMaterializationError, materialize_contradictions
 from mdwiki.cross_refs import CrossRefMaterializationError, materialize_cross_refs
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.embedder import Embedder, get_default_embedder
 from mdwiki.embeddings import deserialize, find_top_k, serialize
-from mdwiki.index import build_index
+from mdwiki.frontmatter import apply_page_metadata
 from mdwiki.ingest_tool import INGEST_TOOL_CHOICE, INGEST_TOOL_DEFINITION
 from mdwiki.llm import build_provider_from_config
 from mdwiki.llm.anthropic import OutputTruncatedError
@@ -28,6 +29,7 @@ from mdwiki.page_kinds import infer_kind_from_page_path
 from mdwiki.plan import Plan, PlanValidationError, allowed_kinds_for_wiki, parse_plan, parse_plan_dict
 from mdwiki.prompts import INGEST_SYSTEM_PROMPT, INGEST_SYSTEM_PROMPT_TOOL_USE, build_ingest_user_prompt
 from mdwiki.quote import min_quote_words_for_wiki, quote_normalize_mode_for_wiki, verify_plan
+from mdwiki.source_pages import SOURCE_KIND, build_source_page, source_page_path
 from mdwiki.source_state import mark_source_failed
 from mdwiki.state import connect
 from mdwiki.transaction import IngestTransaction
@@ -218,9 +220,10 @@ def apply_ingest_plan(
     """Apply one already-validated plan through the normal per-source transaction."""
     if plan.is_empty():
         summary = f"{plan.verdict}: {original_path} — {plan.rationale}"
-        with IngestTransaction(wiki_root=wiki_root, source_id=source_id, summary=summary):
+        with IngestTransaction(wiki_root=wiki_root, source_id=source_id, summary=summary) as tx:
             if validate_locked is not None:
                 validate_locked()
+            _write_source_page(tx, wiki_root=wiki_root, source_id=source_id, original_path=original_path, plan=plan)
         return IngestResult(
             source_id=source_id,
             applied=True,
@@ -228,35 +231,58 @@ def apply_ingest_plan(
             plan=plan,
         )
 
-    summary = (
-        f"ingest {original_path} → {len(plan.updates)} update(s), {len(plan.new_pages)} new page(s), {len(plan.cross_refs)} cross-ref(s)"
-    )
+    summary = f"ingest {original_path} → {len(plan.updates)} update(s), {len(plan.new_pages)} new page(s), {len(plan.cross_refs)} cross-ref(s)"
+    if plan.contradictions:
+        summary += f", {len(plan.contradictions)} contradiction(s)"
     with IngestTransaction(wiki_root=wiki_root, source_id=source_id, summary=summary) as tx:
         if validate_locked is not None:
             validate_locked()
-        try:
-            page_bodies = materialize_cross_refs(wiki_root=wiki_root, plan=plan)
-        except CrossRefMaterializationError as exc:
-            raise IngestError(str(exc)) from exc
+        page_bodies = materialize_plan_pages(wiki_root=wiki_root, plan=plan, source_id=source_id)
         page_embeddings: dict[str, bytes] = {}
         new_page_kinds = {new_page.path: new_page.kind for new_page in plan.new_pages}
         explicit_write_targets = {*new_page_kinds, *(update.page for update in plan.updates)}
         touched_at = time.time()
         for page_path, content in page_bodies.items():
+            kind = new_page_kinds.get(page_path) or _infer_kind(page_path)
+            content = apply_page_metadata(content, path=page_path, kind=kind, source_ids=(source_id,))
             committed_content = tx.write_file(wiki_root / page_path, content)
             if embedder is not None:
                 page_embeddings[page_path] = _embed_page(embedder, path=page_path, content=committed_content)
             if page_path not in explicit_write_targets:
                 tx.upsert_page(
                     path=page_path,
-                    kind=_infer_kind(page_path),
+                    kind=kind,
                     embedding=page_embeddings.get(page_path),
                     last_touched_at=touched_at,
                 )
         _apply_pages_and_backrefs(tx=tx, plan=plan, embeddings=page_embeddings, source_id=source_id)
-        tx.write_file(wiki_root / "wiki" / "index.md", build_index(wiki_root))
+        _write_source_page(tx, wiki_root=wiki_root, source_id=source_id, original_path=original_path, plan=plan)
 
     return IngestResult(source_id=source_id, applied=True, message=summary, plan=plan)
+
+
+def _write_source_page(tx: IngestTransaction, *, wiki_root: Path, source_id: str, original_path: str, plan: Plan) -> None:
+    """Write the generated ``wiki/sources/`` provenance page for this ingest (no embedding)."""
+    db_path = wiki_root / WIKI_DIR_NAME / "state.db"
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT raw_path FROM sources WHERE id = ?", (source_id,)).fetchone()
+    raw_path = row["raw_path"] if row is not None else ""
+    rel = source_page_path(source_id=source_id, original_path=original_path)
+    tx.write_file(wiki_root / rel, build_source_page(source_id=source_id, original_path=original_path, raw_path=raw_path, plan=plan))
+    tx.upsert_page(path=rel, kind=SOURCE_KIND, embedding=None, last_touched_at=time.time())
+
+
+def materialize_plan_pages(*, wiki_root: Path, plan: Plan, source_id: str | None) -> dict[str, str]:
+    """Return final page bodies: planned content plus managed cross-ref and contradiction blocks.
+
+    Shared by the synchronous, native-batch, and session apply paths so every
+    route materializes the same managed blocks.
+    """
+    try:
+        page_bodies = materialize_cross_refs(wiki_root=wiki_root, plan=plan)
+        return materialize_contradictions(wiki_root=wiki_root, plan=plan, page_bodies=page_bodies, source_id=source_id)
+    except (CrossRefMaterializationError, ContradictionMaterializationError) as exc:
+        raise IngestError(str(exc)) from exc
 
 
 def _embed_page(embedder: Embedder, *, path: str, content: str) -> bytes:
@@ -473,6 +499,17 @@ def _apply_pages_and_backrefs(*, tx: IngestTransaction, plan: Plan, embeddings: 
     for new_page in plan.new_pages:
         for claim in new_page.claims:
             tx.insert_backref(page_path=new_page.path, source_id=source_id, section_anchor=claim.source_section_id, quote=claim.quote)
+    for contradiction in plan.contradictions:
+        for claim in contradiction.claims:
+            tx.insert_backref(page_path=contradiction.page, source_id=source_id, section_anchor=claim.source_section_id, quote=claim.quote)
+        tx.record_contradiction(
+            page_path=contradiction.page,
+            source_id=source_id,
+            existing_claim=" ".join(contradiction.existing_claim.split()),
+            source_claim=" ".join(contradiction.source_claim.split()),
+            resolution=contradiction.resolution,
+            ts=now,
+        )
 
 
 def _find_candidate_pages(*, wiki_root: Path, section_vectors: list[list[float]]) -> list[dict[str, str]]:

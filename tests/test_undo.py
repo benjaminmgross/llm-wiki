@@ -80,8 +80,9 @@ def test_undo_removes_wiki_file_added_by_ingest(wiki_with_one_ingested: Path) ->
 def test_undo_removes_pages_row(wiki_with_one_ingested: Path) -> None:
     db_path = wiki_with_one_ingested / ".mdwiki" / "state.db"
     with connect(db_path) as conn:
-        before = conn.execute("SELECT COUNT(*) AS c FROM pages").fetchone()["c"]
-    assert before == 1
+        before = conn.execute("SELECT COUNT(*) AS c FROM pages WHERE kind != 'source'").fetchone()["c"]
+        before_sources = conn.execute("SELECT COUNT(*) AS c FROM pages WHERE kind = 'source'").fetchone()["c"]
+    assert before == 1 and before_sources == 1  # the ingested page plus its generated wiki/sources/ page
 
     undo_last(wiki_with_one_ingested, n=1)
 

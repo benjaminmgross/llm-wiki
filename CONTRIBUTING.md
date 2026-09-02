@@ -1,107 +1,37 @@
-# Contributing to Markdown Consolidator
+# Contributing to llm-wiki (`mdwiki`)
 
-Thank you for your interest in contributing! This document provides guidelines for contributions.
-
-## Development Setup
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/markdown-consolidator.git
-   cd markdown-consolidator
-   ```
-
-2. Create a virtual environment:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # or `venv\Scripts\activate` on Windows
-   ```
-
-3. Install in development mode:
-   ```bash
-   pip install -e ".[dev]"
-   ```
-
-4. Run tests:
-   ```bash
-   pytest
-   ```
-
-## Code Style
-
-We use [ruff](https://github.com/astral-sh/ruff) for linting and formatting:
+## Development setup
 
 ```bash
-# Check code
-ruff check src/
-
-# Format code
-ruff format src/
+git clone https://github.com/benjaminmgross/llm-wiki.git
+cd llm-wiki
+uv sync
+uv run mdwiki --version
 ```
 
-## Type Hints
+The environment is `uv`-managed (Python ≥ 3.12). Always run tools through `uv run`.
 
-All functions should have type hints. Use mypy for checking:
+## Checks before a pull request
 
 ```bash
-mypy src/
+uv run pytest            # full suite with coverage (see pyproject [tool.pytest.ini_options])
+uv run ruff check .      # lint + import order
+uv run ruff format .     # formatting
+uv run mypy src          # type check the package
 ```
 
-## Testing
+## Conventions
 
-- Write tests for new features
-- Maintain test coverage above 80%
-- Run the full test suite before submitting PRs:
+- Typed functions, keyword-only arguments for new parameters, immutable dataclasses for results.
+- Every durable wiki write goes through `IngestTransaction`; never write `wiki/`, `state.db`, `raw/.sources.json`, or `log.md` outside it.
+- Behavioral tests first (RED → GREEN → REFACTOR). Tests live in `tests/test_<module>.py`, use `init_wiki(tmp_path)` fixtures, mock the provider at `mdwiki.llm.anthropic.AnthropicProvider.complete`, and assert on files and `state.db` rows, not on mocks.
+- The plan JSON contract is defined twice on purpose: `src/mdwiki/plan.py` (parser, source of truth) and `src/mdwiki/ingest_tool.py` (constrained-decoding schema). Change both together.
+- The agent-facing skill is package data under `src/mdwiki/skill/`; the repository-root `skill/` is a symlink to it. Edit the package copy only.
+- Do not hard-wrap prose in Markdown files.
+- Record user-visible changes in `CHANGES_GUIDE.md` and the README highlights block; bump `__version__` in `src/mdwiki/__init__.py` and `pyproject.toml` together.
 
-```bash
-pytest --cov=markdown_consolidator
-```
+## Pull request process
 
-## Pull Request Process
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/my-feature`
-3. Make your changes
-4. Add tests for new functionality
-5. Run tests and linting
-6. Commit with descriptive messages
-7. Push and create a Pull Request
-
-## Commit Messages
-
-Use conventional commit format:
-
-```
-type(scope): description
-
-[optional body]
-```
-
-Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`
-
-Examples:
-- `feat(clustering): add hierarchical clustering method`
-- `fix(inventory): handle files with invalid UTF-8`
-- `docs: update installation instructions`
-
-## Reporting Issues
-
-When reporting bugs, please include:
-
-1. Python version
-2. Operating system
-3. Steps to reproduce
-4. Expected vs actual behavior
-5. Sample files (if applicable)
-
-## Feature Requests
-
-Feature requests are welcome! Please:
-
-1. Check existing issues first
-2. Describe the use case
-3. Explain expected behavior
-4. Consider implementation complexity
-
-## License
-
-By contributing, you agree that your contributions will be licensed under the MIT License.
+1. Branch from `main`, keep the change focused, and include tests.
+2. Run the checks above; CI is the same commands.
+3. Describe the user-visible behavior change and any migration note in the PR body.

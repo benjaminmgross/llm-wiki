@@ -43,8 +43,8 @@ def test_skill_prints_agent_guide_section(tmp_path: Path, monkeypatch, capsys) -
     out = capsys.readouterr().out
 
     assert rc == 0
-    # The guide section has its own header.
-    assert "How to use this wiki" in out
+    # The packaged skill router follows the schema.
+    assert "Intent router" in out
 
 
 @pytest.mark.unit
@@ -55,8 +55,8 @@ def test_skill_guide_describes_failed_source_status_and_retry(tmp_path: Path, mo
     assert main(["skill"]) == 0
     out = capsys.readouterr().out
 
-    assert "pending/failed/ingested" in out
-    assert "pending or failed source" in out
+    assert "failed sources with reasons" in out
+    assert "retries only pending or failed sources" in out
 
 
 @pytest.mark.unit
@@ -70,10 +70,10 @@ def test_skill_guide_defines_safe_native_session_multi_agent_protocol(tmp_path: 
     assert "session-ingest" in out
     assert "exactly one sub-agent" in out
     assert "active Codex or Claude Code session" in out
-    assert "never use separate model APIs or local inference" in out
+    assert "never call separate model APIs or local inference" in out
     assert "read-only" in out
     assert "agent-slot limit" in out
-    assert "parent" in out and "apply" in out
+    assert "parent" in out.lower() and "apply" in out
     assert "invalidated" in out and "retry" in out
 
 
@@ -103,3 +103,74 @@ def test_skill_outside_wiki_fails(tmp_path: Path, monkeypatch, capsys) -> None:
 
     assert rc == 1
     assert "wiki" in err.lower()
+
+
+# --- v1.4.0: packaged mdwiki skill (intent router + per-operation references) ---
+
+SKILL_INTENTS = ("bootstrap", "ingest", "session-ingest", "search", "query", "synthesize", "overview", "lint", "undo")
+
+
+@pytest.mark.unit
+def test_skill_router_maps_every_intent() -> None:
+    from mdwiki.skill import SKILL_ROOT, list_workflows
+
+    router = (SKILL_ROOT / "SKILL.md").read_text()
+    assert router.startswith("---\nname: mdwiki\n")
+    assert "markdown-consolidator" not in router
+    for intent in SKILL_INTENTS:
+        assert f"references/{intent}.md" in router, f"router does not route {intent}"
+        assert intent in list_workflows()
+
+
+@pytest.mark.unit
+def test_skill_prints_reference_workflows(tmp_path: Path, monkeypatch, capsys) -> None:
+    init_wiki(tmp_path, profile="working-dir")
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["skill"]) == 0
+    out = capsys.readouterr().out
+
+    assert "Page kinds" in out  # schema first
+    assert "name: mdwiki" not in out  # frontmatter is stripped from the router
+    from mdwiki.skill import workflow_text
+
+    for intent in SKILL_INTENTS:
+        assert workflow_text(intent) in out
+    assert "session-ingest pending" in out
+    assert "exactly one sub-agent" in out
+
+
+@pytest.mark.unit
+def test_skill_workflow_flag_prints_single_reference(tmp_path: Path, monkeypatch, capsys) -> None:
+    init_wiki(tmp_path, profile="working-dir")
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["skill", "--workflow", "lint"]) == 0
+    out = capsys.readouterr().out
+    assert "mdwiki lint" in out
+    assert "Page kinds" not in out
+
+    assert main(["skill", "--workflow", "nope"]) == 2
+    assert "unknown workflow" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_skill_root_symlink_matches_package() -> None:
+    from mdwiki.skill import SKILL_ROOT
+
+    repo_skill = Path(__file__).resolve().parents[1] / "skill"
+    assert repo_skill.is_symlink()
+    assert repo_skill.resolve() == SKILL_ROOT.resolve()
+    assert not (SKILL_ROOT / "references" / "ALGORITHMS.md").exists()
+
+
+@pytest.mark.unit
+def test_legacy_consolidator_modules_removed() -> None:
+    import importlib
+
+    for name in ("consolidator", "clustering", "inventory", "tree_builder", "synthesis", "relationships", "keywords", "summarizer"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(f"mdwiki.{name}")
+    import mdwiki
+
+    assert "consolidate" not in mdwiki.__all__

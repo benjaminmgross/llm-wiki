@@ -390,3 +390,96 @@ def test_other_control_chars_in_path_are_rejected() -> None:
     payload["new_pages"][0]["path"] = "wiki/concepts/foo\nbar.md"
     with pytest.raises(PlanValidationError):
         parse_plan(json.dumps(payload))
+
+
+# --- v1.4.0: contradictions ----------------------------------------------------
+
+
+def _contradiction_payload(**overrides: object) -> dict:
+    payload = {
+        "page": "wiki/concepts/attention-sinks.md",
+        "existing_claim": "Attention sinks were introduced in 2024.",
+        "source_claim": "Attention sinks were introduced in 2023.",
+        "resolution": "pending",
+        "claims": [{"source_section_id": "sec-1", "quote": "attention sinks were introduced in 2023"}],
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.mark.unit
+def test_parse_contradictions_round_trip() -> None:
+    from mdwiki.plan import Contradiction
+
+    payload = _valid_payload()
+    payload["contradictions"] = [_contradiction_payload()]
+    plan = parse_plan_dict(payload)
+
+    assert len(plan.contradictions) == 1
+    entry = plan.contradictions[0]
+    assert isinstance(entry, Contradiction)
+    assert entry.page == "wiki/concepts/attention-sinks.md"
+    assert entry.resolution == "pending"
+    assert entry.claims[0].quote == "attention sinks were introduced in 2023"
+    assert any(c.quote == "attention sinks were introduced in 2023" for c in plan.all_claims())
+
+
+@pytest.mark.unit
+def test_contradictions_default_empty_and_resolution_defaults_to_pending() -> None:
+    plan = parse_plan_dict(_valid_payload())
+    assert plan.contradictions == ()
+
+    payload = _valid_payload()
+    entry = _contradiction_payload()
+    del entry["resolution"]
+    payload["contradictions"] = [entry]
+    assert parse_plan_dict(payload).contradictions[0].resolution == "pending"
+
+
+@pytest.mark.unit
+def test_contradictions_only_plan_is_not_empty() -> None:
+    payload = _valid_payload()
+    payload["updates"], payload["new_pages"], payload["cross_refs"] = [], [], []
+    payload["contradictions"] = [_contradiction_payload()]
+    assert parse_plan_dict(payload).is_empty() is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("override", "fragment"),
+    [
+        ({"resolution": "maybe"}, "resolution"),
+        ({"claims": []}, "claims"),
+        ({"page": "raw/x.md"}, "wiki/"),
+        ({"page": "wiki/index.md"}, "infrastructure"),
+        ({"existing_claim": "  "}, "existing_claim"),
+        ({"source_claim": ""}, "source_claim"),
+    ],
+)
+def test_parse_contradictions_rejects_invalid_entries(override: dict, fragment: str) -> None:
+    payload = _valid_payload()
+    payload["contradictions"] = [_contradiction_payload(**override)]
+    with pytest.raises(PlanValidationError) as excinfo:
+        parse_plan_dict(payload)
+    assert fragment in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_non_ingest_verdict_rejects_contradictions() -> None:
+    payload = _valid_payload("low-quality")
+    payload["updates"], payload["new_pages"], payload["cross_refs"] = [], [], []
+    payload["contradictions"] = [_contradiction_payload()]
+    with pytest.raises(PlanValidationError):
+        parse_plan_dict(payload)
+
+
+@pytest.mark.unit
+def test_tool_schema_declares_contradictions() -> None:
+    from mdwiki.ingest_tool import INGEST_TOOL_DEFINITION
+
+    props = INGEST_TOOL_DEFINITION["input_schema"]["properties"]
+    assert "contradictions" in props
+    assert "contradictions" not in INGEST_TOOL_DEFINITION["input_schema"]["required"]
+    item = props["contradictions"]["items"]
+    assert set(item["required"]) == {"page", "existing_claim", "source_claim", "claims"}
+    assert item["properties"]["resolution"]["enum"] == ["pending", "source-wins", "existing-wins", "both-hold"]

@@ -43,7 +43,9 @@ def page_kind_folders_for_wiki(wiki_root: Path) -> list[tuple[str, str, str]]:
     baseline_order = ["entity", "concept", "synthesis"]
     allowed = allowed_kinds_for_wiki(wiki_root)
     ordered = [kind for kind in baseline_order if kind in allowed]
-    ordered.extend(sorted(kind for kind in allowed if kind not in set(ordered)))
+    ordered.extend(sorted(kind for kind in allowed if kind not in set(ordered) and kind != "source"))
+    if "source" in allowed:
+        ordered.append("source")  # generated provenance pages always list last
     return [(kind, heading_for_kind(kind), kind_to_folder(kind)) for kind in ordered]
 
 

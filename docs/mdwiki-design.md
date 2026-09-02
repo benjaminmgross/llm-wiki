@@ -17,7 +17,7 @@ changelog:
 
 # mdwiki — v1.0.0 Design
 
-**Vision.** A folder-local CLI that turns any directory of markdown into an LLM-maintained wiki: immutable raw sources, an LLM-owned wiki layer of interlinked pages, and a schema document the user controls. Built on Karpathy's *llm-wiki* pattern. Replaces `markdown-consolidator`; the existing modules become internals.
+**Vision.** A folder-local CLI that turns any directory of markdown into an LLM-maintained wiki: immutable raw sources, an LLM-owned wiki layer of interlinked pages, and a schema document the user controls. Built on Karpathy's *llm-wiki* pattern. Replaces `markdown-consolidator`; the last consolidator-era modules were removed in v1.4.0.
 
 This document is the locked v1.0.0 contract. All open questions from v0 are resolved below.
 
@@ -195,10 +195,10 @@ Step by step:
 1. Hash + register; copy to `raw/` if new.
 2. Chunk (`chunker.py`); embed each section (`embedder.py`).
 3. ANN search over `pages.embedding` for the union of section embeddings → candidate pages (top-k).
-4. **One LLM call per source** with: all sections + candidate pages + `schema.md` + recent log entries → JSON plan of `{verdict, rationale, updates, new_pages, cross_refs}`. Each claim carries `source_section_id` and a verbatim `quote`. (One call per source — not per section — keeps cost and UX friction low; if quality suffers on long sources, decompose in a later release.)
+4. **One LLM call per source** with: all sections + candidate pages + `schema.md` + recent log entries → JSON plan of `{verdict, rationale, updates, new_pages, cross_refs, contradictions}`. Each claim (and each contradiction) carries `source_section_id` and a verbatim `quote`. (One call per source — not per section — keeps cost and UX friction low; if quality suffers on long sources, decompose in a later release.)
 5. **Verify** every quote exists in the source text (pure Python, no LLM call). On failure, surface to the user.
 6. Show the plan as a diff. User approves, steers (e.g., "drop the new page, just update X"), or aborts.
-7. Apply edits to `wiki/`; materialize `cross_refs` as relative Markdown links; append to `log.md`; insert `events` + citation `backrefs` rows in `state.db`; mark source `ingested`. All within a single sqlite transaction.
+7. Apply edits to `wiki/`; materialize `cross_refs` as relative Markdown links and `contradictions` as a managed block; stamp `title/type/created/updated/sources/tags` frontmatter; write the `wiki/sources/<id>-<slug>.md` provenance page; regenerate `index.md` and `concept-table.md`; refresh FTS rows; append to `log.md`; insert `events`, `backrefs`, and `contradictions` rows in `state.db`; mark source `ingested`. All within a single sqlite transaction, so `undo` reverses every artifact.
 
 Periodically run `mdwiki lint` (or `--lint-after`) to catch drift.
 
@@ -387,7 +387,12 @@ Tables:
 - `events(ts, kind, source_id, page_paths_json, summary, transaction_id)` — mirrors `log.md`
 - `embeddings(text_hash, vector BLOB)` — embedding cache (most expensive thing to rebuild; also cacheable separately if needed)
 - `transactions(id, ts, undo_snapshot_path, applied)` — for undo
-- `transaction_inverses(transaction_id, sql)` — for undo DB rollback
+- `transaction_inverses(transaction_id, sql, params_json)` — for undo DB rollback
+- `rejections(source_id, reason, verdict, ts)` and `cost_ledger(ts, operation, tokens, cost_usd, source_id)` — v1.2 quality primitives
+- `contradictions(page_path, source_id, existing_claim, source_claim, resolution, ts)` — v1.4; mirrors the managed `<!-- mdwiki:contradictions -->` block in the page; `status` counts `pending`, lint ages them against later `ingest` events
+- `page_chunks_fts(path, heading, body)` — v1.4 FTS5 virtual table, one row per heading-bounded page section; refreshed inside every `IngestTransaction`, rebuilt by `undo` and `rebuild --pages`, queried by `mdwiki search`
+
+Recovery (v1.4): `mdwiki rebuild` restores `sources` from the sidecar; `mdwiki rebuild --pages` restores `pages`, embeddings, the search index, and re-derives `backrefs` from the generated `wiki/sources/*.md` pages and `contradictions` from the pages' managed blocks. Only `events` remains lossy (`log.md` lines).
 
 Default `.gitignore` for the wiki folder:
 
@@ -436,27 +441,22 @@ Each implementation phase ends in a manual-testing gate where the user runs conc
 |---|---|
 | `mdwiki init [--bootstrap\|--bootstrap-batch]` | Scaffold, register sources, and optionally ingest through the configured provider |
 | `mdwiki refresh [--bootstrap\|--bootstrap-batch]` | Register new sources and optionally ingest outstanding pending/failed sources |
-| `mdwiki ingest [<file>\|--all\|--pending] [--yes]` | Incremental ingest; `--pending` includes retryable failures |
-| `mdwiki session-ingest pending\|prepare\|apply` | Native-session parallel plan handoff with parent-owned latest-state validation and serialized per-source apply |
-| `mdwiki query "<q>" [--file]` | Search + synthesize, optionally file findings as a new page |
-| `mdwiki lint [--fix]` | Contradictions, orphans, stale, focus, headers, gaps |
-| `mdwiki status` | Pending/failed/ingested counts, failed-source reasons, last lint, recent events |
+| `mdwiki ingest [<file>\|--all\|--pending] [--yes] [--overview]` | Incremental ingest; `--pending` includes retryable failures; `--overview` refreshes `wiki/overview.md` after a batch |
+| `mdwiki session-ingest pending\|prepare\|apply` | Native-session parallel plan handoff with parent-owned latest-state validation and serialized per-source apply; envelopes carry `lexical_candidates` |
+| `mdwiki search "<terms>" [--limit N] [--json]` | FTS5 lexical search over page sections; no model, no embedder |
+| `mdwiki query "<q>" [--file] [--stub]` | Search + synthesize with a `Confidence:` line; optionally file findings as a new page or record a gap as a stub |
+| `mdwiki synthesize "<topic>" \| --auto` | Topic synthesis, or cluster discovery over the cross-ref graph |
+| `mdwiki overview` | Model-written `wiki/overview.md` from the index, concept table, and pending contradictions |
+| `mdwiki lint [--fix \| --fix=full \| --fix=<n>,...]` | Broken refs, unverified quotes, unresolved contradictions, orphans, stale, coverage gaps, duplicate candidates, isolated clusters; severity-grouped, numbered, selectable fixes |
+| `mdwiki status` | Pending/failed/ingested counts, failed-source reasons, pending contradictions, last lint, recent events |
 | `mdwiki source <id>` | Reveal raw path / original path / dependent pages |
-| `mdwiki undo [N]` | Roll back the last N ingest transactions |
-| `mdwiki rebuild` | Reconstruct `state.db` from `raw/` + `wiki/` + `log.md` |
+| `mdwiki skill [--workflow NAME]` | Print the schema plus the packaged agent skill (intent router + reference workflows) |
+| `mdwiki undo [N]` | Roll back the last N transactions |
+| `mdwiki rebuild [--pages]` | Reconstruct `state.db` from `raw/` + `wiki/` + `log.md`; `--pages` also restores pages, embeddings, search rows, backrefs, and contradictions from `wiki/` |
 
 ## Migration stance
 
-Drop `mdconsolidate` as a public CLI. The existing modules become **internals of `mdwiki`**, called by `init --bootstrap`, `ingest`, and `lint`:
-
-- `inventory` → used by `init` for source discovery
-- `chunker` → used by `ingest` for sectioning
-- `embedder` → used by `ingest`, `query`, and `init --bootstrap`
-- `clustering` + `synthesis` → used by `init --bootstrap` for cold-start seeding
-- `summarizer` → used by `ingest` for page-update phrasing
-- `tree_builder`, `keywords`, `relationships` → used by `lint` and `query`
-- `encapsulation` → used by `lint`
-- `header_coherence`, `outline_consolidator` (in flight) → used by `lint`
+Drop `mdconsolidate` as a public CLI. At v1.0.0 the plan was for the consolidator modules to become internals of `mdwiki`; in practice only `chunker` and `embedder` were ever wired in. As of **v1.4.0** the remaining consolidator-era modules (`inventory`, `clustering`, `synthesis`, `summarizer`, `tree_builder`, `keywords`, `relationships`, `encapsulation`, `manifest`, `consolidator`) and the `markdown-consolidator` skill are removed outright; `chunker` and `embedder` are the surviving internals.
 
 No backwards-compat shims, no parallel front-end. Project rename: `markdown-consolidator` → `mdwiki`. Version: ship as **v1.0.0** under the new name; old package gets a final v0.3.0 release noting the rename.
 

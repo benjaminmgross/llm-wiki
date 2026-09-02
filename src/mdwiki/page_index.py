@@ -11,6 +11,8 @@ from mdwiki.embedder import Embedder, get_default_embedder
 from mdwiki.embeddings import serialize
 from mdwiki.page_kinds import infer_kind_from_page_path, iter_wiki_page_paths
 from mdwiki.plan import allowed_kinds_for_wiki
+from mdwiki.search import rebuild_search_index
+from mdwiki.source_pages import restore_provenance
 from mdwiki.state import connect
 
 
@@ -23,6 +25,9 @@ class PageIndexRebuildResult:
     pruned: int
     skipped: int
     embedded: int
+    search_indexed: int = 0
+    backrefs_restored: int = 0
+    contradictions_restored: int = 0
 
     @property
     def total_indexed(self) -> int:
@@ -40,7 +45,7 @@ def rebuild_page_index(
     allowed_kinds = allowed_kinds_for_wiki(wiki_root)
     db_path = wiki_root / WIKI_DIR_NAME / "state.db"
 
-    discovered: dict[str, tuple[str, bytes]] = {}
+    discovered: dict[str, tuple[str, bytes | None]] = {}
     skipped = 0
     embedded = 0
     for page_path in iter_wiki_page_paths(wiki_root):
@@ -48,6 +53,9 @@ def rebuild_page_index(
         kind = infer_kind_from_page_path(rel)
         if kind is None or kind not in allowed_kinds:
             skipped += 1
+            continue
+        if kind == "source":
+            discovered[rel] = (kind, None)  # generated provenance pages are never retrieval candidates
             continue
         content = page_path.read_text()
         discovered[rel] = (kind, serialize(embedder.embed_text(content)))
@@ -78,6 +86,8 @@ def rebuild_page_index(
             for path in sorted(existing_paths - discovered_paths):
                 conn.execute("DELETE FROM pages WHERE path = ?", (path,))
                 pruned += 1
+        search_indexed = rebuild_search_index(conn, wiki_root=wiki_root)
+        restored = restore_provenance(conn, wiki_root=wiki_root)
         conn.commit()
 
     return PageIndexRebuildResult(
@@ -86,4 +96,7 @@ def rebuild_page_index(
         pruned=pruned,
         skipped=skipped,
         embedded=embedded,
+        search_indexed=search_indexed,
+        backrefs_restored=restored.backrefs,
+        contradictions_restored=restored.contradictions,
     )

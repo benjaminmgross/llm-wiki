@@ -62,6 +62,8 @@ CLAUDE.md
 CLAUDE.md.new
 *.new
 .claude/
+# ...except the committed example wiki's runtime pointer file
+!examples/llm-wiki-pattern/CLAUDE.md
 
 # Other AI Assistants
 .worktrees/

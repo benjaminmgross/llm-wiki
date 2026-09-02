@@ -44,6 +44,7 @@ class StatusReport:
     events_total: int = 0
     last_lint_ts: float | None = None
     recent_events: tuple[EventRow, ...] = ()
+    contradictions_pending: int = 0
 
 
 def get_status(wiki_root: Path, *, recent_event_limit: int = 5) -> StatusReport:
@@ -73,8 +74,11 @@ def get_status(wiki_root: Path, *, recent_event_limit: int = 5) -> StatusReport:
 
         pages_total = conn.execute("SELECT COUNT(*) AS c FROM pages").fetchone()["c"]
         pages_with_embeddings = conn.execute("SELECT COUNT(*) AS c FROM pages WHERE embedding IS NOT NULL").fetchone()["c"]
+        embeddable_pages = conn.execute("SELECT COUNT(*) AS c FROM pages WHERE kind != 'source'").fetchone()["c"]
         kind_rows = conn.execute("SELECT kind, COUNT(*) AS c FROM pages GROUP BY kind").fetchall()
         pages_by_kind = {row["kind"]: row["c"] for row in kind_rows}
+
+        contradictions_pending = conn.execute("SELECT COUNT(*) AS c FROM contradictions WHERE resolution = 'pending'").fetchone()["c"]
 
         events_total = conn.execute("SELECT COUNT(*) AS c FROM events").fetchone()["c"]
         lint_row = conn.execute("SELECT MAX(ts) AS ts FROM events WHERE kind = 'lint'").fetchone()
@@ -92,6 +96,7 @@ def get_status(wiki_root: Path, *, recent_event_limit: int = 5) -> StatusReport:
             disk_pages_total=disk_pages_total,
             pages_total=pages_total,
             pages_with_embeddings=pages_with_embeddings,
+            embeddable_pages=embeddable_pages,
         )
     )
 
@@ -108,6 +113,7 @@ def get_status(wiki_root: Path, *, recent_event_limit: int = 5) -> StatusReport:
         events_total=events_total,
         last_lint_ts=last_lint_ts,
         recent_events=recent_events,
+        contradictions_pending=contradictions_pending,
     )
 
 
@@ -126,6 +132,7 @@ def format_status(report: StatusReport, *, wiki_root: Path) -> str:
     lines.append(f"Wiki pages: {report.pages_total}  ({kind_str})")
     lines.append(f"Disk pages: {report.disk_pages_total}; page embeddings: {report.pages_with_embeddings}")
 
+    lines.append(f"Contradictions: {report.contradictions_pending} pending")
     lines.append(f"Events:     {report.events_total}")
 
     last_lint = "never" if report.last_lint_ts is None else _fmt_ts(report.last_lint_ts)
@@ -156,7 +163,10 @@ def _build_drift_warnings(
     disk_pages_total: int,
     pages_total: int,
     pages_with_embeddings: int,
+    embeddable_pages: int | None = None,
 ) -> list[str]:
+    if embeddable_pages is None:
+        embeddable_pages = pages_total
     warnings: list[str] = []
     if disk_pages_total > 0 and pages_total == 0:
         warnings.append("WARNING: wiki files exist on disk, but state.db has no page rows.")
@@ -167,8 +177,8 @@ def _build_drift_warnings(
             f"WARNING: wiki page count drift: {disk_pages_total} markdown page(s) on disk, "
             f"but {pages_total} page row(s) in state.db. Run `mdwiki rebuild --pages`."
         )
-    if pages_total > 0 and pages_with_embeddings < pages_total:
+    if embeddable_pages > 0 and pages_with_embeddings < embeddable_pages:
         warnings.append(
-            f"WARNING: {pages_total - pages_with_embeddings} page row(s) have no embedding. Run `mdwiki rebuild --pages` before ingesting."
+            f"WARNING: {embeddable_pages - pages_with_embeddings} page row(s) have no embedding. Run `mdwiki rebuild --pages` before ingesting."
         )
     return warnings

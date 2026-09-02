@@ -832,9 +832,101 @@ def test_refresh_bootstrap_batch_openai_compatible_fallback_keeps_initiative_wik
     assert report.failed == 0
     assert report.ingested == 1
     with connect(tmp_path / ".mdwiki" / "state.db") as conn:
-        assert conn.execute("SELECT COUNT(*) AS c FROM pages").fetchone()["c"] == 1
+        assert conn.execute("SELECT COUNT(*) AS c FROM pages WHERE kind != 'source'").fetchone()["c"] == 1
         assert conn.execute("SELECT COUNT(*) AS c FROM backrefs").fetchone()["c"] == 1
     sidecar = json.loads((tmp_path / "raw" / ".sources.json").read_text())
     source_meta = next(iter(sidecar.values()))
     assert source_meta["status"] == "ingested"
     assert source_meta["failure_reason"] is None
+
+
+@pytest.mark.unit
+def test_init_pointers_flag_routes_to_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    (tmp_path / "a.md").write_text("# A")
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["init", "--pointers=claude,copilot"]) == 0
+    assert (tmp_path / "CLAUDE.md").is_file()
+    assert (tmp_path / ".github" / "copilot-instructions.md").is_file()
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert "pointer" in capsys.readouterr().out.lower()
+
+    other = tmp_path.parent / (tmp_path.name + "-b")
+    other.mkdir()
+    (other / "b.md").write_text("# B")
+    monkeypatch.chdir(other)
+    assert main(["init", "--pointers=bogus"]) == 2
+    assert "pointers" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_ingest_pending_overview_flag_refreshes_overview_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mocker: MockerFixture
+) -> None:
+    from mdwiki.llm.base import CompleteResult
+    from mdwiki.overview import OVERVIEW_PATH
+
+    (tmp_path / "a.md").write_text("# A\n\n## intro\n\nThis paper introduces attention sinks for long contexts.\n")
+    (tmp_path / "b.md").write_text("# B\n\n## intro\n\nThis paper introduces retrieval for long contexts.\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    init_wiki(tmp_path, pointers=())
+
+    def plan(slug: str, source: str, quote: str) -> str:
+        return json.dumps(
+            {
+                "verdict": "ingest",
+                "rationale": "x",
+                "updates": [],
+                "new_pages": [{"path": f"wiki/concepts/{slug}.md", "kind": "concept", "content": f"# {slug}\n\nbody", "claims": [{"source_section_id": f"{source}/intro", "quote": quote}]}],
+                "cross_refs": [],
+            }
+        )
+
+    responses = [
+        CompleteResult(text=plan("sinks", "a.md", "this paper introduces attention sinks for long contexts"), input_tokens=1, output_tokens=1),
+        CompleteResult(text=plan("retrieval", "b.md", "this paper introduces retrieval for long contexts"), input_tokens=1, output_tokens=1),
+        CompleteResult(text="# Overview\n\nTwo concepts.\n", input_tokens=1, output_tokens=1),
+    ]
+    complete = mocker.patch("mdwiki.llm.anthropic.AnthropicProvider.complete", side_effect=responses)
+    mocker.patch("mdwiki.ingest.get_default_embedder", return_value=type("E", (), {"embed_text": lambda self, t: [1.0, 0.0]})())
+
+    assert main(["ingest", "--pending", "--overview"]) == 0
+    out = capsys.readouterr().out
+    assert complete.call_count == 3
+    assert (tmp_path / OVERVIEW_PATH).read_text().endswith("Two concepts.\n")
+    assert OVERVIEW_PATH in out
+
+
+@pytest.mark.unit
+def test_lint_report_grouped_by_severity_with_numbers_and_fix_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import time
+
+    from mdwiki.state import connect
+
+    monkeypatch.chdir(tmp_path)
+    init_wiki(tmp_path, pointers=())
+    pages = {"a": "# a\n\n[gone](gone.md)\n", "b": "# b\n\nno links [unverified-quote]\n"}
+    for name, content in pages.items():
+        page = tmp_path / "wiki" / "concepts" / f"{name}.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(content)
+        with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+            conn.execute("INSERT INTO pages (path, kind, last_touched_at) VALUES (?, 'concept', ?)", (f"wiki/concepts/{name}.md", time.time()))
+            conn.commit()
+
+    assert main(["lint"]) == 0
+    out = capsys.readouterr().out
+    assert "## warn" in out and "## info" in out
+    assert out.index("## warn") < out.index("## info")
+    assert "[1] " in out and "[2] " in out
+    assert "--fix=1,3" in out or "--fix=<n>" in out
+
+    assert main(["lint", "--fix=1", "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert "applied 1" in out
+
+    assert main(["lint", "--fix=zero,1"]) == 2
+    assert "--fix" in capsys.readouterr().err

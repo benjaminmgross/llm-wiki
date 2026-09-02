@@ -411,3 +411,60 @@ def test_session_cross_ref_rejects_deleted_target_only_page(session_wiki: Path) 
 
     with pytest.raises(PlanInvalidatedError, match="target.md"):
         apply_session_plan(session_wiki, _with_plan(envelope, plan))
+
+
+@pytest.mark.unit
+def test_prepare_includes_lexical_candidates_and_search_instruction(session_wiki: Path, mocker: MockerFixture) -> None:
+    import time
+
+    from mdwiki.transaction import IngestTransaction
+
+    with IngestTransaction(wiki_root=session_wiki, source_id=None, summary="seed") as tx:
+        tx.write_file(session_wiki / "wiki/concepts/shared-knowledge.md", "# Shared knowledge\n\nDurable evidence lives here.\n")
+        tx.upsert_page(path="wiki/concepts/shared-knowledge.md", kind="concept", embedding=None, last_touched_at=time.time())
+    embedder = mocker.patch("mdwiki.embedder.get_default_embedder", side_effect=AssertionError("no embedder"))
+
+    envelope = prepare_session_plan(session_wiki, "a.md").to_dict()
+
+    assert envelope["wiki"]["lexical_candidates"] == ["wiki/concepts/shared-knowledge.md"]
+    assert "mdwiki search" in envelope["agent_instructions"]
+    assert embedder.call_count == 0
+
+
+@pytest.mark.unit
+def test_contradiction_page_freshness_is_validated_under_the_lock(session_wiki: Path) -> None:
+    import time
+
+    from mdwiki.transaction import IngestTransaction
+
+    page = "wiki/concepts/shared-knowledge.md"
+    with IngestTransaction(wiki_root=session_wiki, source_id=None, summary="seed") as tx:
+        tx.write_file(session_wiki / page, "# Shared knowledge\n\nThe page says one thing.\n")
+        tx.upsert_page(path=page, kind="concept", embedding=None, last_touched_at=time.time())
+
+    envelope = prepare_session_plan(session_wiki, "a.md").to_dict()
+    plan = {
+        "verdict": "ingest",
+        "rationale": "Disagreement.",
+        "updates": [],
+        "new_pages": [],
+        "cross_refs": [],
+        "contradictions": [
+            {
+                "page": page,
+                "existing_claim": "The page says one thing.",
+                "source_claim": "Source a contains durable evidence.",
+                "claims": [{"source_section_id": "a.md/Evidence", "quote": "Source a contains durable evidence for the shared knowledge page"}],
+            }
+        ],
+    }
+    with IngestTransaction(wiki_root=session_wiki, source_id=None, summary="concurrent edit") as tx:
+        tx.write_file(session_wiki / page, "# Shared knowledge\n\nThe page changed underneath.\n")
+
+    with pytest.raises(PlanInvalidatedError):
+        apply_session_plan(session_wiki, _with_plan(envelope, plan))
+
+    fresh = prepare_session_plan(session_wiki, "a.md").to_dict()
+    result = apply_session_plan(session_wiki, _with_plan(fresh, plan))
+    assert result.applied is True
+    assert "<!-- mdwiki:contradictions -->" in (session_wiki / page).read_text()

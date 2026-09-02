@@ -33,6 +33,7 @@ from types import TracebackType
 from typing import Literal, Self
 
 from mdwiki.discover import WIKI_DIR_NAME
+from mdwiki.semantic_pages import GENERATED_PAGE_NAMES, is_semantic_page_path
 from mdwiki.source_state import mirror_source_state
 from mdwiki.state import connect
 
@@ -48,7 +49,7 @@ class TransactionAborted(RuntimeError):
 class IngestTransaction:
     """Context manager wrapping a single atomic wiki edit."""
 
-    def __init__(self, *, wiki_root: Path, source_id: str | None, summary: str) -> None:
+    def __init__(self, *, wiki_root: Path, source_id: str | None, summary: str, event_kind: str = "ingest") -> None:
         """Initialize the transaction.
 
         Parameters
@@ -60,10 +61,15 @@ class IngestTransaction:
             transactions that aren't tied to a single source (e.g. lint --fix).
         summary : str
             Human-readable one-line summary, written to both ``events.summary`` and ``log.md``.
+        event_kind : str, default "ingest"
+            ``events.kind`` recorded at commit. Source-backed ingests keep the
+            default; other writers (``query-filed``, ``overview``) label
+            themselves so ``status`` and lint can tell them apart.
         """
         self._wiki_root = wiki_root
         self._source_id = source_id
         self._summary = summary
+        self._event_kind = event_kind
         self._tx_id: str = f"tx-{uuid.uuid4().hex[:12]}"
         self._undo_dir = wiki_root / WIKI_DIR_NAME / UNDO_DIR_NAME / self._tx_id
         self._touched_files: list[Path] = []
@@ -240,6 +246,39 @@ class IngestTransaction:
         )
         self.add_inverse("DELETE FROM backrefs WHERE rowid = ?", (cursor.lastrowid,))
 
+    def record_contradiction(
+        self,
+        *,
+        page_path: str,
+        source_id: str | None,
+        existing_claim: str,
+        source_claim: str,
+        resolution: str,
+        ts: float,
+    ) -> None:
+        """Insert or update one ``contradictions`` row (same page + claim pair), recording the inverse."""
+        if self._conn is None:
+            raise RuntimeError("IngestTransaction must be entered as a context manager before calling record_contradiction().")
+        prev = self._conn.execute(
+            "SELECT id, source_id, resolution, ts FROM contradictions WHERE page_path = ? AND existing_claim = ? AND source_claim = ?",
+            (page_path, existing_claim, source_claim),
+        ).fetchone()
+        if prev is None:
+            cursor = self._conn.execute(
+                "INSERT INTO contradictions (page_path, source_id, existing_claim, source_claim, resolution, ts) VALUES (?, ?, ?, ?, ?, ?)",
+                (page_path, source_id, existing_claim, source_claim, resolution, ts),
+            )
+            self.add_inverse("DELETE FROM contradictions WHERE id = ?", (cursor.lastrowid,))
+        else:
+            self._conn.execute(
+                "UPDATE contradictions SET source_id = ?, resolution = ?, ts = ? WHERE id = ?",
+                (source_id, resolution, ts, prev["id"]),
+            )
+            self.add_inverse(
+                "UPDATE contradictions SET source_id = ?, resolution = ?, ts = ? WHERE id = ?",
+                (prev["source_id"], prev["resolution"], prev["ts"], prev["id"]),
+            )
+
     def abort(self, reason: str = "aborted") -> None:
         """Trigger rollback by raising ``TransactionAborted``."""
         raise TransactionAborted(reason)
@@ -255,7 +294,7 @@ class IngestTransaction:
         )
         self._conn.execute(
             "INSERT INTO events (ts, kind, source_id, summary, transaction_id) VALUES (?, ?, ?, ?, ?)",
-            (now, "ingest", self._source_id, self._summary, self._tx_id),
+            (now, self._event_kind, self._source_id, self._summary, self._tx_id),
         )
         if self._source_id is not None:
             prev = self._conn.execute("SELECT status, ingested_at, failure_reason FROM sources WHERE id = ?", (self._source_id,)).fetchone()
@@ -276,6 +315,34 @@ class IngestTransaction:
                 "INSERT INTO transaction_inverses (transaction_id, sql, params_json) VALUES (?, ?, ?)",
                 (self._tx_id, sql, json.dumps(list(params))),
             )
+
+        # Navigation pages (index.md, concept-table.md) are a function of the
+        # pages on disk plus this transaction's uncommitted rows, so regenerate
+        # them here — once, after every semantic write — through write_file so
+        # undo restores the previous navigation too.
+        touched_semantic = [
+            touched
+            for touched in self._touched_files
+            if is_semantic_page_path(touched.relative_to(self._wiki_root.resolve()).as_posix())
+        ]
+        if touched_semantic:
+            from mdwiki.navigation import write_navigation
+
+            write_navigation(self, self._wiki_root, conn=self._conn)
+
+        # Lexical search rows are a derived cache: refresh them for every page
+        # this transaction wrote, inside the same sqlite transaction so a
+        # rollback leaves the index consistent with the files. Undo rebuilds
+        # the index from disk after restoring snapshots.
+        from mdwiki.search import ensure_search_schema, index_page
+
+        ensure_search_schema(self._conn)
+        for touched in self._touched_files:
+            rel = touched.relative_to(self._wiki_root.resolve())
+            if not _is_wiki_page(rel) or not is_semantic_page_path(rel.as_posix()):
+                continue
+            with touched.open(encoding="utf-8", newline="") as page_file:
+                index_page(self._conn, rel_path=rel.as_posix(), text=page_file.read())
 
         # The DB is the source of truth — commit it BEFORE touching log.md so a
         # disk-full or permission failure on the log append can't leave a
@@ -336,17 +403,15 @@ def _iso_utc(ts: float) -> str:
 def _is_wiki_page(rel: Path) -> bool:
     """Return True when ``rel`` (relative to wiki_root) names a wiki page eligible for version-chain embedding.
 
-    Pages live under ``wiki/`` and are markdown. We deliberately exclude the
-    auto-generated ``wiki/log.md`` and ``wiki/index.md`` because their format
-    is line-oriented / catalog-style respectively, and embedding YAML
-    frontmatter would corrupt them.
+    Pages live under ``wiki/`` and are markdown. Deterministically generated
+    files (``GENERATED_PAGE_NAMES``: log, index, concept table) are excluded
+    because their bytes are a function of state and a chain on them is noise.
     """
     if not rel.parts or rel.parts[0] != "wiki":
         return False
     if rel.suffix.lower() != ".md":
         return False
-    name = rel.name.lower()
-    if name in {"log.md", "index.md"}:
+    if rel.name.lower() in GENERATED_PAGE_NAMES:
         return False
     return True
 

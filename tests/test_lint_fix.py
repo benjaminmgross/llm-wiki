@@ -267,3 +267,35 @@ def test_lint_fix_returns_zero_when_no_findings(tmp_path: Path) -> None:
     result = lint_fix(tmp_path, mode="default", yes=True)
     assert result.fixed_count == 0
     assert result.skipped_count == 0
+
+
+# --- v1.4.0: numbered selection ------------------------------------------------
+
+
+@pytest.mark.unit
+def test_lint_fix_selection_applies_only_numbered_findings(tmp_path: Path) -> None:
+    import time as _time
+
+    from mdwiki.init import init_wiki as _init
+    from mdwiki.lint import lint_wiki as _lint
+    from mdwiki.lint import order_findings
+    from mdwiki.lint_fix import lint_fix as _fix
+    from mdwiki.state import connect as _connect
+
+    _init(tmp_path, pointers=())
+    for name in ("a", "b", "c"):
+        page = tmp_path / "wiki" / "concepts" / f"{name}.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(f"# {name}\n\n[missing](missing-{name}.md)\n")
+        with _connect(tmp_path / ".mdwiki" / "state.db") as conn:
+            conn.execute("INSERT INTO pages (path, kind, last_touched_at) VALUES (?, 'concept', ?)", (f"wiki/concepts/{name}.md", _time.time()))
+            conn.commit()
+    ordered = order_findings(_lint(tmp_path).findings)
+    broken_numbers = [i for i, f in enumerate(ordered, start=1) if f.kind == "broken-ref"]
+    assert len(broken_numbers) == 3
+
+    result = _fix(tmp_path, mode="default", yes=True, select=frozenset({broken_numbers[0], broken_numbers[2]}))
+
+    assert result.fixed_count == 2
+    remaining = [f for f in _lint(tmp_path).findings if f.kind == "broken-ref"]
+    assert [f.page_path for f in remaining] == [ordered[broken_numbers[1] - 1].page_path]

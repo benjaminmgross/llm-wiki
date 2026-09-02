@@ -386,3 +386,121 @@ def test_lint_findings_grouped_by_kind(wiki: Path) -> None:
     report = lint_wiki(wiki)
     assert report.findings_by_kind.get("orphan", 0) >= 2
     assert report.findings_by_kind.get("broken-ref", 0) >= 1
+
+
+# --- v1.4.0: unresolved contradictions -----------------------------------------
+
+
+def _add_contradiction(wiki_root: Path, *, page: str, ts: float, resolution: str = "pending") -> None:
+    with connect(wiki_root / ".mdwiki" / "state.db") as conn:
+        conn.execute(
+            "INSERT INTO contradictions (page_path, source_id, existing_claim, source_claim, resolution, ts) VALUES (?, NULL, ?, ?, ?, ?)",
+            (page, "wiki says A", "source says B", resolution, ts),
+        )
+        conn.commit()
+
+
+def _add_ingest_events(wiki_root: Path, *, count: int, start_ts: float) -> None:
+    with connect(wiki_root / ".mdwiki" / "state.db") as conn:
+        for i in range(count):
+            conn.execute("INSERT INTO events (ts, kind, summary) VALUES (?, 'ingest', ?)", (start_ts + i, f"ingest n{i}"))
+        conn.commit()
+
+
+@pytest.mark.unit
+def test_lint_flags_unresolved_contradiction_after_n_later_ingests(wiki: Path) -> None:
+    _add_page(wiki, path="wiki/concepts/a.md", content="# A\n\n[B](b.md)")
+    _add_page(wiki, path="wiki/concepts/b.md", content="# B\n\n[A](a.md)")
+    base = time.time() - 100
+    _add_contradiction(wiki, page="wiki/concepts/a.md", ts=base)
+    _add_ingest_events(wiki, count=2, start_ts=base + 1)
+    assert not [f for f in lint_wiki(wiki).findings if f.kind == "unresolved-contradiction"]
+
+    _add_ingest_events(wiki, count=1, start_ts=base + 10)
+    findings = [f for f in lint_wiki(wiki).findings if f.kind == "unresolved-contradiction"]
+    assert len(findings) == 1
+    assert findings[0].page_path == "wiki/concepts/a.md"
+    assert findings[0].severity == "warn"
+    assert "3" in findings[0].message
+
+
+@pytest.mark.unit
+def test_lint_ignores_resolved_contradictions_and_honors_config_threshold(wiki: Path) -> None:
+    _add_page(wiki, path="wiki/concepts/a.md", content="# A\n\n[B](b.md)")
+    _add_page(wiki, path="wiki/concepts/b.md", content="# B\n\n[A](a.md)")
+    base = time.time() - 100
+    _add_contradiction(wiki, page="wiki/concepts/a.md", ts=base, resolution="source-wins")
+    _add_contradiction(wiki, page="wiki/concepts/b.md", ts=base)
+    _add_ingest_events(wiki, count=1, start_ts=base + 1)
+    config_path = wiki / ".mdwiki" / "config.toml"
+    config_path.write_text(config_path.read_text() + "\n[lint]\nunresolved_contradiction_after = 1\n")
+
+    findings = [f for f in lint_wiki(wiki).findings if f.kind == "unresolved-contradiction"]
+    assert [f.page_path for f in findings] == ["wiki/concepts/b.md"]
+
+
+# --- v1.4.0: duplicate candidates, isolated clusters, severity ordering ---------
+
+
+def _add_embedded_page(wiki_root: Path, *, path: str, vector: list[float], kind: str = "concept", content: str | None = None) -> None:
+    from mdwiki.embeddings import serialize
+
+    (wiki_root / path).parent.mkdir(parents=True, exist_ok=True)
+    (wiki_root / path).write_text(content or f"# {Path(path).stem}\n\nbody")
+    with connect(wiki_root / ".mdwiki" / "state.db") as conn:
+        conn.execute(
+            "INSERT INTO pages (path, kind, embedding, last_touched_at) VALUES (?, ?, ?, ?)",
+            (path, kind, serialize(vector), time.time()),
+        )
+        conn.commit()
+
+
+@pytest.mark.unit
+def test_lint_duplicate_candidate_uses_same_kind_cosine_threshold(wiki: Path) -> None:
+    _add_embedded_page(wiki, path="wiki/concepts/first-principles.md", vector=[1.0, 0.0, 0.0])
+    _add_embedded_page(wiki, path="wiki/concepts/first-principles-thinking.md", vector=[0.99, 0.05, 0.0])
+    _add_embedded_page(wiki, path="wiki/concepts/unrelated.md", vector=[0.0, 1.0, 0.0])
+    _add_embedded_page(wiki, path="wiki/entities/same-vector-other-kind.md", vector=[1.0, 0.0, 0.0], kind="entity")
+
+    findings = [f for f in lint_wiki(wiki).findings if f.kind == "duplicate-candidate"]
+
+    assert len(findings) == 1
+    assert findings[0].severity == "info"
+    pair = {"wiki/concepts/first-principles-thinking.md", "wiki/concepts/first-principles.md"}
+    assert findings[0].page_path in pair
+    assert any(other in findings[0].message for other in pair - {findings[0].page_path})
+
+    config_path = wiki / ".mdwiki" / "config.toml"
+    config_path.write_text(config_path.read_text() + "\n[lint]\nduplicate_similarity = 0.9999\n")
+    assert not [f for f in lint_wiki(wiki).findings if f.kind == "duplicate-candidate"]
+
+
+@pytest.mark.unit
+def test_lint_isolated_cluster_flags_components_disconnected_from_main_graph(wiki: Path) -> None:
+    _add_page(wiki, path="wiki/concepts/a.md", content="# A\n\n[B](b.md) [C](c.md)")
+    _add_page(wiki, path="wiki/concepts/b.md", content="# B\n\n[A](a.md)")
+    _add_page(wiki, path="wiki/concepts/c.md", content="# C\n\n[A](a.md)")
+    _add_page(wiki, path="wiki/concepts/x.md", content="# X\n\n[Y](y.md)")
+    _add_page(wiki, path="wiki/concepts/y.md", content="# Y\n\n[X](x.md)")
+    _add_page(wiki, path="wiki/concepts/lonely.md", content="# Lonely\n\nno links")
+
+    findings = [f for f in lint_wiki(wiki).findings if f.kind == "isolated-cluster"]
+
+    assert len(findings) == 1
+    assert findings[0].severity == "info"
+    assert findings[0].page_path == "wiki/concepts/x.md"
+    assert "wiki/concepts/y.md" in findings[0].message
+    assert "2 page(s)" in findings[0].message
+
+
+@pytest.mark.unit
+def test_lint_orders_findings_by_severity_then_kind_then_page(wiki: Path) -> None:
+    from mdwiki.lint import order_findings
+
+    _add_page(wiki, path="wiki/concepts/z.md", content="# Z\n\n[gone](gone.md) [unverified-quote]")
+    _add_page(wiki, path="wiki/concepts/a.md", content="# A\n\nnothing links here")
+    ordered = order_findings(lint_wiki(wiki).findings)
+    severities = [f.severity for f in ordered]
+    assert severities == sorted(severities, key=lambda s: {"error": 0, "warn": 1, "info": 2}[s])
+    warn_kinds = [f.kind for f in ordered if f.severity == "warn"]
+    assert warn_kinds == sorted(warn_kinds)

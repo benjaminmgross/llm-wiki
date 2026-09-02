@@ -1,0 +1,32 @@
+{
+  "13f49d5c6535": {
+    "content_hash": "13f49d5c65354456be7594d911f7c23296d3376dab5e9986f543181f72549d73",
+    "failure_reason": null,
+    "ingested_at": 1788382293.0387366,
+    "loader": "MarkdownLoader",
+    "mtime": 1788382293.0186863,
+    "original_path": "notes/01-llm-wiki-pattern.md",
+    "raw_path": "raw/13f49d5c6535-01-llm-wiki-pattern.md",
+    "status": "ingested"
+  },
+  "42b213b91efe": {
+    "content_hash": "42b213b91efe23eae43626112cfe5df7fc4596e4f058f82a1f38d9579aae3eab",
+    "failure_reason": null,
+    "ingested_at": 1788382293.053292,
+    "loader": "MarkdownLoader",
+    "mtime": 1788382293.0187426,
+    "original_path": "notes/02-cite-or-refuse.md",
+    "raw_path": "raw/42b213b91efe-02-cite-or-refuse.md",
+    "status": "ingested"
+  },
+  "9bed4df13978": {
+    "content_hash": "9bed4df13978514ffbc68f0d8a623b4d0c6ebf86cd53517d8a2f82c744d9a50d",
+    "failure_reason": null,
+    "ingested_at": 1788382293.069291,
+    "loader": "MarkdownLoader",
+    "mtime": 1788382293.0187798,
+    "original_path": "notes/03-maintenance-and-lint.md",
+    "raw_path": "raw/9bed4df13978-03-maintenance-and-lint.md",
+    "status": "ingested"
+  }
+}

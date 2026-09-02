@@ -591,3 +591,109 @@ def test_ingest_low_quality_verdict_marks_ingested_without_writes(wiki_with_one_
     with connect(db_path) as conn:
         row = conn.execute("SELECT status FROM sources WHERE original_path='ai.md'").fetchone()
     assert row["status"] == "ingested"
+
+
+# --- v1.4.0: contradictions ----------------------------------------------------
+
+
+def _seed_page(wiki_root: Path, rel: str, content: str) -> None:
+    import time
+
+    from mdwiki.transaction import IngestTransaction
+
+    with IngestTransaction(wiki_root=wiki_root, source_id=None, summary=f"seed {rel}") as tx:
+        tx.write_file(wiki_root / rel, content)
+        tx.upsert_page(path=rel, kind="concept", embedding=None, last_touched_at=time.time())
+
+
+def _contradiction_plan_dict() -> dict:
+    return {
+        "verdict": "ingest",
+        "rationale": "The source disagrees with the existing page about the cutoff.",
+        "updates": [],
+        "new_pages": [],
+        "cross_refs": [],
+        "contradictions": [
+            {
+                "page": "wiki/concepts/attention-sinks.md",
+                "existing_claim": "Tokens are dropped after position 2048.",
+                "source_claim": "Tokens are dropped after position 1024.",
+                "resolution": "pending",
+                "claims": [{"source_section_id": "ai.md/Method", "quote": "we drop tokens after position 1024"}],
+            }
+        ],
+    }
+
+
+@pytest.mark.unit
+def test_ingest_materializes_contradictions_and_undo_reverses_them(wiki_with_one_source: Path) -> None:
+    from mdwiki.contradictions import CONTRADICTIONS_BLOCK_END, CONTRADICTIONS_BLOCK_START
+    from mdwiki.undo import undo_last
+
+    page = "wiki/concepts/attention-sinks.md"
+    _seed_page(wiki_with_one_source, page, "# Attention Sinks\n\nTokens are dropped after position 2048.\n")
+    with connect(wiki_with_one_source / ".mdwiki" / "state.db") as conn:
+        sid = conn.execute("SELECT id FROM sources LIMIT 1").fetchone()["id"]
+
+    plan = parse_plan_dict(_contradiction_plan_dict())
+    result = apply_ingest_plan(wiki_with_one_source, source_id=sid, original_path="ai.md", plan=plan, embedder=None)
+
+    assert result.applied is True
+    body = (wiki_with_one_source / page).read_text()
+    assert CONTRADICTIONS_BLOCK_START in body and CONTRADICTIONS_BLOCK_END in body
+    assert "Tokens are dropped after position 1024." in body
+    assert "Tokens are dropped after position 2048." in body
+    assert "[pending]" in body
+    assert body.index("# Attention Sinks") < body.index(CONTRADICTIONS_BLOCK_START)
+    with connect(wiki_with_one_source / ".mdwiki" / "state.db") as conn:
+        rows = conn.execute("SELECT page_path, source_id, resolution FROM contradictions").fetchall()
+        backrefs = conn.execute("SELECT COUNT(*) AS c FROM backrefs WHERE page_path = ? AND source_id = ?", (page, sid)).fetchone()["c"]
+    assert [(r["page_path"], r["source_id"], r["resolution"]) for r in rows] == [(page, sid, "pending")]
+    assert backrefs == 1
+
+    undo_last(wiki_with_one_source, n=1)
+    assert CONTRADICTIONS_BLOCK_START not in (wiki_with_one_source / page).read_text()
+    with connect(wiki_with_one_source / ".mdwiki" / "state.db") as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM contradictions").fetchone()["c"] == 0
+
+
+@pytest.mark.unit
+def test_second_ingest_keeps_earlier_contradictions_and_can_resolve_them(wiki_with_one_source: Path) -> None:
+    page = "wiki/concepts/attention-sinks.md"
+    _seed_page(wiki_with_one_source, page, "# Attention Sinks\n\nTokens are dropped after position 2048.\n")
+    with connect(wiki_with_one_source / ".mdwiki" / "state.db") as conn:
+        sid = conn.execute("SELECT id FROM sources LIMIT 1").fetchone()["id"]
+
+    apply_ingest_plan(wiki_with_one_source, source_id=sid, original_path="ai.md", plan=parse_plan_dict(_contradiction_plan_dict()), embedder=None)
+    second = _contradiction_plan_dict()
+    second["contradictions"][0]["resolution"] = "source-wins"
+    second["contradictions"].append(
+        {
+            "page": page,
+            "existing_claim": "Sinks were introduced in 2024.",
+            "source_claim": "This paper introduces attention sinks for long contexts.",
+            "claims": [{"source_section_id": "ai.md/Intro", "quote": "this paper introduces attention sinks for long contexts"}],
+        }
+    )
+    apply_ingest_plan(wiki_with_one_source, source_id=sid, original_path="ai.md", plan=parse_plan_dict(second), embedder=None)
+
+    body = (wiki_with_one_source / page).read_text()
+    assert body.count("<!-- mdwiki:contradictions -->") == 1
+    assert "[source-wins]" in body and "[pending]" in body
+    with connect(wiki_with_one_source / ".mdwiki" / "state.db") as conn:
+        rows = conn.execute("SELECT existing_claim, resolution FROM contradictions ORDER BY id").fetchall()
+    assert [(r["existing_claim"], r["resolution"]) for r in rows] == [
+        ("Tokens are dropped after position 2048.", "source-wins"),
+        ("Sinks were introduced in 2024.", "pending"),
+    ]
+
+
+@pytest.mark.unit
+def test_contradiction_on_missing_page_is_rejected_before_writes(wiki_with_one_source: Path) -> None:
+    with connect(wiki_with_one_source / ".mdwiki" / "state.db") as conn:
+        sid = conn.execute("SELECT id FROM sources LIMIT 1").fetchone()["id"]
+    with pytest.raises(IngestError) as excinfo:
+        apply_ingest_plan(wiki_with_one_source, source_id=sid, original_path="ai.md", plan=parse_plan_dict(_contradiction_plan_dict()), embedder=None)
+    assert "attention-sinks.md" in str(excinfo.value)
+    with connect(wiki_with_one_source / ".mdwiki" / "state.db") as conn:
+        assert conn.execute("SELECT status FROM sources WHERE id = ?", (sid,)).fetchone()["status"] == "pending"

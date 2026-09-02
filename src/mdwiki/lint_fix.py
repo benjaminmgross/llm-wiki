@@ -29,7 +29,7 @@ from typing import Literal
 
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.ingest import IngestResult, ingest_source
-from mdwiki.lint import LintFinding, lint_wiki
+from mdwiki.lint import LintFinding, lint_wiki, order_findings
 from mdwiki.state import connect
 from mdwiki.transaction import IngestTransaction
 
@@ -64,6 +64,7 @@ def lint_fix(
     yes: bool = False,
     confirm: Callable[[LintFinding], bool] | None = None,
     max_consecutive_failures: int | None = 5,
+    select: frozenset[int] | None = None,
 ) -> LintFixResult:
     """Walk lint findings and apply per-kind fixes interactively.
 
@@ -84,15 +85,26 @@ def lint_fix(
         ``--fix=full --yes`` from spending through a large backlog when every
         LLM-backed re-ingest is failing for the same systemic reason. ``None``
         disables the circuit breaker.
+    select : frozenset[int], optional
+        1-based finding numbers from the severity-ordered report
+        (``lint.order_findings``). Only those findings are attempted, and an
+        explicit selection may include provider-backed fixes regardless of
+        ``mode`` because the user named them.
     """
     chooser = confirm or _terminal_confirm
-    findings = lint_wiki(wiki_root).findings
+    findings = order_findings(lint_wiki(wiki_root).findings)
+    if select is not None:
+        mode = "full"
 
     fixed = 0
     skipped = 0
     failed = 0
     consecutive_failures = 0
     for index, finding in enumerate(findings):
+        if select is not None and (index + 1) not in select:
+            skipped += 1
+            consecutive_failures = 0
+            continue
         if not _is_applicable(finding, mode=mode):
             skipped += 1
             consecutive_failures = 0

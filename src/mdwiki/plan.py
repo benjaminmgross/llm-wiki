@@ -20,8 +20,12 @@ from mdwiki.semantic_pages import INFRASTRUCTURE_PAGE_PATHS, is_semantic_page_pa
 # unioned in by ``allowed_kinds_for_wiki()`` at plan-validation time. We keep
 # the baseline frozenset for callers that don't have a wiki context (e.g.
 # pure unit tests of ``parse_plan``) — those use the legacy validation.
-VALID_KINDS: frozenset[str] = frozenset({"entity", "concept", "synthesis"})
+VALID_KINDS: frozenset[str] = frozenset({"entity", "concept", "synthesis", "source"})
+# Kinds mdwiki generates itself; a plan may never propose a page of this kind.
+RESERVED_KINDS: frozenset[str] = frozenset({"source"})
 VALID_BARE_VERDICTS: frozenset[str] = frozenset({"ingest", "low-quality", "out-of-scope"})
+# Ordered so the tool schema's enum and error messages are stable.
+VALID_RESOLUTIONS: tuple[str, ...] = ("pending", "source-wins", "existing-wins", "both-hold")
 
 
 def allowed_kinds_for_wiki(wiki_root: Path) -> frozenset[str]:
@@ -113,6 +117,21 @@ class CrossRef:
 
 
 @dataclass(frozen=True)
+class Contradiction:
+    """A recorded disagreement between the source and an existing wiki page.
+
+    ``claims`` anchor the *source* side with verbatim quotes, exactly like page
+    claims. ``existing_claim`` is free text copied from the wiki page.
+    """
+
+    page: str
+    existing_claim: str
+    source_claim: str
+    resolution: str
+    claims: tuple[Claim, ...]
+
+
+@dataclass(frozen=True)
 class Plan:
     """The full LLM plan for one source ingest."""
 
@@ -121,17 +140,20 @@ class Plan:
     updates: tuple[Update, ...]
     new_pages: tuple[NewPage, ...]
     cross_refs: tuple[CrossRef, ...]
+    contradictions: tuple[Contradiction, ...] = ()
 
     def all_claims(self) -> Iterator[Claim]:
-        """Yield every ``Claim`` across both updates and new pages — the verification target."""
+        """Yield every ``Claim`` across updates, new pages, and contradictions — the verification target."""
         for update in self.updates:
             yield from update.claims
         for new_page in self.new_pages:
             yield from new_page.claims
+        for contradiction in self.contradictions:
+            yield from contradiction.claims
 
     def is_empty(self) -> bool:
-        """True when no edits, pages, or cross-refs were proposed."""
-        return not (self.updates or self.new_pages or self.cross_refs)
+        """True when no edits, pages, cross-refs, or contradictions were proposed."""
+        return not (self.updates or self.new_pages or self.cross_refs or self.contradictions)
 
 
 def parse_plan(raw_json: str, *, allowed_kinds: frozenset[str] | None = None) -> Plan:
@@ -203,9 +225,13 @@ def parse_plan_dict(payload: dict[str, Any], *, allowed_kinds: frozenset[str] | 
     updates = tuple(_parse_update(u) for u in _require(payload, "updates", list))
     new_pages = tuple(_parse_new_page(p, allowed_kinds=allowed_kinds) for p in _require(payload, "new_pages", list))
     cross_refs = tuple(_parse_cross_ref(r) for r in _require(payload, "cross_refs", list))
+    raw_contradictions = payload.get("contradictions", [])
+    if not isinstance(raw_contradictions, list):
+        raise PlanValidationError(f"Field 'contradictions' must be list, got {type(raw_contradictions).__name__}.")
+    contradictions = tuple(_parse_contradiction(c) for c in raw_contradictions)
 
-    if verdict != "ingest" and (updates or new_pages or cross_refs):
-        raise PlanValidationError(f"verdict {verdict!r} must be paired with empty updates/new_pages/cross_refs; got non-empty.")
+    if verdict != "ingest" and (updates or new_pages or cross_refs or contradictions):
+        raise PlanValidationError(f"verdict {verdict!r} must be paired with empty updates/new_pages/cross_refs/contradictions; got non-empty.")
 
     for update in updates:
         _validate_page_path(update.page, field="updates[].page")
@@ -226,9 +252,21 @@ def parse_plan_dict(payload: dict[str, Any], *, allowed_kinds: frozenset[str] | 
             raise PlanValidationError("cross_refs[].anchor_text must not be blank.")
         if any(ch < " " for ch in cross_ref.anchor_text) or any(ch in "[]" for ch in cross_ref.anchor_text):
             raise PlanValidationError("cross_refs[].anchor_text must be plain single-line Markdown link text.")
+    for contradiction in contradictions:
+        _validate_page_path(contradiction.page, field="contradictions[].page")
+        if not is_semantic_page_path(contradiction.page):
+            reason = "an infrastructure page" if contradiction.page in INFRASTRUCTURE_PAGE_PATHS else "not a supported .md semantic page"
+            raise PlanValidationError(f"contradictions[].page={contradiction.page!r} is {reason}, not a semantic page.")
     _validate_unique_write_targets(updates=updates, new_pages=new_pages)
 
-    return Plan(verdict=verdict, rationale=rationale, updates=updates, new_pages=new_pages, cross_refs=cross_refs)
+    return Plan(
+        verdict=verdict,
+        rationale=rationale,
+        updates=updates,
+        new_pages=new_pages,
+        cross_refs=cross_refs,
+        contradictions=contradictions,
+    )
 
 
 def _validate_unique_write_targets(*, updates: tuple[Update, ...], new_pages: tuple[NewPage, ...]) -> None:
@@ -310,8 +348,10 @@ def _parse_new_page(raw: Any, *, allowed_kinds: frozenset[str] = VALID_KINDS) ->
     if not isinstance(raw, dict):
         raise PlanValidationError(f"Expected new_page object, got {type(raw).__name__}.")
     kind = _require(raw, "kind", str)
+    if kind in RESERVED_KINDS:
+        raise PlanValidationError(f"Page kind {kind!r} is reserved: mdwiki generates wiki/sources/ pages itself; plans may not propose them.")
     if kind not in allowed_kinds:
-        raise PlanValidationError(f"Invalid page kind {kind!r}. Must be one of {sorted(allowed_kinds)}.")
+        raise PlanValidationError(f"Invalid page kind {kind!r}. Must be one of {sorted(allowed_kinds - RESERVED_KINDS)}.")
     return NewPage(
         path=_require(raw, "path", str),
         kind=kind,
@@ -327,6 +367,30 @@ def _parse_cross_ref(raw: Any) -> CrossRef:
         from_page=_require(raw, "from_page", str),
         to_page=_require(raw, "to_page", str),
         anchor_text=_require(raw, "anchor_text", str),
+    )
+
+
+def _parse_contradiction(raw: Any) -> Contradiction:
+    if not isinstance(raw, dict):
+        raise PlanValidationError(f"Expected contradiction object, got {type(raw).__name__}.")
+    existing_claim = _require(raw, "existing_claim", str)
+    source_claim = _require(raw, "source_claim", str)
+    if not existing_claim.strip():
+        raise PlanValidationError("contradictions[].existing_claim must not be blank.")
+    if not source_claim.strip():
+        raise PlanValidationError("contradictions[].source_claim must not be blank.")
+    resolution = raw.get("resolution", "pending")
+    if not isinstance(resolution, str) or resolution not in VALID_RESOLUTIONS:
+        raise PlanValidationError(f"contradictions[].resolution must be one of {list(VALID_RESOLUTIONS)}, got {resolution!r}.")
+    claims = tuple(_parse_claim(c) for c in _require(raw, "claims", list))
+    if not claims:
+        raise PlanValidationError("contradictions[].claims must contain at least one source-anchored claim.")
+    return Contradiction(
+        page=_require(raw, "page", str),
+        existing_claim=existing_claim.strip(),
+        source_claim=source_claim.strip(),
+        resolution=resolution,
+        claims=claims,
     )
 
 

@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from mdwiki.discover import WIKI_DIR_NAME
+from mdwiki.search import rebuild_search_index
 from mdwiki.state import connect
 from mdwiki.transaction import DELETION_MARKER_DIR
 
@@ -68,6 +69,9 @@ def undo_last(wiki_root: Path, n: int = 1) -> UndoResult:
             for row in rows:
                 _undo_one_transaction(conn=conn, wiki_root=wiki_root, tx_row=row)
                 undone_ids.append(row["id"])
+            # Page files were restored from snapshots above; the lexical index
+            # is a derived cache, so rebuild it from disk in the same commit.
+            rebuild_search_index(conn, wiki_root=wiki_root)
             conn.commit()
         except Exception:
             conn.rollback()

@@ -8,11 +8,10 @@ cheap "is this set up correctly?" question to several seconds.
 
 from __future__ import annotations
 
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from mdwiki.discover import WIKI_DIR_NAME
+from mdwiki.config import load_config
 from mdwiki.llm import build_provider_from_config
 
 DEFAULT_EMBEDDER_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
@@ -41,8 +40,7 @@ def run_doctor(wiki_root: Path) -> DoctorReport:
     """
     provider = build_provider_from_config(wiki_root)
     ping = provider.ping()
-    config_path = wiki_root / WIKI_DIR_NAME / "config.toml"
-    config = tomllib.loads(config_path.read_text())
+    config = load_config(wiki_root)
     embedder_model = config.get("embedder", {}).get("model", DEFAULT_EMBEDDER_MODEL)
     return DoctorReport(
         wiki_root=wiki_root,

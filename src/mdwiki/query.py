@@ -17,7 +17,7 @@ from pathlib import Path
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.embedder import Embedder, get_default_embedder
 from mdwiki.embeddings import deserialize, find_top_k, serialize
-from mdwiki.index import build_index
+from mdwiki.frontmatter import apply_page_metadata
 from mdwiki.llm import build_provider_from_config
 from mdwiki.llm.anthropic import OutputTruncatedError
 from mdwiki.llm.base import Message, Provider
@@ -28,6 +28,9 @@ from mdwiki.transaction import IngestTransaction
 QUERY_CANDIDATES_TOP_K: int = 8
 QUERY_MIN_SIMILARITY: float = 0.0
 QUERY_MAX_TOKENS_DEFAULT: int = 8000
+FILE_SUGGESTION_MIN_CITED_PAGES: int = 3
+NO_COVERAGE_PREFIX: str = "NO_COVERAGE:"
+_CONFIDENCE_RE = re.compile(r"^\s*\**Confidence\**\s*:\s*\**(high|medium|low)\**", re.IGNORECASE | re.MULTILINE)
 
 
 class QueryError(Exception):
@@ -42,6 +45,10 @@ class QueryResult:
     answer: str
     cited_pages: tuple[str, ...]
     filed_path: str | None
+    confidence: str | None = None
+    file_suggested: bool = False
+    stub_path: str | None = None
+    no_coverage: bool = False
 
 
 def query_wiki(
@@ -54,6 +61,7 @@ def query_wiki(
     provider: Provider | None = None,
     embedder: Embedder | None = None,
     max_tokens: int = QUERY_MAX_TOKENS_DEFAULT,
+    stub: bool = False,
 ) -> QueryResult:
     """Answer ``question`` from the wiki; optionally file the answer as a synthesis page.
 
@@ -75,6 +83,10 @@ def query_wiki(
         Pre-built embedder; defaults to a lazy module-level singleton.
     max_tokens : int, optional
         Cap on answer length (default 8000).
+    stub : bool, optional
+        When the model reports ``NO_COVERAGE:``, write a stub concept page
+        tagged ``stub, needs-sources`` so the gap is visible in the concept
+        table and lint.
 
     Raises
     ------
@@ -112,13 +124,29 @@ def query_wiki(
 
     answer = response.text.strip()
     cited_pages = _extract_cited_pages(answer)
+    confidence = _extract_confidence(answer)
+    no_coverage = answer.startswith(NO_COVERAGE_PREFIX)
 
+    if no_coverage:
+        stub_path = _file_stub(wiki_root=wiki_root, question=question, reason=answer, embedder=embedder) if stub else None
+        return QueryResult(
+            question=question,
+            answer=answer,
+            cited_pages=(),
+            filed_path=None,
+            confidence=confidence,
+            file_suggested=False,
+            stub_path=stub_path,
+            no_coverage=True,
+        )
+
+    file_suggested = not file and len(cited_pages) >= FILE_SUGGESTION_MIN_CITED_PAGES
     filed_path: str | None = None
     if file:
         if not yes:
             chooser = confirm or _terminal_confirm_file
             if not chooser(answer):
-                return QueryResult(question=question, answer=answer, cited_pages=cited_pages, filed_path=None)
+                return QueryResult(question=question, answer=answer, cited_pages=cited_pages, filed_path=None, confidence=confidence)
 
         filed_path = _file_as_synthesis(
             wiki_root=wiki_root,
@@ -128,7 +156,42 @@ def query_wiki(
             embedder=embedder,
         )
 
-    return QueryResult(question=question, answer=answer, cited_pages=cited_pages, filed_path=filed_path)
+    return QueryResult(
+        question=question,
+        answer=answer,
+        cited_pages=cited_pages,
+        filed_path=filed_path,
+        confidence=confidence,
+        file_suggested=file_suggested,
+    )
+
+
+def _extract_confidence(answer: str) -> str | None:
+    """Return ``high``/``medium``/``low`` from the answer's trailing ``Confidence:`` line, or ``None``."""
+    matches = _CONFIDENCE_RE.findall(answer)
+    return matches[-1].lower() if matches else None
+
+
+def _file_stub(*, wiki_root: Path, question: str, reason: str, embedder: Embedder) -> str:
+    """Write a ``stub, needs-sources`` concept page recording a question the wiki cannot answer."""
+    slug = slugify_question(question)
+    rel_path = f"wiki/concepts/{slug}.md"
+    target = wiki_root / rel_path
+    if target.exists():
+        return rel_path
+    detail = reason.removeprefix(NO_COVERAGE_PREFIX).strip() or "the wiki has no pages covering this question"
+    body = (
+        f"# {question.rstrip('?')}\n\n"
+        f"_Stub created by `mdwiki query --stub`: the wiki could not answer \"{question}\"._\n\n"
+        f"Gap: {detail}\n\n"
+        "Ingest a source that covers this and the next plan should update this page; lint keeps it visible until then.\n"
+    )
+    page = apply_page_metadata(body, path=rel_path, kind="concept", source_ids=())
+    page = page.replace("tags: [concept]", "tags: [stub, needs-sources]", 1)
+    with IngestTransaction(wiki_root=wiki_root, source_id=None, summary=f"query --stub: {question[:80]}", event_kind="query-stub") as tx:
+        tx.write_file(target, page)
+        tx.upsert_page(path=rel_path, kind="concept", embedding=serialize(embedder.embed_text(page)), last_touched_at=_now_ts())
+    return rel_path
 
 
 def slugify_question(question: str, *, max_chars: int = 60) -> str:
@@ -192,14 +255,13 @@ def _file_as_synthesis(
     rel_path = f"wiki/syntheses/{slug}.md"
     target = wiki_root / rel_path
 
-    body = _wrap_synthesis_body(question=question, answer=answer)
+    body = apply_page_metadata(_wrap_synthesis_body(question=question, answer=answer), path=rel_path, kind="synthesis", source_ids=())
     summary = f"query --file: {question[:80]}"
 
-    with IngestTransaction(wiki_root=wiki_root, source_id=None, summary=summary) as tx:
+    with IngestTransaction(wiki_root=wiki_root, source_id=None, summary=summary, event_kind="query-filed") as tx:
         tx.write_file(target, body)
         embedding_blob = serialize(embedder.embed_text(body))
         tx.upsert_page(path=rel_path, kind="synthesis", embedding=embedding_blob, last_touched_at=_now_ts())
-        tx.write_file(wiki_root / "wiki" / "index.md", build_index(wiki_root))
 
     return rel_path
 

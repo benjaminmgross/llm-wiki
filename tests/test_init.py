@@ -311,9 +311,84 @@ def test_register_sources_merges_existing_sidecar(tmp_path: Path) -> None:
         raw_dir=tmp_path / "raw",
         db_path=tmp_path / ".mdwiki" / "state.db",
         registry=registry,
+        exclude_globs=config.get("exclude", {}).get("globs", []),
+        skip_paths=config.get("pointers", {}).get("files", []),
     )
 
     # Assert — sidecar contains BOTH alpha and beta entries
     merged_sidecar = json.loads(sidecar_path.read_text())
     assert len(merged_sidecar) == 2
     assert set(merged_sidecar.keys()) >= set(first_sidecar.keys())
+
+
+# --- v1.4.0: runtime pointer files ---------------------------------------------
+
+
+@pytest.mark.unit
+def test_init_writes_pointer_files_by_default(fresh_target: Path) -> None:
+    init_wiki(fresh_target)
+    claude = fresh_target / "CLAUDE.md"
+    agents = fresh_target / "AGENTS.md"
+    assert claude.is_file() and agents.is_file()
+    assert not (fresh_target / ".github" / "copilot-instructions.md").exists()
+    for text in (claude.read_text(), agents.read_text()):
+        assert "mdwiki skill" in text
+        assert ".mdwiki/schema.md" in text
+        assert "raw/" in text
+        assert len(text.splitlines()) <= 12
+
+
+@pytest.mark.unit
+def test_init_pointers_selection_and_none(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_text("# a")
+    init_wiki(tmp_path, pointers=("copilot",))
+    assert (tmp_path / ".github" / "copilot-instructions.md").is_file()
+    assert not (tmp_path / "CLAUDE.md").exists()
+
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "b.md").write_text("# b")
+    with pytest.raises(NestedWikiError):
+        init_wiki(other, pointers=())
+
+    third = tmp_path.parent / (tmp_path.name + "-none")
+    third.mkdir()
+    (third / "c.md").write_text("# c")
+    init_wiki(third, pointers=())
+    assert not (third / "CLAUDE.md").exists() and not (third / "AGENTS.md").exists()
+
+
+@pytest.mark.unit
+def test_init_never_overwrites_existing_pointer_file(fresh_target: Path) -> None:
+    (fresh_target / "CLAUDE.md").write_text("# mine\n\nuser-owned instructions\n")
+    result = init_wiki(fresh_target)
+    assert (fresh_target / "CLAUDE.md").read_text() == "# mine\n\nuser-owned instructions\n"
+    assert (fresh_target / "AGENTS.md").is_file()
+    assert "CLAUDE.md" in result.pointer_files_skipped
+    assert "AGENTS.md" in result.pointer_files_written
+
+
+@pytest.mark.unit
+def test_pointer_files_are_not_registered_as_sources(fresh_target: Path) -> None:
+    from mdwiki.refresh import refresh_wiki
+
+    result = init_wiki(fresh_target)
+    assert result.files_registered == 3
+    with connect(fresh_target / ".mdwiki" / "state.db") as conn:
+        paths = {row["original_path"] for row in conn.execute("SELECT original_path FROM sources")}
+    assert "CLAUDE.md" not in paths and "AGENTS.md" not in paths
+
+    refreshed = refresh_wiki(fresh_target)
+    assert refreshed.files_registered == 0
+    config = tomllib.loads((fresh_target / ".mdwiki" / "config.toml").read_text())
+    assert config["pointers"]["files"] == ["CLAUDE.md", "AGENTS.md"]
+    assert config["exclude"]["globs"] == []
+
+
+@pytest.mark.unit
+def test_user_owned_pointer_file_stays_a_source(fresh_target: Path) -> None:
+    (fresh_target / "CLAUDE.md").write_text("# mine\n\nreal notes worth ingesting\n")
+    result = init_wiki(fresh_target)
+    assert result.files_registered == 4
+    config = tomllib.loads((fresh_target / ".mdwiki" / "config.toml").read_text())
+    assert "CLAUDE.md" not in config.get("pointers", {}).get("files", [])

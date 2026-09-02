@@ -111,6 +111,28 @@ _CROSS_REF_SCHEMA: dict[str, Any] = {
     },
 }
 
+_CONTRADICTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["page", "existing_claim", "source_claim", "claims"],
+    "properties": {
+        "page": {"type": "string", "description": "Existing wiki page (or one written in this plan) that holds the disputed claim."},
+        "existing_claim": {"type": "string", "description": "What the wiki page currently says, copied from the page."},
+        "source_claim": {"type": "string", "description": "What this source says instead, in one sentence."},
+        "resolution": {
+            "type": "string",
+            "enum": ["pending", "source-wins", "existing-wins", "both-hold"],
+            "description": "Leave ``pending`` unless the source itself settles it (a newer date, an explicit correction).",
+        },
+        "claims": {
+            "type": "array",
+            "items": _CLAIM_SCHEMA,
+            "minItems": 1,
+            "description": "Verbatim source quotes backing source_claim; verified exactly like page claims.",
+        },
+    },
+}
+
 INGEST_TOOL_DEFINITION: dict[str, Any] = {
     "name": INGEST_TOOL_NAME,
     "description": (
@@ -153,6 +175,14 @@ INGEST_TOOL_DEFINITION: dict[str, Any] = {
                 "type": "array",
                 "items": _CROSS_REF_SCHEMA,
                 "description": "New cross-references between wiki pages. Empty when verdict != ``ingest``.",
+            },
+            "contradictions": {
+                "type": "array",
+                "items": _CONTRADICTION_SCHEMA,
+                "description": (
+                    "Disagreements between this source and existing pages. Record one instead of silently overwriting "
+                    "or dropping the new claim. Optional; empty when verdict != ``ingest``."
+                ),
             },
         },
     },

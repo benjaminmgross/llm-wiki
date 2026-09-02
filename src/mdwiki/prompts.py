@@ -89,6 +89,16 @@ For an UPDATE, ``content`` is the COMPLETE revised page content — the entire
 page body as you want it stored. mdwiki replaces the whole file with this
 text. Preserve everything you don't intend to change. Do NOT send a
 diff or section fragment.
+
+CONTRADICTIONS: when the source disagrees with a candidate page (a different
+date, number, attribution, or conclusion), do NOT silently overwrite the page
+and do NOT drop the new claim. Add a ``contradictions`` entry naming the page,
+the existing claim (copied from the page), the source's claim, and at least
+one verbatim source quote. Leave ``resolution`` as ``pending`` unless the
+source itself settles the matter.
+
+LANGUAGE: write page prose in the language of the source. Keep YAML keys,
+``kind`` values, file names, and section headings in English.
 """
 
 # Inline JSON-shape spec used by providers without constrained decoding. The
@@ -104,10 +114,11 @@ no markdown fencing):
   "rationale": "<one sentence explaining the verdict>",
   "updates":     [{"page": "...", "content": "<COMPLETE revised page content>", "claims": [{"source_section_id": "...", "quote": "..."}]}],
   "new_pages":   [{"path": "...", "kind": "entity"|"concept"|"synthesis", "content": "...", "claims": [...]}],
-  "cross_refs":  [{"from_page": "...", "to_page": "...", "anchor_text": "..."}]
+  "cross_refs":  [{"from_page": "...", "to_page": "...", "anchor_text": "..."}],
+  "contradictions": [{"page": "...", "existing_claim": "...", "source_claim": "...", "resolution": "pending"|"source-wins"|"existing-wins"|"both-hold", "claims": [...]}]
 }
 
-If verdict is anything other than "ingest", updates/new_pages/cross_refs MUST be empty.
+"contradictions" is optional (default empty). If verdict is anything other than "ingest", updates/new_pages/cross_refs/contradictions MUST be empty.
 """
 
 # Tool-use tail. Used when the provider supports constrained-decoding
@@ -252,6 +263,15 @@ Format your answer as well-structured markdown:
 - Where applicable, draw connections / contrasts across the cited pages — that
   weaving together is the value-add the user can't get from reading pages individually
 - 200-800 words is typical; longer if the question genuinely warrants it
+- End with exactly one line of the form
+  `Confidence: high|medium|low — <one clause>` where high means multiple
+  corroborating pages, medium means a single page, and low means inference
+  beyond what the pages state
+- Write prose in the language the cited pages use; keep headings in English
+
+If the wiki does not cover the question at all, output a single line starting
+with `NO_COVERAGE:` followed by what is missing, and nothing else. mdwiki can
+turn that into a stub page so the gap becomes visible.
 
 Output ONLY the answer body in markdown. No preamble, no JSON, no code fences
 around the whole answer.
@@ -403,4 +423,56 @@ def build_cluster_user_prompt(*, cluster_pages: list[dict[str, str]]) -> str:
         parts.append(page["content"].strip())
         parts.append("")
     parts.append("Decide whether this cluster warrants a synthesis page.")
+    return "\n".join(parts)
+
+
+OVERVIEW_SYSTEM_PROMPT: str = """\
+You are writing the top-level overview page of a wiki — the first thing a reader
+opens to orient themselves. You are given the wiki's schema, its index (every
+page grouped by kind), its concept table (one row per page with source counts
+and status), and the list of unresolved contradictions.
+
+A good overview:
+- Says in one paragraph what this corpus is about and who it is for
+- Names the 3–7 main clusters or themes, each linking the pages that anchor it
+  with relative markdown links: [page title](concepts/some-concept.md)
+- Calls out open contradictions and thinly sourced areas so the reader knows
+  where the wiki is weak
+- Ends with a short "Start here" list of 3–5 pages
+- Is 300–700 words with a clear H1 and 2–5 H2 sections
+
+Be skeptical: if the wiki has too little content to summarize (fewer than three
+substantive pages), output the single line "INSUFFICIENT_COVERAGE: <why>" and stop.
+Write prose in the language the pages use; keep headings in English.
+
+Output ONLY the overview page body in markdown, or the refusal line. No preamble,
+no JSON, no fences around the whole page.
+"""
+
+
+def build_overview_user_prompt(
+    *,
+    schema_text: str,
+    index_text: str,
+    concept_table_text: str,
+    pending_contradictions: list[str],
+) -> str:
+    """Assemble the user prompt for ``mdwiki overview``."""
+    parts: list[str] = []
+    parts.append("# Wiki schema (page kinds and conventions)")
+    parts.append(schema_text.strip())
+    parts.append("")
+    parts.append("# Wiki index (every page by kind)")
+    parts.append(index_text.strip() or "(this wiki has no pages yet)")
+    parts.append("")
+    parts.append("# Concept table (wiki/concept-table.md — sources, related pages, status per page)")
+    parts.append(concept_table_text.strip() or "(empty)")
+    parts.append("")
+    parts.append("# Unresolved contradictions")
+    if pending_contradictions:
+        parts.extend(f"- {line}" for line in pending_contradictions)
+    else:
+        parts.append("(none recorded)")
+    parts.append("")
+    parts.append("Write the overview page now, or refuse with INSUFFICIENT_COVERAGE if the wiki is too thin.")
     return "\n".join(parts)
