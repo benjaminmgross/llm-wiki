@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from mdwiki.cross_refs import materialize_cross_refs
-from mdwiki.plan import CrossRef, Plan
+from mdwiki.plan import CrossRef, Plan, Update
 
 
 def _plan(*refs: CrossRef) -> Plan:
@@ -33,6 +33,87 @@ def test_materialization_deduplicates_and_orders_edges_idempotently(wiki: Path) 
     assert first == second
     assert first.count("(target.md)") == 1
     assert first.index("(other.md)") < first.index("(target.md)")
+
+
+def test_updated_page_preserves_existing_managed_edges(wiki: Path) -> None:
+    source = wiki / "wiki/concepts/source.md"
+    source.write_text(
+        "# Source\n\nOld body.\n\n"
+        "<!-- mdwiki:cross-refs -->\n"
+        "## Related\n\n"
+        "- [Existing target](target.md)\n"
+        "<!-- /mdwiki:cross-refs -->\n"
+    )
+    plan = Plan(
+        verdict="ingest",
+        rationale="test",
+        updates=(Update(page="wiki/concepts/source.md", content="# Source\n\nRevised body.\n", claims=()),),
+        new_pages=(),
+        cross_refs=(CrossRef("wiki/concepts/source.md", "wiki/concepts/other.md", "New target"),),
+    )
+
+    body = materialize_cross_refs(wiki_root=wiki, plan=plan)["wiki/concepts/source.md"]
+
+    assert "Revised body." in body
+    assert "Old body." not in body
+    assert "- [Existing target](target.md)" in body
+    assert "- [New target](other.md)" in body
+
+
+def test_updated_page_preserves_managed_edges_without_new_outbound_refs(wiki: Path) -> None:
+    source = wiki / "wiki/concepts/source.md"
+    source.write_text(
+        "# Source\n\nOld body.\n\n"
+        "<!-- mdwiki:cross-refs -->\n"
+        "## Related\n\n"
+        "- [Existing target](target.md)\n"
+        "<!-- /mdwiki:cross-refs -->\n"
+    )
+    plan = Plan(
+        verdict="ingest",
+        rationale="test",
+        updates=(Update(page="wiki/concepts/source.md", content="# Source\n\nRevised body.\n", claims=()),),
+        new_pages=(),
+        cross_refs=(),
+    )
+
+    first = materialize_cross_refs(wiki_root=wiki, plan=plan)["wiki/concepts/source.md"]
+    source.write_text(first)
+    second = materialize_cross_refs(wiki_root=wiki, plan=plan)["wiki/concepts/source.md"]
+
+    assert "Revised body." in first
+    assert "- [Existing target](target.md)" in first
+    assert second == first
+
+
+def test_update_does_not_resurrect_removed_ordinary_link_and_suppresses_managed_duplicate(wiki: Path) -> None:
+    source = wiki / "wiki/concepts/source.md"
+    source.write_text(
+        "# Source\n\nOld [ordinary link](other.md).\n\n"
+        "<!-- mdwiki:cross-refs -->\n"
+        "## Related\n\n"
+        "- [Managed target](target.md)\n"
+        "<!-- /mdwiki:cross-refs -->\n"
+    )
+    plan = Plan(
+        verdict="ingest",
+        rationale="test",
+        updates=(
+            Update(
+                page="wiki/concepts/source.md",
+                content="# Source\n\nRevised [ordinary target](target.md).\n",
+                claims=(),
+            ),
+        ),
+        new_pages=(),
+        cross_refs=(),
+    )
+
+    body = materialize_cross_refs(wiki_root=wiki, plan=plan)["wiki/concepts/source.md"]
+
+    assert "other.md" not in body
+    assert body.count("(target.md)") == 1
+    assert "mdwiki:cross-refs" not in body
 
 
 def test_ordinary_markdown_link_prevents_redundant_managed_link(wiki: Path) -> None:
