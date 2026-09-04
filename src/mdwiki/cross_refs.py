@@ -22,29 +22,44 @@ def materialize_cross_refs(*, wiki_root: Path, plan: Plan) -> dict[str, str]:
     """Return final page bodies after applying every planned cross-reference."""
     page_bodies = {new_page.path: new_page.content for new_page in plan.new_pages}
     page_bodies.update({update.page: update.content for update in plan.updates})
+    update_paths = {update.page for update in plan.updates}
     grouped: dict[str, list[CrossRef]] = defaultdict(list)
     for cross_ref in plan.cross_refs:
         _require_endpoint(wiki_root=wiki_root, page_bodies=page_bodies, path=cross_ref.from_page)
         _require_endpoint(wiki_root=wiki_root, page_bodies=page_bodies, path=cross_ref.to_page)
         grouped[cross_ref.from_page].append(cross_ref)
 
-    for from_page in sorted(grouped):
+    for from_page in sorted(set(grouped) | update_paths):
+        source_path = wiki_root / from_page
+        existing_body = (
+            source_path.read_text()
+            if source_path.is_file() and (from_page in update_paths or from_page not in page_bodies)
+            else None
+        )
         source_body = page_bodies.get(from_page)
         if source_body is None:
-            source_body = (wiki_root / from_page).read_text()
-        page_bodies[from_page] = _materialize_page(source_body, from_page=from_page, refs=grouped[from_page])
+            source_body = existing_body
+        if source_body is None:  # pragma: no cover - guarded by _require_endpoint
+            raise CrossRefMaterializationError(f"Cross-reference source {from_page} does not exist after planned page writes.")
+        page_bodies[from_page] = _materialize_page(
+            source_body,
+            from_page=from_page,
+            refs=grouped[from_page],
+            existing_content=existing_body,
+        )
     return page_bodies
 
 
-def _materialize_page(content: str, *, from_page: str, refs: list[CrossRef]) -> str:
+def _materialize_page(content: str, *, from_page: str, refs: list[CrossRef], existing_content: str | None = None) -> str:
     owned_ranges = _managed_block_ranges(content)
     ordinary_content = _without_managed_blocks(content, ranges=owned_ranges)
     ordinary_targets = _linked_pages(ordinary_content, from_page=from_page)
-    managed = {
-        target: anchor
-        for target, anchor in _managed_targets(content, from_page=from_page, ranges=owned_ranges).items()
-        if target not in ordinary_targets
-    }
+    managed: dict[str, str] = {}
+    if existing_content is not None:
+        existing_ranges = _managed_block_ranges(existing_content)
+        managed.update(_managed_targets(existing_content, from_page=from_page, ranges=existing_ranges))
+    managed.update(_managed_targets(content, from_page=from_page, ranges=owned_ranges))
+    managed = {target: anchor for target, anchor in managed.items() if target not in ordinary_targets}
     chosen: dict[str, str] = {}
     for ref in sorted(refs, key=lambda item: (item.to_page, item.anchor_text)):
         if ref.to_page in ordinary_targets:
