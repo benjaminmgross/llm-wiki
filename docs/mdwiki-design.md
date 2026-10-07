@@ -1,7 +1,7 @@
 ---
 title: mdwiki — Design (v1.2.0)
 created: 2025-04-29
-updated: 2026-08-05
+updated: 2026-10-07
 version: 1.2.0
 status: locked
 tags: [mdwiki, design, llm-wiki, karpathy-pattern, multi-filetype, batch-api, local-providers, profiles, version-chain]
@@ -31,6 +31,32 @@ The historical sections below describe the v1.0 contract and v1.1 Anthropic Batc
 - Each source is applied in its own `IngestTransaction`. Source-local failures are persisted as `failed` with a reason in both `state.db` and `raw/.sources.json`; `mdwiki status` enumerates them.
 - `ingest --pending` and both bootstrap paths select `pending` plus `failed`, so reruns target only unfinished sources.
 - Synchronous ingest makes up to three corrective attempts when a plan is malformed, calls an existing page new, cites an invalid section, or uses a non-verbatim quote. The final plan must still pass every local validation gate before any transaction begins.
+
+## Current implementation note — session provider and vision (2026-10-07)
+
+The unreleased `session` provider in `src/mdwiki/llm/session.py` adapts local
+Claude Code, Codex, and custom CLIs to the existing `Provider` interface. It
+starts one bounded subprocess per completion and retains ordinary embedding
+retrieval, plan validation, transactions, and synchronous bootstrap fallback.
+It is separate from `session-ingest`, whose native session workers prepare plans
+without invoking a provider or embedder.
+
+`--provider` and `--session-cli` override environment/config selection for one
+invocation; initialization persists explicit provider and session overrides in
+the new wiki. Built-in adapters verify subscription login and scrub API-related
+environment variables by default. These are safeguards, not billing guarantees;
+custom commands and explicit exemptions have their own trust boundary.
+Claude OCR requires restricted file tools confined to its temporary working
+directory. Codex disables shell and image-file reading tools and receives images
+as direct attachments. Timeout and cancellation terminate the child process
+group. See the [current configuration contract](../README.md#session-mode-no-api-key).
+
+Unlike the historical zero-call `init` cost model below, enabling image loading
+or PDF vision fallback makes registration call the configured provider. OCR can
+repeat before converted-content deduplication. A systemic session failure stops
+discovery after atomically publishing the metadata for completed registrations;
+the SQLite source cache remains reconstructible from the sidecar. Vision remains
+disabled by default.
 
 ## UX (the happy path)
 
@@ -322,6 +348,7 @@ src/mdwiki/llm/
   base.py        # Provider abstract base class
   anthropic.py   # v1.0.0
   openai_compatible.py  # v1.1+ (vLLM, llama.cpp, OpenRouter, Together, etc.)
+  session.py     # unreleased: local Claude Code / Codex / custom CLI adapter
   __init__.py    # factory: read [llm] config → return provider instance
 ```
 

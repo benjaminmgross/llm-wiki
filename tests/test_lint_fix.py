@@ -15,8 +15,9 @@ import pytest
 from pytest_mock import MockerFixture
 
 from mdwiki.init import init_wiki
-from mdwiki.lint import lint_wiki
+from mdwiki.lint import LintFinding, lint_wiki
 from mdwiki.lint_fix import LintFixResult, lint_fix
+from mdwiki.llm.session import SessionCliError, SessionErrorKind
 from mdwiki.state import connect
 
 
@@ -267,3 +268,40 @@ def test_lint_fix_returns_zero_when_no_findings(tmp_path: Path) -> None:
     result = lint_fix(tmp_path, mode="default", yes=True)
     assert result.fixed_count == 0
     assert result.skipped_count == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["timeout", "failed"])
+@pytest.mark.parametrize("bound,success_at,expected_calls,expected_failed", [(2, None, 2, 2), (2, 1, 4, 3), (None, None, 7, 7)])
+def test_session_failures_share_the_lint_circuit_breaker(
+    tmp_path: Path, mocker: MockerFixture, kind: SessionErrorKind,
+    bound: int | None, success_at: int | None, expected_calls: int, expected_failed: int
+) -> None:
+    findings = [LintFinding(kind="stale", page_path=f"wiki/concepts/{index}.md", message="stale", severity="warning") for index in range(7)]
+    mocker.patch("mdwiki.lint_fix.lint_wiki").return_value.findings = findings
+    outcomes: list[bool | Exception] = [SessionCliError("call failed", kind=kind) for _ in findings]
+    if success_at is not None:
+        outcomes[success_at] = True
+    dispatch = mocker.patch("mdwiki.lint_fix._dispatch", side_effect=outcomes)
+
+    result = lint_fix(tmp_path, mode="full", yes=True, max_consecutive_failures=bound)
+
+    assert dispatch.call_count == expected_calls
+    assert result.failed_count == expected_failed
+    assert result.fixed_count == int(success_at is not None)
+    assert result.skipped_count == len(findings) - expected_calls
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["not-installed", "not-logged-in", "config", "rate-limited"])
+def test_systemic_session_failure_stops_lint_immediately(tmp_path: Path, mocker: MockerFixture, kind: SessionErrorKind) -> None:
+    findings = [LintFinding(kind="stale", page_path="wiki/concepts/a.md", message="stale", severity="warning")] * 3
+    mocker.patch("mdwiki.lint_fix.lint_wiki").return_value.findings = findings
+    error = SessionCliError("systemic failure", kind=kind)
+    dispatch = mocker.patch("mdwiki.lint_fix._dispatch", side_effect=error)
+
+    with pytest.raises(SessionCliError) as excinfo:
+        lint_fix(tmp_path, mode="full", yes=True)
+
+    assert excinfo.value is error
+    dispatch.assert_called_once()
