@@ -30,6 +30,7 @@ from typing import Literal
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.ingest import IngestResult, ingest_source
 from mdwiki.lint import LintFinding, lint_wiki
+from mdwiki.llm.session import SessionCliError
 from mdwiki.state import connect
 from mdwiki.transaction import IngestTransaction
 
@@ -104,6 +105,10 @@ def lint_fix(
         try:
             handled = _dispatch(finding, wiki_root=wiki_root, mode=mode)
         except Exception as exc:  # noqa: BLE001 — one bad fix shouldn't abort the rest
+            # Logged out, not installed, misconfigured or rate-limited: every
+            # remaining re-ingest would fail the same way, so stop with one error.
+            if isinstance(exc, SessionCliError) and exc.kind not in ("timeout", "failed"):
+                raise
             print(
                 f"  ! lint-fix failed for {finding.kind} on {finding.page_path}: {exc}",
                 file=sys.stderr,

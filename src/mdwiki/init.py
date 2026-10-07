@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import sys
+import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +22,10 @@ import pathspec
 import tomli_w
 
 from mdwiki.discover import WIKI_DIR_NAME, WikiNotFound, find_wiki
+from mdwiki.llm import build_provider_from_config, provider_override_for_new_wiki
+from mdwiki.llm.anthropic import MissingAPIKeyError
+from mdwiki.llm.base import Provider
+from mdwiki.llm.session import SessionCliError
 from mdwiki.loaders import UnsupportedFiletypeError, build_registry
 from mdwiki.loaders.base import Loader
 from mdwiki.state import connect, init_db
@@ -244,6 +252,11 @@ def init_wiki(target: Path, *, profile: str = "working-dir") -> InitResult:
     # alongside the defaults. Working-dir's overlay is empty, so the merged dict
     # equals DEFAULT_CONFIG byte-for-byte after toml round-trip.
     merged_config = deep_merge(base=DEFAULT_CONFIG, overlay=loaded_profile.config_overlay)
+    # A wiki created under ``--provider`` / ``MDWIKI_PROVIDER`` keeps that provider,
+    # so its next command does not silently fall back to the default paid API.
+    provider_overlay = provider_override_for_new_wiki()
+    if provider_overlay:
+        merged_config = deep_merge(base=merged_config, overlay={"llm": provider_overlay})
 
     init_db(wiki_dir / "state.db")
     (wiki_dir / "config.toml").write_bytes(tomli_w.dumps(merged_config).encode("utf-8"))
@@ -252,9 +265,9 @@ def init_wiki(target: Path, *, profile: str = "working-dir") -> InitResult:
 
     # Build the loader registry ONCE from the merged config. Reusing this
     # avoids the O(N) TOML re-parse cost (one parse + ancestor walk per file)
-    # the previous per-file ``get_loader_for`` path incurred. Image loading is
-    # off by default so no provider is needed here; init never invokes vision.
-    registry = build_registry(config=merged_config, provider=None)
+    # the previous per-file ``get_loader_for`` path incurred. Vision loaders are
+    # off by default, in which case no provider is built.
+    registry = build_registry(config=merged_config, provider=vision_provider_for(target, merged_config))
 
     registered, skipped, dedup_skipped, empty_load_skipped = _register_sources(
         target=target,
@@ -282,6 +295,34 @@ def init_wiki(target: Path, *, profile: str = "working-dir") -> InitResult:
         wiki_root=target,
         message=(f"Initialized wiki at {target}/{WIKI_DIR_NAME}/. Registered {registered} source(s) as pending" + suffix),
     )
+
+
+def vision_provider_for(wiki_root: Path, config: Mapping[str, Any]) -> Provider | None:
+    """Return the configured provider when a vision loader is enabled, else ``None``.
+
+    Registration must not require credentials or an agent CLI unless the wiki
+    opted into vision, so the provider is built only when
+    ``[loaders.pdf].vision_fallback`` or ``[loaders.image].enabled`` is true. If
+    credentials are missing or the provider config is invalid, a warning is
+    printed and files register without vision.
+
+    Parameters
+    ----------
+    wiki_root : Path
+        Directory containing ``.mdwiki/``.
+    config : Mapping[str, Any]
+        Parsed ``config.toml``.
+    """
+    loaders_cfg = config.get("loaders", {})
+    pdf_vision = bool(loaders_cfg.get("pdf", {}).get("vision_fallback", False))
+    image_enabled = bool(loaders_cfg.get("image", {}).get("enabled", False))
+    if not (pdf_vision or image_enabled):
+        return None
+    try:
+        return build_provider_from_config(wiki_root)
+    except (MissingAPIKeyError, ValueError) as exc:  # missing credentials or invalid provider config
+        print(f"warning: vision loaders are enabled but the provider could not be built ({exc}); continuing without vision.", file=sys.stderr)
+        return None
 
 
 def _refuse_if_nested(target: Path) -> None:
@@ -326,8 +367,8 @@ def _register_sources(
     ``raw/<hash>-<slug>.md`` is left untouched, and a counter is bumped. Files
     whose loader returns an empty string (scanned PDFs, empty CSVs, etc.) are
     counted in ``empty_load_skipped`` — no raw write, no DB row. Any other
-    per-row failure is logged to stderr and skipped, so one bad file can't
-    abort the whole walk.
+    per-row failure is logged to stderr and skipped. Systemic session-provider
+    failures stop the walk after persisting completed registrations.
     """
     import sys
 
@@ -358,6 +399,7 @@ def _register_sources(
     else:
         sidecar = {}
 
+    systemic_error: SessionCliError | None = None
     with connect(db_path) as conn:
         for source_path in source_paths:
             try:
@@ -417,15 +459,40 @@ def _register_sources(
                     "loader": loader.name,
                 }
                 registered += 1
+            except SessionCliError as exc:
+                # A logged-out, missing or rate-limited agent CLI fails every
+                # vision file alike; stop rather than skip them one by one.
+                if exc.kind not in ("timeout", "failed"):
+                    systemic_error = exc
+                    break
+                print(f"warning: failed to register {source_path}: {exc}", file=sys.stderr)
+                continue
             except Exception as exc:  # noqa: BLE001 — bulk-walk resilience
                 print(f"warning: failed to register {source_path}: {exc}", file=sys.stderr)
                 continue
+        # Publish the durable source of truth before committing its DB cache,
+        # including completed registrations preceding a systemic vision failure.
+        # A sidecar write failure rolls back the new DB rows, allowing a retry.
+        if sidecar:
+            _write_registration_sidecar(sidecar_path, sidecar)
         conn.commit()
 
-    if sidecar:
-        (raw_dir / SOURCES_SIDECAR_NAME).write_text(json.dumps(sidecar, indent=2, sort_keys=True))
+    if systemic_error is not None:
+        raise systemic_error
 
     return registered, skipped, dedup_skipped, empty_load_skipped
+
+
+def _write_registration_sidecar(path: Path, sidecar: dict[str, dict[str, str | float]]) -> None:
+    """Publish complete metadata with the repository's temp-and-replace contract."""
+    handle = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=f"{path.name}.tmp-", delete=False)
+    temporary_path = Path(handle.name)
+    try:
+        with handle:
+            json.dump(sidecar, handle, indent=2, sort_keys=True)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 # Folders we never recurse into when discovering source markdown.

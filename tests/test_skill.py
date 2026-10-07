@@ -103,3 +103,20 @@ def test_skill_outside_wiki_fails(tmp_path: Path, monkeypatch, capsys) -> None:
 
     assert rc == 1
     assert "wiki" in err.lower()
+
+
+@pytest.mark.unit
+def test_skill_guide_tells_agents_how_to_run_without_a_paid_api(tmp_path: Path, monkeypatch, capsys) -> None:
+    """An agent opening a wiki must learn that session mode exists before it spends API money."""
+    (tmp_path / "a.md").write_text("# A")
+    monkeypatch.chdir(tmp_path)
+    main(["init"])
+    capsys.readouterr()
+
+    exit_code = main(["skill"])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "--provider session" in out
+    assert "--session-cli codex" in out
+    assert "MDWIKI_PROVIDER" in out

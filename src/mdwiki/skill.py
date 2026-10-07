@@ -36,6 +36,30 @@ governs what page kinds exist, when to update vs. create, and how to cite.
 - ``mdwiki source <hash-prefix>`` — inspect a registered source
 - ``mdwiki history <page>`` (when available) — walk the page's previous_hash chain
 
+## Running through an agent CLI (session mode)
+
+Commands that call a model (``ingest``, ``init/refresh --bootstrap``,
+``query``, ``synthesize``, ``lint --fix=full``, ``doctor``) use the wiki's
+configured provider. Session mode runs these commands through a local agent
+CLI, with subscription login verification for built-in CLIs by default.
+
+- Check which provider this wiki uses: ``mdwiki doctor``
+- One invocation: ``mdwiki --provider session ingest --pending``
+- Through Codex instead of Claude Code: ``mdwiki --provider session --session-cli codex query "..."``
+- Whole shell or scheduled job: ``export MDWIKI_PROVIDER=session``
+- Permanently for this wiki: set ``provider = "session"`` under ``[llm]`` in ``.mdwiki/config.toml``
+
+Session mode removes known API credential and gateway environment variables
+from the child process and never falls back to another provider. By default,
+built-in CLIs must report an accepted subscription login. A ``custom`` command's
+login is never checked; ``verify_subscription = false`` disables verification,
+and ``keep_env`` can retain credentials or gateway settings. These safeguards
+cannot verify billing outcomes. If the CLI reports a usage limit, a bulk run
+stops and the remaining sources stay pending. ``mdwiki status``,
+``mdwiki lint`` (without ``--fix=full``), ``mdwiki source`` and ``mdwiki undo``
+never call a model. ``mdwiki init`` and ``mdwiki refresh`` call one only when a
+vision loader is enabled in ``.mdwiki/config.toml``.
+
 ## Working with this wiki
 
 1. **Read the schema above first.** It tells you what page kinds exist,

@@ -17,7 +17,7 @@ import tomllib
 from pathlib import Path
 
 from mdwiki.discover import WIKI_DIR_NAME, find_wiki
-from mdwiki.init import InitResult, _register_sources
+from mdwiki.init import InitResult, _register_sources, vision_provider_for
 from mdwiki.loaders import build_registry
 
 
@@ -52,7 +52,7 @@ def refresh_wiki(target: Path) -> InitResult:
     raw_dir = wiki_root / "raw"
 
     config = tomllib.loads((wiki_dir / "config.toml").read_text())
-    registry = build_registry(config=config, provider=None)
+    registry = build_registry(config=config, provider=vision_provider_for(wiki_root, config))
 
     registered, skipped, dedup_skipped, empty_load_skipped = _register_sources(
         target=wiki_root,

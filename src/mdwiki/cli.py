@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
 
@@ -24,8 +26,9 @@ from mdwiki.ingest import IngestError, ingest_many, ingest_source
 from mdwiki.init import NestedWikiError, SidecarCorruptError, init_wiki
 from mdwiki.lint import lint_wiki
 from mdwiki.lint_fix import lint_fix
-from mdwiki.llm import UnknownProviderError
+from mdwiki.llm import KNOWN_PROVIDERS, PROVIDER_ENV_VAR, SESSION_CLI_ENV_VAR, UnknownProviderError
 from mdwiki.llm.anthropic import BatchTimeoutError, BatchUnexpectedStatusError, MissingAPIKeyError
+from mdwiki.llm.session import KNOWN_SESSION_CLIS, SessionCliError
 from mdwiki.page_index import rebuild_page_index
 from mdwiki.profiles import UnknownProfileError, list_profile_names
 from mdwiki.query import QueryError, query_wiki
@@ -47,8 +50,8 @@ from mdwiki.undo import UndoError, undo_last
 
 # Fatal API errors signal a config problem (bad key, wrong model id, unreachable
 # endpoint) — they're identical for every source so the CLI surfaces ONE friendly
-# message rather than a per-source stack trace. Both Anthropic and OpenAI-compatible
-# errors are caught everywhere a provider call can be made.
+# message rather than a per-source stack trace. Anthropic, OpenAI-compatible and
+# session (agent CLI) errors are caught everywhere a provider call can be made.
 _FATAL_ANTHROPIC_ERRORS: tuple[type[Exception], ...] = (
     anthropic.AuthenticationError,
     anthropic.NotFoundError,
@@ -61,7 +64,8 @@ _FATAL_OPENAI_ERRORS: tuple[type[Exception], ...] = (
     openai.RateLimitError,
     openai.APIStatusError,
 )
-_FATAL_API_ERRORS: tuple[type[Exception], ...] = _FATAL_ANTHROPIC_ERRORS + _FATAL_OPENAI_ERRORS
+_FATAL_SESSION_ERRORS: tuple[type[Exception], ...] = (SessionCliError,)
+_FATAL_API_ERRORS: tuple[type[Exception], ...] = _FATAL_ANTHROPIC_ERRORS + _FATAL_OPENAI_ERRORS + _FATAL_SESSION_ERRORS
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -89,7 +93,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     if handler is None:
         parser.print_help(sys.stderr)
         return 2
-    return handler(args)
+    if args.session_cli and args.provider not in (None, "session"):
+        print(
+            f"error: --session-cli selects an agent CLI, which only the session provider uses; "
+            f"it cannot be combined with --provider {args.provider}.",
+            file=sys.stderr,
+        )
+        return 2
+    # ``--session-cli`` on its own means "run this through an agent CLI".
+    provider_flag = args.provider or ("session" if args.session_cli else None)
+    overrides = {PROVIDER_ENV_VAR: provider_flag, SESSION_CLI_ENV_VAR: args.session_cli}
+    with _provider_overrides(overrides):
+        try:
+            exit_code: int = handler(args)
+        except SessionCliError as exc:
+            # Safety net for handlers with no API-error guard of their own
+            # (e.g. ``lint --fix=full``, which re-ingests through the provider).
+            print(_fatal_api_error_message(exc), file=sys.stderr)
+            return 1
+    return exit_code
+
+
+@contextmanager
+def _provider_overrides(overrides: dict[str, str | None]) -> Iterator[None]:
+    """Export ``--provider`` / ``--session-cli`` for one invocation, then restore the environment."""
+    previous = {name: os.environ.get(name) for name, value in overrides.items() if value}
+    for name in previous:
+        os.environ[name] = str(overrides[name])
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -98,6 +136,24 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Folder-local CLI that turns a directory of markdown into an LLM-maintained wiki.",
     )
     parser.add_argument("--version", action="version", version=f"mdwiki {__version__}")
+    parser.add_argument(
+        "--provider",
+        choices=sorted(KNOWN_PROVIDERS),
+        default=None,
+        help=(
+            "Override [llm].provider for this invocation. `session` runs through a local agent CLI "
+            f"with subscription verification for built-in CLIs by default. Same as {PROVIDER_ENV_VAR}."
+        ),
+    )
+    parser.add_argument(
+        "--session-cli",
+        choices=list(KNOWN_SESSION_CLIS),
+        default=None,
+        help=(
+            "Run through this agent CLI; implies --provider session. "
+            f"{SESSION_CLI_ENV_VAR} selects a CLI only when the provider is already session."
+        ),
+    )
 
     subparsers = parser.add_subparsers(dest="command", title="commands", metavar="<command>")
 
@@ -768,7 +824,7 @@ def _fatal_api_error_message(exc: Exception) -> str:
     config problem: bad API key, typo'd model id, unreachable endpoint, etc.
     They're identical for every source, so ``ingest_many`` propagates them and
     the CLI prints one clear "fix your config" message rather than dumping a
-    stack trace per source. Both Anthropic and OpenAI-compatible errors are
+    stack trace per source. Anthropic, OpenAI-compatible and session errors are
     handled here so the message is symmetric across providers.
     """
     # NOTE: openai.AuthenticationError, NotFoundError, RateLimitError all
@@ -777,6 +833,16 @@ def _fatal_api_error_message(exc: Exception) -> str:
     # re-route through the generic branch and lose their tailored remediation
     # text. Same applies to anthropic's hierarchy; specific-before-generic
     # is the contract this function relies on.
+    if isinstance(exc, SessionCliError):
+        remediation = {
+            "not-installed": "Session mode needs the agent CLI installed and on PATH.",
+            "not-logged-in": "Check the agent CLI login; built-in CLIs require a verified subscription login by default.",
+            "config": "Check the [llm.session] block in .mdwiki/config.toml.",
+            "rate-limited": "The agent CLI reported a usage or rate limit; re-run after it resets.",
+            "timeout": "The session provider gave up waiting; raise [llm.session].timeout or retry.",
+            "failed": "The session provider's agent CLI reported a failure; retry, or run `mdwiki doctor`.",
+        }[exc.kind]
+        return f"error: {exc} {remediation}"
     if isinstance(exc, anthropic.AuthenticationError):
         return (
             f"error: Anthropic API rejected the credentials ({exc}). "

@@ -838,3 +838,204 @@ def test_refresh_bootstrap_batch_openai_compatible_fallback_keeps_initiative_wik
     source_meta = next(iter(sidecar.values()))
     assert source_meta["status"] == "ingested"
     assert source_meta["failure_reason"] is None
+
+
+@pytest.mark.unit
+def test_provider_flags_apply_to_one_invocation_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
+) -> None:
+    """``--provider`` / ``--session-cli`` must not leak into later calls in the same process."""
+    import os
+
+    from mdwiki.doctor import DoctorReport
+
+    monkeypatch.delenv("MDWIKI_PROVIDER", raising=False)
+    monkeypatch.delenv("MDWIKI_SESSION_CLI", raising=False)
+    (tmp_path / "a.md").write_text("# A")
+    monkeypatch.chdir(tmp_path)
+    main(["init"])
+    seen: dict[str, str | None] = {}
+
+    def fake_run_doctor(wiki_root: Path) -> DoctorReport:
+        seen["provider"] = os.environ.get("MDWIKI_PROVIDER")
+        seen["cli"] = os.environ.get("MDWIKI_SESSION_CLI")
+        return DoctorReport(
+            wiki_root=wiki_root,
+            provider="session",
+            model="codex default",
+            api_ok=True,
+            latency_ms=1.0,
+            api_message="pong",
+            embedder_model="m",
+        )
+
+    mocker.patch("mdwiki.cli.run_doctor", side_effect=fake_run_doctor)
+
+    exit_code = main(["--provider", "session", "--session-cli", "codex", "doctor"])
+
+    assert exit_code == 0
+    assert seen == {"provider": "session", "cli": "codex"}
+    assert "MDWIKI_PROVIDER" not in os.environ
+    assert "MDWIKI_SESSION_CLI" not in os.environ
+
+
+@pytest.mark.unit
+def test_provider_flag_restores_a_preexisting_environment_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
+) -> None:
+    import os
+
+    monkeypatch.setenv("MDWIKI_PROVIDER", "anthropic")
+    (tmp_path / "a.md").write_text("# A")
+    monkeypatch.chdir(tmp_path)
+    main(["init"])
+    mocker.patch("mdwiki.cli.run_doctor", side_effect=RuntimeError("stop"))
+
+    with pytest.raises(RuntimeError, match="stop"):
+        main(["--provider", "session", "doctor"])
+
+    assert os.environ["MDWIKI_PROVIDER"] == "anthropic"
+
+
+@pytest.mark.unit
+def test_unknown_provider_flag_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = main(["--provider", "nonsense", "status"])
+
+    assert exit_code == 2
+    assert "nonsense" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        ("not-installed", "not installed"),
+        ("not-logged-in", "subscription"),
+        ("config", "[llm.session]"),
+        ("failed", "session"),
+    ],
+)
+def test_session_failure_prints_one_error_line_and_exits_nonzero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+    expected: str,
+) -> None:
+    """Session failures must read like the API providers' fatal errors, not a traceback."""
+    from mdwiki.llm.session import SessionCliError
+
+    (tmp_path / "a.md").write_text("# A")
+    monkeypatch.chdir(tmp_path)
+    main(["init"])
+    capsys.readouterr()
+    mocker.patch("mdwiki.cli.query_wiki", side_effect=SessionCliError("claude CLI is not installed; boom", kind=kind))  # type: ignore[arg-type]
+
+    exit_code = main(["query", "what is A?"])
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert err.startswith("error:")
+    assert "boom" in err
+    assert expected in err
+    assert "Traceback" not in err
+
+
+@pytest.mark.unit
+def test_lint_fix_full_stops_on_a_systemic_session_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``lint --fix=full`` re-ingests through the provider; a logged-out CLI must stop it with one error."""
+    from mdwiki.lint import LintFinding, LintReport
+    from mdwiki.llm.session import SessionCliError
+
+    (tmp_path / "a.md").write_text("# A")
+    (tmp_path / "b.md").write_text("# B")
+    monkeypatch.chdir(tmp_path)
+    main(["init"])
+    capsys.readouterr()
+    findings = [
+        LintFinding(kind="coverage-gap", page_path=name, message=f"{name}: source ingested but produced 0 backrefs", severity="warning")
+        for name in ("a.md", "b.md")
+    ]
+    mocker.patch(
+        "mdwiki.lint_fix.lint_wiki",
+        return_value=LintReport(findings=tuple(findings), findings_by_kind={"coverage-gap": 2}),
+    )
+    ingest = mocker.patch(
+        "mdwiki.lint_fix.ingest_source",
+        side_effect=SessionCliError("claude CLI is not signed in with a subscription login", kind="not-logged-in"),
+    )
+
+    exit_code = main(["lint", "--fix=full", "--yes"])
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert ingest.call_count == 1
+    assert "error: claude CLI is not signed in" in err
+
+
+@pytest.mark.unit
+def test_session_cli_flag_implies_the_session_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
+) -> None:
+    import os
+
+    monkeypatch.delenv("MDWIKI_PROVIDER", raising=False)
+    monkeypatch.delenv("MDWIKI_SESSION_CLI", raising=False)
+    (tmp_path / "a.md").write_text("# A")
+    monkeypatch.chdir(tmp_path)
+    main(["init"])
+    seen: dict[str, str | None] = {}
+
+    def fake_status(wiki_root: Path) -> object:
+        seen["provider"] = os.environ.get("MDWIKI_PROVIDER")
+        seen["cli"] = os.environ.get("MDWIKI_SESSION_CLI")
+        raise RuntimeError("stop")
+
+    mocker.patch("mdwiki.cli.get_status", side_effect=fake_status)
+
+    with pytest.raises(RuntimeError, match="stop"):
+        main(["--session-cli", "codex", "status"])
+
+    assert seen == {"provider": "session", "cli": "codex"}
+    assert "MDWIKI_PROVIDER" not in os.environ
+
+
+@pytest.mark.unit
+def test_session_cli_flag_with_an_api_provider_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = main(["--provider", "anthropic", "--session-cli", "codex", "status"])
+
+    assert exit_code == 2
+    assert "--session-cli" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_provider_flag_leaves_an_exported_session_cli_untouched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
+) -> None:
+    import os
+
+    monkeypatch.setenv("MDWIKI_SESSION_CLI", "codex")
+    (tmp_path / "a.md").write_text("# A")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MDWIKI_PROVIDER", "session")
+    main(["init"])
+    mocker.patch("mdwiki.cli.get_status", side_effect=RuntimeError("stop"))
+
+    with pytest.raises(RuntimeError, match="stop"):
+        main(["--provider", "session", "status"])
+
+    assert os.environ["MDWIKI_SESSION_CLI"] == "codex"
