@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import sqlite3
 import time
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from mdwiki.chunker import MarkdownChunker
 from mdwiki.cross_refs import CrossRefMaterializationError, materialize_cross_refs
@@ -35,10 +36,15 @@ from mdwiki.transaction import IngestTransaction
 CANDIDATES_PER_SECTION: int = 3
 MAX_CANDIDATES_TOTAL: int = 8
 MIN_CANDIDATE_SIMILARITY: float = 0.25
+DEFAULT_INGEST_MAX_TOKENS: int = 16000
 
 
 class IngestError(Exception):
     """Raised when ingest cannot proceed (unknown source, bad quotes, parse failure)."""
+
+
+class IngestConfigError(ValueError):
+    """Raised when ingest configuration is invalid before any provider request."""
 
 
 @dataclass(frozen=True)
@@ -51,6 +57,49 @@ class IngestResult:
     plan: Plan | None = None
 
 
+def resolve_ingest_max_tokens(*, wiki_root: Path, override: int | None = None) -> int:
+    """Resolve a positive output limit: explicit override, wiki config, then 16,000.
+
+    Parameters
+    ----------
+    wiki_root : Path
+        Folder containing ``.mdwiki/config.toml``. A missing file or key leaves
+        the historical output limit unchanged.
+    override : int, optional
+        Explicit positive cap for this invocation, taking precedence over config.
+
+    Returns
+    -------
+    int
+        Positive maximum output tokens per ingest request, including retries.
+
+    Raises
+    ------
+    IngestConfigError
+        If the selected limit is invalid or the required config cannot be parsed.
+        Callers resolve this before provider construction or request submission.
+    """
+    value: object = override
+    if override is None:
+        config_path = wiki_root / WIKI_DIR_NAME / "config.toml"
+        try:
+            with config_path.open("rb") as stream:
+                config: dict[str, object] = tomllib.load(stream)
+        except FileNotFoundError:
+            config = {}
+        except (OSError, ValueError) as exc:
+            raise IngestConfigError("[mdwiki] Cannot read .mdwiki/config.toml as TOML.") from exc
+        section: object = config.get("ingest", {})
+        if not isinstance(section, dict):
+            raise IngestConfigError("[mdwiki] .mdwiki/config.toml [ingest] must be a table.")
+        value = cast(dict[str, object], section).get("max_tokens", DEFAULT_INGEST_MAX_TOKENS)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise IngestConfigError(
+            "[mdwiki] Ingest max_tokens must be a positive integer (--max-tokens or [ingest] max_tokens in .mdwiki/config.toml)."
+        )
+    return value
+
+
 def ingest_source(
     wiki_root: Path,
     source_id_or_path: str,
@@ -58,7 +107,7 @@ def ingest_source(
     yes: bool = False,
     provider: Provider | None = None,
     confirm: Callable[[Plan], bool] | None = None,
-    max_tokens: int = 16000,
+    max_tokens: int | None = None,
     embedder: Embedder | None = None,
     force: bool = False,
     plan_retries: int = 3,
@@ -79,7 +128,8 @@ def ingest_source(
         Function that takes the parsed ``Plan`` and returns True to apply, False to abort.
         Used by tests; ignored if ``yes`` is True. Defaults to a terminal y/N prompt.
     max_tokens : int, optional
-        Cap on LLM output tokens (default 4096).
+        Cap on LLM output tokens. Overrides ``[ingest] max_tokens`` in
+        ``.mdwiki/config.toml``; defaults to 16,000 when neither is set.
     force : bool, optional
         Re-run ingest even if the source is already marked ``ingested``. Used
         by ``ingest_many(scope="all")`` to give ``--all`` true re-process
@@ -92,7 +142,10 @@ def ingest_source(
     ------
     IngestError
         If the source is unknown, the LLM response is unparseable, or quote verification fails.
+    IngestConfigError
+        If the configured or explicit output limit is not a positive integer.
     """
+    max_tokens = resolve_ingest_max_tokens(wiki_root=wiki_root, override=max_tokens)
     source_row = _resolve_source(wiki_root, source_id_or_path)
     if source_row["status"] == "ingested" and not force:
         return IngestResult(
@@ -274,6 +327,7 @@ def ingest_many(
     yes: bool = True,
     provider: Provider | None = None,
     embedder: Embedder | None = None,
+    max_tokens: int | None = None,
     on_progress: Callable[[int, int, str], None] | None = None,
     on_failure: Callable[[str, Exception], None] | None = None,
 ) -> list[IngestResult]:
@@ -297,11 +351,15 @@ def ingest_many(
         per-source short-circuit on ``status == "ingested"`` is bypassed.
     yes : bool, optional
         Default ``True`` — bulk mode shouldn't prompt per source.
+    max_tokens : int, optional
+        Output cap for every source and retry; defaults to ``[ingest] max_tokens``
+        in wiki config, or 16,000 when unset. Must be a positive integer.
     on_progress : callable, optional
         Called as ``(index, total, original_path)`` before each source.
     on_failure : callable, optional
         Called as ``(original_path, exception)`` when a single ingest raises.
     """
+    max_tokens = resolve_ingest_max_tokens(wiki_root=wiki_root, override=max_tokens)
     db_path = wiki_root / WIKI_DIR_NAME / "state.db"
     where = "" if scope == "all" else "WHERE status IN ('pending', 'failed')"
     with connect(db_path) as conn:
@@ -324,6 +382,7 @@ def ingest_many(
                 yes=yes,
                 provider=provider,
                 embedder=embedder,
+                max_tokens=max_tokens,
                 force=(scope == "all"),
             )
             results.append(result)

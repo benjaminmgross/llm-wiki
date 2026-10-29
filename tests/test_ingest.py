@@ -94,6 +94,36 @@ def _api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
 
 
+@pytest.mark.parametrize("override,expected_limit", [(None, 32000), (48000, 48000)])
+def test_ingest_token_limit_survives_plan_retry(
+    wiki_with_one_source: Path, mocker: MockerFixture, override: int | None, expected_limit: int
+) -> None:
+    (wiki_with_one_source / ".mdwiki" / "config.toml").write_text("[ingest]\nmax_tokens = 32000\n")
+    complete = mocker.patch(
+        "mdwiki.llm.anthropic.AnthropicProvider.complete",
+        side_effect=[
+            CompleteResult(text="invalid plan", input_tokens=1, output_tokens=1),
+            CompleteResult(text=_good_plan_json(), input_tokens=1, output_tokens=1),
+        ],
+    )
+
+    result = ingest_source(wiki_with_one_source, "ai.md", yes=True, max_tokens=override)
+
+    assert result.applied
+    assert [call.kwargs["max_tokens"] for call in complete.call_args_list] == [expected_limit, expected_limit]
+
+
+@pytest.mark.parametrize("config", ['ingest = "wrong-shape"\n', "[ingest\nmax_tokens = 32000\n"])
+def test_ingest_malformed_config_fails_before_provider(wiki_with_one_source: Path, mocker: MockerFixture, config: str) -> None:
+    (wiki_with_one_source / ".mdwiki" / "config.toml").write_text(config)
+    build_provider = mocker.patch("mdwiki.ingest.build_provider_from_config", side_effect=AssertionError("provider constructed"))
+
+    with pytest.raises(ValueError, match="config.toml"):
+        ingest_source(wiki_with_one_source, "ai.md", yes=True)
+
+    build_provider.assert_not_called()
+
+
 @pytest.mark.unit
 def test_ingest_resolves_source_by_original_path(wiki_with_one_source: Path, mocker: MockerFixture) -> None:
     _mock_provider(mocker, _good_plan_json())

@@ -41,6 +41,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "model": "sentence-transformers/all-MiniLM-L6-v2",
     },
     "ingest": {
+        "max_tokens": 16000,
         "candidate_top_k": 8,
         "max_undo_history": 50,
     },

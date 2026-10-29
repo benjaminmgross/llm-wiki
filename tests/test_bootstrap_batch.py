@@ -14,7 +14,9 @@ import pytest
 from pytest_mock import MockerFixture
 
 from mdwiki.bootstrap import BootstrapResult, bootstrap_batch
+from mdwiki.cli import main
 from mdwiki.init import init_wiki
+from mdwiki.llm.anthropic import AnthropicProvider
 from mdwiki.llm.base import (
     BatchCostEstimate,
     BatchRequest,
@@ -71,6 +73,7 @@ class SyncOnlyProvider(Provider):
     def __init__(self, responses: list[str]) -> None:
         self.responses = iter(responses)
         self.complete_calls = 0
+        self.output_limits: list[int] = []
 
     def ping(self) -> PingResult:
         return PingResult(provider=self.name, model="test", latency_ms=0.0, ok=True, message="pong")
@@ -85,6 +88,7 @@ class SyncOnlyProvider(Provider):
         tool_choice: dict[str, object] | None = None,
     ) -> CompleteResult:
         self.complete_calls += 1
+        self.output_limits.append(max_tokens)
         return CompleteResult(text=next(self.responses), input_tokens=1, output_tokens=1)
 
     def estimate_batch_cost(self, requests: list[BatchRequest]) -> BatchCostEstimate:
@@ -109,6 +113,55 @@ class NonAnthropicBatchProvider(SyncOnlyProvider):
     def batch_complete(self, requests: list[BatchRequest], **_kwargs: object) -> list[BatchResult]:
         self.requests = requests
         return self.results
+
+
+@pytest.mark.parametrize("configured_limit", [None, 32000])
+def test_refresh_batch_configured_limit_reaches_requests_and_estimate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture, configured_limit: int | None
+) -> None:
+    wiki = _three_source_corpus(tmp_path)
+    config = "" if configured_limit is None else f"[ingest]\nmax_tokens = {configured_limit}\n"
+    (wiki / ".mdwiki" / "config.toml").write_text(config)
+    monkeypatch.chdir(wiki)
+    client = mocker.patch("mdwiki.llm.anthropic.anthropic.Anthropic").return_value
+    client.messages.batches.create.return_value.id = "batch-fixture"
+    client.messages.batches.retrieve.return_value.processing_status = "ended"
+    client.messages.batches.results.return_value = []
+    estimate = mocker.spy(AnthropicProvider, "estimate_batch_cost")
+    mocker.patch("mdwiki.bootstrap.get_default_embedder", return_value=StubEmbedder())
+
+    # Empty mocked provider results are reported as failures after request submission.
+    assert main(["refresh", "--bootstrap-batch", "--yes"]) == 1
+
+    expected_limit = 16000 if configured_limit is None else configured_limit
+    requests = client.messages.batches.create.call_args.kwargs["requests"]
+    assert [request["params"]["max_tokens"] for request in requests] == [expected_limit] * 3
+    assert estimate.spy_return.output_tokens_max == expected_limit * 3
+
+
+def test_refresh_batch_sync_fallback_uses_configured_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture) -> None:
+    wiki = _three_source_corpus(tmp_path)
+    (wiki / ".mdwiki" / "config.toml").write_text("[ingest]\nmax_tokens = 32000\n")
+    monkeypatch.chdir(wiki)
+    empty_plan = json.dumps({"verdict": "low-quality", "rationale": "fixture", "updates": [], "new_pages": [], "cross_refs": []})
+    provider = SyncOnlyProvider([empty_plan] * 3)
+    mocker.patch("mdwiki.bootstrap.build_provider_from_config", return_value=provider)
+    mocker.patch("mdwiki.bootstrap.get_default_embedder", return_value=StubEmbedder())
+
+    assert main(["refresh", "--bootstrap-batch", "--yes"]) == 0
+
+    assert provider.output_limits == [32000] * 3
+
+
+def test_bootstrap_invalid_limit_fails_before_provider(tmp_path: Path, mocker: MockerFixture) -> None:
+    wiki = _three_source_corpus(tmp_path)
+    (wiki / ".mdwiki" / "config.toml").write_text("[ingest]\nmax_tokens = 0\n")
+    build_provider = mocker.patch("mdwiki.bootstrap.build_provider_from_config", side_effect=AssertionError("provider constructed"))
+
+    with pytest.raises(ValueError, match="positive integer"):
+        bootstrap_batch(wiki, yes=True)
+
+    build_provider.assert_not_called()
 
 
 @pytest.mark.unit

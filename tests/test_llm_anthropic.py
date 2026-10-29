@@ -202,6 +202,9 @@ def test_complete_raises_clear_error_on_max_tokens_truncation(mocker: MockerFixt
     msg = str(excinfo.value)
     assert "truncat" in msg.lower() or "max_tokens" in msg
     assert "4096" in msg
+    assert "mdwiki ingest --max-tokens" in msg
+    assert "[ingest] max_tokens" in msg
+    assert ".mdwiki/config.toml" in msg
 
 
 @pytest.mark.unit

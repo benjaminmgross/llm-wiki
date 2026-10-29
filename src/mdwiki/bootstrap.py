@@ -25,6 +25,7 @@ from mdwiki.ingest import (
     _recent_log_entries,
     _reject_existing_new_page_paths,
     ingest_many,
+    resolve_ingest_max_tokens,
 )
 from mdwiki.ingest_tool import INGEST_TOOL_CHOICE, INGEST_TOOL_DEFINITION
 from mdwiki.llm import build_provider_from_config
@@ -104,6 +105,7 @@ def bootstrap_batch(
     on_progress: Callable[[int, int, str], None] | None = None,
     on_batch_id: Callable[[str], None] | None = None,
     on_fallback: Callable[[str], None] | None = None,
+    max_tokens: int | None = None,
 ) -> BootstrapResult:
     """Submit every pending source as one batch and apply each successful result.
 
@@ -122,7 +124,11 @@ def bootstrap_batch(
         Called with the cost estimate when ``yes`` is False; return True to submit.
     on_status, on_progress : callable
         Progress callbacks for the CLI to surface polling + per-source application.
+    max_tokens : int, optional
+        Output cap per source, for both native batch and sync fallback. Overrides
+        ``[ingest] max_tokens`` in wiki config; defaults to 16,000 when unset.
     """
+    max_tokens = resolve_ingest_max_tokens(wiki_root=wiki_root, override=max_tokens)
     provider = provider or build_provider_from_config(wiki_root)
     embedder = embedder or get_default_embedder()
 
@@ -148,6 +154,7 @@ def bootstrap_batch(
             embedder=embedder,
             pending=pending,
             on_progress=on_progress,
+            max_tokens=max_tokens,
         )
 
     use_tool = provider.supports_tool_use
@@ -162,6 +169,7 @@ def bootstrap_batch(
                 source_row=source_row,
                 embedder=embedder,
                 use_tool=use_tool,
+                max_tokens=max_tokens,
             )
         except Exception as exc:
             _record_failure(wiki_root, source_row=source_row, reason=f"request preparation failed: {exc}", failures=failures)
@@ -283,6 +291,7 @@ def _bootstrap_sync_fallback(
     embedder: Embedder,
     pending: list[dict[str, Any]],
     on_progress: Callable[[int, int, str], None] | None,
+    max_tokens: int,
 ) -> BootstrapResult:
     by_id = {row["id"]: row["original_path"] for row in pending}
     results = ingest_many(
@@ -292,6 +301,7 @@ def _bootstrap_sync_fallback(
         provider=provider,
         embedder=embedder,
         on_progress=on_progress,
+        max_tokens=max_tokens,
     )
     failures = tuple(
         BootstrapFailure(
@@ -346,6 +356,7 @@ def _prepare_request(
     source_row: dict[str, Any],
     embedder: Embedder,
     use_tool: bool,
+    max_tokens: int,
 ) -> tuple[BatchRequest, _RequestContext]:
     """Build one ``BatchRequest`` + capture the context needed for post-batch apply.
 
@@ -375,7 +386,7 @@ def _prepare_request(
         custom_id=source_row["id"],
         system=INGEST_SYSTEM_PROMPT_TOOL_USE if use_tool else INGEST_SYSTEM_PROMPT,
         messages=[Message(role="user", content=user_prompt)],
-        max_tokens=16000,
+        max_tokens=max_tokens,
         tools=[INGEST_TOOL_DEFINITION] if use_tool else None,
         tool_choice=INGEST_TOOL_CHOICE if use_tool else None,
     )

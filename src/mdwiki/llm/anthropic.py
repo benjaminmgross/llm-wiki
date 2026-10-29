@@ -241,7 +241,8 @@ class AnthropicProvider(Provider):
         if getattr(response, "stop_reason", None) == "max_tokens":
             raise OutputTruncatedError(
                 f"Model hit max_tokens={max_tokens} mid-response. The output is truncated and likely invalid JSON. "
-                f"Re-run with a higher --max-tokens (or trim the source if it's enormous)."
+                "For ingestion, raise `mdwiki ingest --max-tokens N` or [ingest] max_tokens in .mdwiki/config.toml "
+                "within the model's supported limit, or trim the source."
             )
         text = next((block.text for block in response.content if getattr(block, "type", None) == "text"), "")
         tool_input: dict[str, Any] | None = None

@@ -14,7 +14,7 @@ import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import anthropic
 import openai
@@ -22,7 +22,7 @@ import openai
 from mdwiki import __version__
 from mdwiki.discover import WikiNotFound, find_wiki
 from mdwiki.doctor import format_report, run_doctor
-from mdwiki.ingest import IngestError, ingest_many, ingest_source
+from mdwiki.ingest import IngestConfigError, IngestError, ingest_many, ingest_source
 from mdwiki.init import NestedWikiError, SidecarCorruptError, init_wiki
 from mdwiki.lint import lint_wiki
 from mdwiki.lint_fix import lint_fix
@@ -265,6 +265,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     bulk.add_argument("--pending", action="store_true", help="Ingest every source whose status is pending or failed.")
     ingest_p.add_argument("--yes", "-y", action="store_true", help="Apply LLM plans without confirmation (default ON for --all/--pending).")
+    _ = ingest_p.add_argument(
+        "--max-tokens",
+        type=int,
+        metavar="N",
+        help="Positive output-token cap per source; overrides [ingest] max_tokens in .mdwiki/config.toml (default: 16000).",
+    )
     ingest_p.set_defaults(_handler=_cmd_ingest)
 
     session_p = subparsers.add_parser(
@@ -376,7 +382,7 @@ def _run_bootstrap_batch(wiki_root: Path, *, yes: bool = False) -> int:
                 "using the same provider via synchronous ingest fallback.\n"
             ),
         )
-    except (MissingAPIKeyError, UnknownProviderError) as exc:
+    except (MissingAPIKeyError, UnknownProviderError, IngestConfigError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except ValueError as exc:
@@ -432,7 +438,7 @@ def _run_bootstrap_sync(wiki_root: Path, *, files_registered: int) -> int:
             on_progress=lambda i, total, path: print(f"[{i}/{total}] {path}"),
             on_failure=lambda path, exc: print(f"  ! failed: {path}: {exc}", file=sys.stderr),
         )
-    except (MissingAPIKeyError, UnknownProviderError) as exc:
+    except (MissingAPIKeyError, UnknownProviderError, IngestConfigError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except ValueError as exc:
@@ -579,10 +585,11 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
                 wiki_root,
                 scope=scope,
                 yes=True,
+                max_tokens=cast(int | None, args.max_tokens),
                 on_progress=lambda i, total, path: print(f"[{i}/{total}] {path}"),
                 on_failure=lambda path, exc: print(f"  ! failed: {path}: {exc}", file=sys.stderr),
             )
-        except (MissingAPIKeyError, UnknownProviderError) as exc:
+        except (MissingAPIKeyError, UnknownProviderError, IngestConfigError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         except _FATAL_API_ERRORS as exc:
@@ -597,14 +604,14 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        result = ingest_source(wiki_root, args.source, yes=args.yes)
+        result = ingest_source(wiki_root, args.source, yes=args.yes, max_tokens=cast(int | None, args.max_tokens))
     except IngestError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except MissingAPIKeyError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except UnknownProviderError as exc:
+    except (UnknownProviderError, IngestConfigError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except _FATAL_API_ERRORS as exc:
