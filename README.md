@@ -211,6 +211,7 @@ model = "claude-sonnet-4-6"
 model = "sentence-transformers/all-MiniLM-L6-v2"
 
 [ingest]
+max_tokens = 16000
 candidate_top_k = 8
 max_undo_history = 50
 
@@ -223,6 +224,13 @@ vision_fallback = false
 [exclude]
 globs = []
 ```
+
+`[ingest] max_tokens` sets the requested output-token limit per source for API-backed single ingestion, `ingest --pending`, `ingest --all`, and the sync/native-batch paths used by `init` and `refresh` bootstrap. It also applies to corrective plan retries and native batch cost estimates. Existing wikis that omit the setting keep the 16,000 default.
+
+Use `mdwiki ingest <source> --max-tokens 32000` or `mdwiki ingest --pending --max-tokens 32000` for a one-command override; this does not change the config file. Precedence is the explicit CLI/API override, then `[ingest] max_tokens`, then 16,000. Values must be positive integers, and the selected API provider/model must support the requested limit. If API ingestion reports truncated output, raise this limit within the model's supported range or reduce the source.
+
+The subscription-backed `session` provider retains its separate output-limit contract: it does not forward the per-call API limit, and `[llm.session] max_output_tokens` controls Claude session calls. Native `session-ingest` does not call a provider and does not use either setting.
+
 
 Both `init` and `refresh` respect `.gitignore` and `[exclude].globs` during
 discovery. Config globs use gitignore-style matching, including negation; they

@@ -13,6 +13,92 @@ from mdwiki.cli import main
 from mdwiki.init import init_wiki
 
 
+@pytest.mark.parametrize("selection,expected_calls", [(["a.md"], 1), (["--pending"], 2), (["--all"], 2)])
+@pytest.mark.parametrize(
+    "config,override,expected_limit",
+    [
+        ("", [], 16000),
+        ("[ingest]\ncandidate_top_k = 8\n", [], 16000),
+        ("[ingest]\nmax_tokens = 32000\n", [], 32000),
+        ("[ingest]\nmax_tokens = 32000\n", ["--max-tokens", "48000"], 48000),
+        ("", ["--max-tokens", "1"], 1),
+    ],
+)
+def test_ingest_token_limit_reaches_sdk_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
+    selection: list[str],
+    expected_calls: int,
+    config: str,
+    override: list[str],
+    expected_limit: int,
+) -> None:
+    for name in ("a.md", "b.md"):
+        (tmp_path / name).write_text(f"# {name}\n\nA source for the configured output limit test.\n")
+    init_wiki(tmp_path)
+    (tmp_path / ".mdwiki" / "config.toml").write_text(config)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    client = mocker.patch("mdwiki.llm.anthropic.anthropic.Anthropic").return_value
+    plan = json.dumps({"verdict": "low-quality", "rationale": "fixture", "updates": [], "new_pages": [], "cross_refs": []})
+    response = mocker.Mock(
+        content=[mocker.Mock(type="text", text=plan)],
+        stop_reason="end_turn",
+        usage=mocker.Mock(input_tokens=1, output_tokens=1, cache_read_input_tokens=0, cache_creation_input_tokens=0),
+    )
+    client.messages.stream.return_value.__enter__.return_value.get_final_message.return_value = response
+    mocker.patch("mdwiki.ingest.get_default_embedder").return_value.embed_text.return_value = [1.0, 0.0]
+
+    assert main(["ingest", *selection, "--yes", *override]) == 0
+
+    assert client.messages.stream.call_count == expected_calls
+    assert [call.kwargs["max_tokens"] for call in client.messages.stream.call_args_list] == [expected_limit] * expected_calls
+
+
+@pytest.mark.parametrize("selection", [["a.md"], ["--pending"], ["--all"]])
+@pytest.mark.parametrize("raw_limit", ["0", "-1", "true", '"32000"', "3.5", "[]"])
+def test_ingest_invalid_config_limit_fails_before_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
+    capsys: pytest.CaptureFixture[str],
+    selection: list[str],
+    raw_limit: str,
+) -> None:
+    (tmp_path / "a.md").write_text("# A\n\nTemporary source.\n")
+    init_wiki(tmp_path)
+    (tmp_path / ".mdwiki" / "config.toml").write_text(f"[ingest]\nmax_tokens = {raw_limit}\n")
+    monkeypatch.chdir(tmp_path)
+    build_provider = mocker.patch("mdwiki.ingest.build_provider_from_config", side_effect=AssertionError("provider constructed"))
+
+    assert main(["ingest", *selection, "--yes"]) == 1
+
+    build_provider.assert_not_called()
+    error = capsys.readouterr().err
+    assert "max_tokens" in error
+    assert "positive integer" in error
+
+
+@pytest.mark.parametrize("raw_limit", ["0", "-100"])
+def test_ingest_invalid_cli_limit_fails_before_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
+    capsys: pytest.CaptureFixture[str],
+    raw_limit: str,
+) -> None:
+    (tmp_path / "a.md").write_text("# A\n\nTemporary source.\n")
+    init_wiki(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    build_provider = mocker.patch("mdwiki.ingest.build_provider_from_config")
+
+    assert main(["ingest", "a.md", "--yes", "--max-tokens", raw_limit]) == 1
+
+    build_provider.assert_not_called()
+    assert "positive integer" in capsys.readouterr().err
+
+
 @pytest.mark.unit
 def test_version_flag_prints_version_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     exit_code = main(["--version"])
