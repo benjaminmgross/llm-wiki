@@ -33,6 +33,11 @@ def build_index(wiki_root: Path) -> str:
         "",
     ]
 
+    rules_path = wiki_root / "wiki/standing-rules.md"
+    rule_entries = [f"- {line}" for line in rules_path.read_text().splitlines() if line.startswith("[")] if rules_path.is_file() else []
+    if rule_entries:
+        lines[2:2] = ["## Standing rules", "", *rule_entries, ""]
+
     for _kind, heading, folder in page_kind_folders_for_wiki(wiki_root):
         lines.append(f"## {heading}")
         lines.append("")

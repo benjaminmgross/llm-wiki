@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from mdwiki.capture import CaptureError, capture_kind_for_source
+from mdwiki.capture_candidates import active_rule_context, append_pinned_candidates
 from mdwiki.chunker import MarkdownChunker
 from mdwiki.cross_refs import CrossRefMaterializationError, materialize_cross_refs
 from mdwiki.discover import WIKI_DIR_NAME
@@ -26,7 +28,7 @@ from mdwiki.llm.anthropic import OutputTruncatedError
 from mdwiki.llm.base import Message, Provider
 from mdwiki.page_kinds import infer_kind_from_page_path
 from mdwiki.plan import Plan, PlanValidationError, allowed_kinds_for_wiki, parse_plan, parse_plan_dict
-from mdwiki.prompts import INGEST_SYSTEM_PROMPT, INGEST_SYSTEM_PROMPT_TOOL_USE, build_ingest_user_prompt
+from mdwiki.prompts import build_ingest_system_prompt, build_ingest_user_prompt
 from mdwiki.quote import min_quote_words_for_wiki, quote_normalize_mode_for_wiki, verify_plan
 from mdwiki.source_state import mark_source_failed
 from mdwiki.state import connect
@@ -94,6 +96,13 @@ def ingest_source(
         If the source is unknown, the LLM response is unparseable, or quote verification fails.
     """
     source_row = _resolve_source(wiki_root, source_id_or_path)
+    from mdwiki.capture_effects import validate_capture_apply
+
+    try:
+        validate_capture_apply(wiki_root=wiki_root, source_id=source_row["id"])
+    except CaptureError as exc:
+        raise IngestError(str(exc)) from exc
+    capture_kind = capture_kind_for_source(wiki_root=wiki_root, source_id=source_row["id"])
     if source_row["status"] == "ingested" and not force:
         return IngestResult(
             source_id=source_row["id"],
@@ -124,6 +133,8 @@ def ingest_source(
             candidate_pages=candidate_pages,
             schema_text=schema_text,
             recent_log_entries=recent_log,
+            standing_rules_text=active_rule_context(wiki_root=wiki_root),
+            capture_kind=capture_kind,
         )
     except Exception as exc:
         raise IngestError(f"Source preparation failed: {exc}") from exc
@@ -131,7 +142,9 @@ def ingest_source(
     # Capability routing keeps orchestration independent of provider identity.
     # Protocol-style adapters predating capabilities default to free-form JSON.
     use_tool = getattr(provider, "supports_tool_use", False)
-    system_prompt = INGEST_SYSTEM_PROMPT_TOOL_USE if use_tool else INGEST_SYSTEM_PROMPT
+    system_prompt = build_ingest_system_prompt(
+        allowed_kinds=allowed_kinds_for_wiki(wiki_root), use_tool=use_tool, capture_kind=capture_kind
+    )
     messages = [Message(role="user", content=user_prompt)]
     plan: Plan | None = None
     last_plan_error: IngestError | None = None
@@ -216,11 +229,15 @@ def apply_ingest_plan(
     validate_locked: Callable[[], None] | None = None,
 ) -> IngestResult:
     """Apply one already-validated plan through the normal per-source transaction."""
+    from mdwiki.capture_effects import apply_capture_effects, preserve_capture_metadata, validate_capture_apply
+
     if plan.is_empty():
         summary = f"{plan.verdict}: {original_path} — {plan.rationale}"
-        with IngestTransaction(wiki_root=wiki_root, source_id=source_id, summary=summary):
+        with IngestTransaction(wiki_root=wiki_root, source_id=source_id, summary=summary) as tx:
+            validate_capture_apply(wiki_root=wiki_root, source_id=source_id)
             if validate_locked is not None:
                 validate_locked()
+            apply_capture_effects(wiki_root=wiki_root, tx=tx, source_id=source_id)
         return IngestResult(
             source_id=source_id,
             applied=True,
@@ -232,6 +249,7 @@ def apply_ingest_plan(
         f"ingest {original_path} → {len(plan.updates)} update(s), {len(plan.new_pages)} new page(s), {len(plan.cross_refs)} cross-ref(s)"
     )
     with IngestTransaction(wiki_root=wiki_root, source_id=source_id, summary=summary) as tx:
+        validate_capture_apply(wiki_root=wiki_root, source_id=source_id)
         if validate_locked is not None:
             validate_locked()
         try:
@@ -243,9 +261,10 @@ def apply_ingest_plan(
         explicit_write_targets = {*new_page_kinds, *(update.page for update in plan.updates)}
         touched_at = time.time()
         for page_path, content in page_bodies.items():
-            committed_content = tx.write_file(wiki_root / page_path, content)
-            if embedder is not None:
-                page_embeddings[page_path] = _embed_page(embedder, path=page_path, content=committed_content)
+            target = wiki_root / page_path
+            if target.is_file():
+                content = preserve_capture_metadata(previous=target.read_text(), content=content)
+            tx.write_file(wiki_root / page_path, content)
             if page_path not in explicit_write_targets:
                 tx.upsert_page(
                     path=page_path,
@@ -254,9 +273,21 @@ def apply_ingest_plan(
                     last_touched_at=touched_at,
                 )
         _apply_pages_and_backrefs(tx=tx, plan=plan, embeddings=page_embeddings, source_id=source_id)
+        try:
+            warnings = apply_capture_effects(wiki_root=wiki_root, tx=tx, source_id=source_id)
+        except CaptureError as exc:
+            raise IngestError(str(exc)) from exc
+        # Capture metadata and callouts may alter pages after their initial write.
+        # Keep provider-path vectors consistent; native session apply remains inference-free.
+        if embedder is not None:
+            for page_path in page_bodies:
+                tx.connection.execute(
+                    "UPDATE pages SET embedding = ? WHERE path = ?",
+                    (_embed_page(embedder, path=page_path, content=(wiki_root / page_path).read_text()), page_path),
+                )
         tx.write_file(wiki_root / "wiki" / "index.md", build_index(wiki_root))
 
-    return IngestResult(source_id=source_id, applied=True, message=summary, plan=plan)
+    return IngestResult(source_id=source_id, applied=True, message=summary + ("\n" + "\n".join(warnings) if warnings else ""), plan=plan)
 
 
 def _embed_page(embedder: Embedder, *, path: str, content: str) -> bytes:
@@ -305,8 +336,12 @@ def ingest_many(
     db_path = wiki_root / WIKI_DIR_NAME / "state.db"
     where = "" if scope == "all" else "WHERE status IN ('pending', 'failed')"
     with connect(db_path) as conn:
+        retirement_filter = "NOT EXISTS (SELECT 1 FROM capture_state c WHERE c.source_id = sources.id AND c.retired_json IS NOT NULL)"
+        where = f"{where} AND {retirement_filter}" if where else f"WHERE {retirement_filter}"
         rows = conn.execute(f"SELECT id, original_path FROM sources {where} ORDER BY original_path").fetchall()
     targets = [(row["id"], row["original_path"]) for row in rows]
+    if not targets:
+        return []
 
     if provider is None:
         provider = build_provider_from_config(wiki_root)
@@ -387,6 +422,8 @@ def _resolve_source(wiki_root: Path, source_id_or_path: str, *, read_only: bool 
 
 def _candidate_paths(raw: str, *, wiki_root: Path) -> list[str]:
     """Generate normalized candidates to try against ``sources.original_path``."""
+    if raw.startswith("capture://"):
+        return [raw]
     seen: list[str] = []
 
     def add(value: str) -> None:
@@ -498,6 +535,7 @@ def _find_candidate_pages(*, wiki_root: Path, section_vectors: list[list[float]]
 
     ranked_paths = sorted(accumulated, key=lambda p: accumulated[p], reverse=True)[:MAX_CANDIDATES_TOTAL]
 
+    ranked_paths = append_pinned_candidates(wiki_root=wiki_root, query_vectors=section_vectors, selected_paths=ranked_paths)
     candidates: list[dict[str, str]] = []
     for path in ranked_paths:
         full = wiki_root / path

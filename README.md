@@ -142,10 +142,15 @@ similar to how `git` discovers a repository.
 | `mdwiki doctor` | Ping the selected provider with a model call and report its model, login result, and configured embedder. |
 | `mdwiki ingest <source>` | Ingest one source by path, raw filename, or hash prefix. |
 | `mdwiki ingest --pending` | Ingest every pending or failed source. |
-| `mdwiki ingest --all` | Re-ingest every source, including already-ingested ones. |
+| `mdwiki ingest --all` | Re-ingest every non-retired source, including already-ingested ones. |
 | `mdwiki session-ingest pending` | Emit a stable JSON manifest of pending/failed sources, once each, for parent-session assignment |
 | `mdwiki session-ingest prepare <source> [-o envelope.json]` | Capture a read-only source/schema/page-hash envelope and plan contract without calling a provider or embedder |
 | `mdwiki session-ingest apply <envelope.json>` | Revalidate a session-produced plan against latest source/schema/target pages and apply one serialized per-source transaction; exit 3 means re-prepare and retry |
+| `mdwiki capture add --kind K --title T --body B [--no-ingest]` | Record a conclusion with provenance as an internal source; ingest through the configured provider or defer to native-session prepare/apply |
+| `mdwiki capture list [--kind K] [--pinned] [--include-retired]` | List captured rules, decisions, facts, or corrections |
+| `mdwiki capture show <id>` | Inspect a capture and its optional export state |
+| `mdwiki capture retire <id> --reason TEXT` | Withdraw a capture and unpin its pages while preserving history |
+| `mdwiki capture export <id> <path>` | Write a human-readable copy marked to avoid duplicate registration |
 | `mdwiki query "<question>" [--file]` | Answer from existing wiki pages; optionally file the answer as a synthesis. |
 | `mdwiki synthesize "<topic>" \| --auto` | Create synthesis pages explicitly or from graph clusters. |
 | `mdwiki lint [--fix [=full]]` | Check wiki health; optionally apply supported fixes. |
@@ -191,12 +196,62 @@ Profile source files live under `src/mdwiki/profiles/`.
 `session-ingest` is the deterministic handoff for an active Codex or Claude Code session. mdwiki does not spawn agents itself, and this path never calls `mdwiki.llm`, a model SDK/HTTP endpoint, or the local embedder.
 
 1. The parent runs `mdwiki session-ingest pending` and assigns every listed source to exactly one native session sub-agent. Planning concurrency is bounded by the active session's actual agent-slot limit.
-2. Each worker stays read-only and runs `mdwiki session-ingest prepare <source> -o .mdwiki/session-plans/<source-id>.json`. Keeping envelopes under `.mdwiki/` prevents a later refresh from registering them as corpus sources. The envelope contains source sections, schema, current page paths/hashes, agent instructions, and the exact plan JSON contract. The worker fills only `plan`.
+2. Each worker stays read-only and runs `mdwiki session-ingest prepare <source> -o .mdwiki/session-plans/<source-id>.json`. Keeping envelopes under `.mdwiki/` prevents a later refresh from registering them as corpus sources. The envelope contains source sections, schema, allowed page kinds, index, standing-rule bodies, current page paths/hashes, agent instructions, and the exact plan JSON contract. The worker fills only `plan`.
 3. The parent applies completed envelopes one at a time with `mdwiki session-ingest apply <envelope>.json`.
 4. Apply acquires the wiki-wide write lock, rechecks source/configuration/schema hashes, and compares every write/read-modify-write page (including a cross-reference `from_page`) with its analysis-time hash. A target-only cross-reference endpoint needs only to continue existing under the lock. Unrelated and target-only content changes do not invalidate a plan; policy changes, overlapping writes, deleted endpoints, and new-page races do.
 5. Exit code 3 means the plan was invalidated. The parent re-prepares and re-plans that source, capped at three retries, while continuing other sources. Successful sources remain independently committed and undoable; interrupted or exhausted work remains pending/failed for the next manifest.
 
 Because session plans deliberately avoid local inference, their page rows carry no embedding until a later provider-backed ingest or `mdwiki rebuild --pages` refreshes the derived embedding cache. Page content, citations, relative cross-reference links, transactions, source state, index, log, and undo remain complete.
+
+## Captured conclusions
+
+`capture` records a conclusion reached in a conversation as an immutable internal
+source in `raw/` and `raw/.sources.json`. It needs no source file in your working
+folders. Kinds are `standing-rule`, `decision`, `fact`, and `correction`.
+Standing rules and decisions require `--decided-by`; `--date` defaults to today.
+Use `--session`, `--context`, and `--rationale` to preserve how the conclusion arose.
+
+To complete the work in your current Codex or Claude Code session without
+provider calls or local embedding inference:
+
+```bash
+mdwiki capture add --kind standing-rule --title "Ownership claims" \
+  --body "Do not claim ownership without supporting evidence." \
+  --decided-by "Project owner" --session "current-session" --no-ingest
+# Use the printed source id below. Fill only plan in the prepared envelope.
+mdwiki session-ingest prepare <id> -o .mdwiki/session-plans/<id>.json
+mdwiki session-ingest apply .mdwiki/session-plans/<id>.json
+```
+
+For automatic ingest, omit `--no-ingest`. The configured provider applies,
+including `mdwiki --provider session capture add ...` for a subscription-backed
+agent CLI. If ingest fails, the registered source remains available for retry
+with `mdwiki ingest --pending` or native session prepare/apply.
+Retired captures are skipped by pending queues, and direct native preparation
+rejects them. A pinned capture needs at least one cited page before apply can
+complete; an empty pinned plan leaves it pending for a fresh plan.
+
+`--body-file PATH` also accepts a file, and `--body -` reads stdin.
+`--supersedes TARGET` is repeatable and accepts a wiki page path or source id
+prefix. Page targets receive a deterministic historical callout; source targets
+mark pages supported only by superseded/retired sources, leaving mixed evidence
+for review. Standing rules pin by default; `--pin` and `--no-pin` override this.
+The ordinary profile uses a dated concept page; initiative/transcripts use a
+dated decision page.
+
+Pinned active captures appear in generated `wiki/standing-rules.md` and the index.
+Their full conclusions are provided to query, ingest, and native-session planning
+even when pages have no embeddings. Embedded pins also augment search candidates
+at similarity ≥0.20, with at most four extra pages. Configure these limits under
+`[capture]` as `pin_min_similarity` and `pin_max_candidates`; rebuilding page
+embeddings is optional for the native workflow.
+
+Use `capture list` / `capture show <id>` to inspect records. Change a conclusion
+by adding a new capture with `--supersedes <old-id>`; withdraw one with
+`capture retire <id> --reason "..."`. Records and historical pages remain.
+`capture export <id> notes.md` (or add's `--export`) writes a marked readable copy
+that refresh skips. `capture show` reports a missing or changed export.
+Never edit raw captures or the generated standing-rules page by hand.
 
 ## Configuration
 
@@ -458,6 +513,9 @@ For scheduled maintenance, run refresh from inside the wiki folder:
 - `coverage-gap`: ingested sources with no backrefs, except valid intentional
   refusals recorded by the latest durable rejection or ingest event.
 - `unverified-quote`: pages containing `[unverified-quote]`.
+- `capture-missing-raw`: an internal capture whose raw source is missing.
+- `capture-retired-pin`: a page still pinned only to retired captures.
+- `capture-missing-supersession`: a superseded page missing its managed callout.
 
 Fix modes:
 

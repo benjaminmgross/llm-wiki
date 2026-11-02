@@ -14,19 +14,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from mdwiki.capture_candidates import active_rule_context
 from mdwiki.chunker import MarkdownChunker
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.ingest import IngestResult, _chunk_or_whole, _recent_log_entries, _resolve_source, apply_ingest_plan
 from mdwiki.ingest_tool import INGEST_TOOL_DEFINITION
 from mdwiki.plan import Plan, allowed_kinds_for_wiki, parse_plan_dict
+from mdwiki.prompts import capture_authoring_guidance
 from mdwiki.quote import min_quote_words_for_wiki, quote_normalize_mode_for_wiki, verify_plan
 from mdwiki.semantic_pages import is_semantic_page_path
+from mdwiki.version_chain import compute_body_hash
 
 SESSION_ENVELOPE_VERSION: int = 1
 SESSION_AGENT_INSTRUCTIONS: str = (
     "Analyze only this assigned source using the active Codex or Claude Code session. "
     "Remain read-only, inspect current wiki pages as needed, and fill only the plan field. "
     "Do not call model APIs, mdwiki providers, or local inference. Every claim must quote the source verbatim."
+    " Honor standing rules in wiki.standing_rules and use only wiki.allowed_kinds."
 )
 
 
@@ -63,6 +67,10 @@ class PreparedSessionPlan:
     schema_sha256: str
     source_sha256: str
     page_sha256: dict[str, str]
+    index_text: str
+    standing_rules_text: str
+    allowed_kinds: frozenset[str]
+    capture_guidance: str
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -76,14 +84,18 @@ class PreparedSessionPlan:
                 "schema": self.schema_text,
                 "recent_log_entries": list(self.recent_log_entries),
                 "page_paths": sorted(self.page_sha256),
+                "index": self.index_text,
+                "standing_rules": self.standing_rules_text,
+                "allowed_kinds": sorted(self.allowed_kinds),
             },
-            "agent_instructions": SESSION_AGENT_INSTRUCTIONS,
+            "agent_instructions": SESSION_AGENT_INSTRUCTIONS + (" " + self.capture_guidance if self.capture_guidance else ""),
             "plan_contract": INGEST_TOOL_DEFINITION["input_schema"],
             "snapshot": {
                 "config_sha256": self.config_sha256,
                 "schema_sha256": self.schema_sha256,
                 "source_sha256": self.source_sha256,
                 "pages": dict(sorted(self.page_sha256.items())),
+                "standing_rules_sha256": compute_body_hash(self.standing_rules_text),
             },
             "plan": None,
         }
@@ -97,8 +109,16 @@ def list_session_sources(wiki_root: Path) -> list[SessionSource]:
     db_path = wiki_root / WIKI_DIR_NAME / "state.db"
     with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
         conn.row_factory = sqlite3.Row
+        has_capture_state = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'capture_state'").fetchone()
+        capture_filter = (
+            " AND NOT EXISTS (SELECT 1 FROM capture_state c WHERE c.source_id = sources.id AND c.retired_json IS NOT NULL)"
+            if has_capture_state
+            else ""
+        )
         rows = conn.execute(
-            "SELECT id, original_path, raw_path FROM sources WHERE status IN ('pending', 'failed') ORDER BY original_path, id"
+            "SELECT id, original_path, raw_path FROM sources WHERE status IN ('pending', 'failed')"
+            + capture_filter
+            + " ORDER BY original_path, id"
         ).fetchall()
     return [SessionSource(source_id=row["id"], original_path=row["original_path"], raw_path=row["raw_path"]) for row in rows]
 
@@ -106,6 +126,14 @@ def list_session_sources(wiki_root: Path) -> list[SessionSource]:
 def prepare_session_plan(wiki_root: Path, source_id_or_path: str) -> PreparedSessionPlan:
     """Capture read-only context for one native session sub-agent."""
     source_row = _resolve_source(wiki_root, source_id_or_path, read_only=True)
+    capture_kind = None
+    if source_row["original_path"].startswith("capture://"):
+        from mdwiki.capture import get_capture
+
+        capture = get_capture(wiki_root=wiki_root, source_id=source_row["id"])
+        if capture.capture.retired is not None:
+            raise SessionPlanError(f"Capture {capture.source_id} is retired; add a new capture instead.")
+        capture_kind = capture.capture.kind
     raw_path = wiki_root / source_row["raw_path"]
     source_bytes = raw_path.read_bytes()
     source_text = source_bytes.decode()
@@ -117,6 +145,8 @@ def prepare_session_plan(wiki_root: Path, source_id_or_path: str) -> PreparedSes
     schema_path = wiki_root / WIKI_DIR_NAME / "schema.md"
     schema_bytes = schema_path.read_bytes()
     config_bytes = (wiki_root / WIKI_DIR_NAME / "config.toml").read_bytes()
+    index_path = wiki_root / "wiki" / "index.md"
+    allowed_kinds = allowed_kinds_for_wiki(wiki_root)
     return PreparedSessionPlan(
         source=SessionSource(
             source_id=source_row["id"],
@@ -131,6 +161,12 @@ def prepare_session_plan(wiki_root: Path, source_id_or_path: str) -> PreparedSes
         schema_sha256=_sha256(schema_bytes),
         source_sha256=_sha256(source_bytes),
         page_sha256=_snapshot_pages(wiki_root),
+        index_text=index_path.read_text() if index_path.is_file() else "",
+        standing_rules_text=active_rule_context(wiki_root=wiki_root),
+        allowed_kinds=allowed_kinds,
+        capture_guidance=capture_authoring_guidance(capture_kind=capture_kind, allowed_kinds=allowed_kinds)
+        if capture_kind is not None
+        else "",
     )
 
 
@@ -151,6 +187,7 @@ def apply_session_plan(wiki_root: Path, payload: dict[str, object]) -> IngestRes
     schema_sha256 = _require_str(snapshot_payload, "schema_sha256")
     source_sha256 = _require_str(snapshot_payload, "source_sha256")
     page_sha256 = _require_str_map(snapshot_payload, "pages")
+    standing_rules_sha256 = _require_str(snapshot_payload, "standing_rules_sha256")
     _validate_config_snapshot(wiki_root=wiki_root, config_sha256=config_sha256)
     plan = parse_plan_dict(plan_payload, allowed_kinds=allowed_kinds_for_wiki(wiki_root))
     _verify_source_claims(wiki_root=wiki_root, source_row=source_row, plan=plan)
@@ -164,6 +201,7 @@ def apply_session_plan(wiki_root: Path, payload: dict[str, object]) -> IngestRes
             schema_sha256=schema_sha256,
             source_sha256=source_sha256,
             page_sha256=page_sha256,
+            standing_rules_sha256=standing_rules_sha256,
         )
 
     return apply_ingest_plan(
@@ -208,6 +246,7 @@ def _validate_latest_state(
     schema_sha256: str,
     source_sha256: str,
     page_sha256: dict[str, str],
+    standing_rules_sha256: str,
 ) -> None:
     db_path = wiki_root / WIKI_DIR_NAME / "state.db"
     with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
@@ -217,6 +256,8 @@ def _validate_latest_state(
     if row[0] == "ingested":
         raise PlanInvalidatedError("Registered source is already ingested; do not apply the same session envelope twice.")
     _validate_config_snapshot(wiki_root=wiki_root, config_sha256=config_sha256)
+    if compute_body_hash(active_rule_context(wiki_root=wiki_root)) != standing_rules_sha256:
+        raise PlanInvalidatedError("Standing rules changed after plan preparation; prepare and retry the source.")
     schema_path = wiki_root / WIKI_DIR_NAME / "schema.md"
     if not schema_path.is_file():
         raise PlanInvalidatedError("Wiki schema disappeared after plan preparation; restore it, prepare, and retry.")
@@ -260,11 +301,7 @@ def _snapshot_pages(wiki_root: Path) -> dict[str, str]:
     wiki_dir = wiki_root / "wiki"
     if not wiki_dir.is_dir():
         return {}
-    paths = sorted(
-        path
-        for path in wiki_dir.rglob("*")
-        if path.is_file() and is_semantic_page_path(path.relative_to(wiki_root).as_posix())
-    )
+    paths = sorted(path for path in wiki_dir.rglob("*") if path.is_file() and is_semantic_page_path(path.relative_to(wiki_root).as_posix()))
     return {path.relative_to(wiki_root).as_posix(): _hash_file(path) for path in paths}
 
 

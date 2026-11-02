@@ -1039,3 +1039,376 @@ def test_provider_flag_leaves_an_exported_session_cli_untouched(
         main(["--provider", "session", "status"])
 
     assert os.environ["MDWIKI_SESSION_CLI"] == "codex"
+
+
+@pytest.mark.unit
+def test_capture_add_registers_internal_source_without_model_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mdwiki.state import connect
+
+    init_wiki(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    provider = mocker.patch("mdwiki.ingest.build_provider_from_config", side_effect=AssertionError("no provider"))
+    embedder = mocker.patch("mdwiki.ingest.get_default_embedder", side_effect=AssertionError("no inference"))
+
+    exit_code = main(
+        ["capture", "add", "--kind", "fact", "--title", "A fact", "--body", "A durable conclusion from this session.", "--no-ingest"]
+    )
+
+    assert exit_code == 0
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        rows = conn.execute("SELECT id, original_path, raw_path, status FROM sources").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["original_path"].startswith("capture://")
+    assert rows[0]["status"] == "pending"
+    assert "A durable conclusion from this session." in (tmp_path / rows[0]["raw_path"]).read_text()
+    assert rows[0]["id"] in capsys.readouterr().out
+    assert not (tmp_path / "wiki" / "index.md").exists()
+    provider.assert_not_called()
+    embedder.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("body_mode", ["file", "stdin", "body-stdin"])
+def test_capture_add_accepts_body_file_or_stdin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body_mode: str) -> None:
+    import io
+
+    init_wiki(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    body = "A conclusion is copied verbatim from the active session.\n"
+    if body_mode == "file":
+        body_file = tmp_path / ".mdwiki" / "body.txt"
+        body_file.write_text(body)
+        options = ["--body-file", str(body_file)]
+    else:
+        monkeypatch.setattr("sys.stdin", io.StringIO(body))
+        options = ["-"] if body_mode == "stdin" else ["--body", "-"]
+
+    assert main(["capture", "add", "--kind", "fact", "--title", "Verbatim body", *options, "--no-ingest"]) == 0
+    source = next((tmp_path / "raw").glob("*.md"))
+    assert body in source.read_text()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "options",
+    [[], ["--body", "x", "--body-file", "missing.md"], ["--body", "x", "-"], ["--body-file", "missing.md", "-"]],
+)
+def test_capture_add_requires_exactly_one_body_input(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, options: list[str]) -> None:
+    init_wiki(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["capture", "add", "--kind", "fact", "--title", "T", *options, "--no-ingest"]) == 2
+    assert not list((tmp_path / "raw").glob("*.md"))
+
+
+@pytest.mark.unit
+def test_capture_add_validation_errors_are_friendly_and_leave_no_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    init_wiki(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["capture", "add", "--kind", "decision", "--title", "T", "--body", "A durable decision.", "--no-ingest"]) == 1
+    assert "decided" in capsys.readouterr().err.lower()
+    assert not list((tmp_path / "raw").glob("*.md"))
+
+
+@pytest.mark.unit
+def test_capture_list_show_export_and_retire_lifecycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mdwiki.state import connect
+
+    init_wiki(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert (
+        main(
+            [
+                "capture",
+                "add",
+                "--kind",
+                "standing-rule",
+                "--title",
+                "Standing rule",
+                "--body",
+                "Preserve every source quote verbatim.",
+                "--decided-by",
+                "Ben",
+                "--no-ingest",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        source_id = conn.execute("SELECT id FROM sources").fetchone()["id"]
+
+    assert main(["capture", "list", "--pinned", "--kind", "standing-rule"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert [record["source_id"] for record in listed] == [source_id]
+    assert main(["capture", "list", "--kind", "fact"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+    assert main(["capture", "show", source_id[:6]]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["export_state"] == "not-exported"
+    assert shown["body"] == "Preserve every source quote verbatim."
+    exported = tmp_path / "rule.md"
+    assert main(["capture", "export", source_id, str(exported)]) == 0
+    capsys.readouterr()
+    assert exported.read_text().startswith(f"<!-- mdwiki-capture: {source_id} -->")
+    assert main(["capture", "show", source_id]) == 0
+    assert json.loads(capsys.readouterr().out)["export_state"] == "current"
+    exported.write_text("modified")
+    assert main(["capture", "show", source_id]) == 0
+    assert json.loads(capsys.readouterr().out)["export_state"] == "out-of-date"
+    exported.unlink()
+    assert main(["capture", "show", source_id]) == 0
+    assert json.loads(capsys.readouterr().out)["export_state"] == "missing"
+
+    assert main(["capture", "retire", source_id, "--reason", "A newer rule replaces it."]) == 0
+    capsys.readouterr()
+    assert main(["capture", "list"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+    assert main(["capture", "list", "--include-retired"]) == 0
+    assert len(json.loads(capsys.readouterr().out)) == 1
+
+
+@pytest.mark.unit
+def test_capture_errors_are_friendly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert main(["capture", "list"]) == 1
+    assert "error:" in capsys.readouterr().err
+    init_wiki(tmp_path)
+    assert main(["capture", "show", "unknown"]) == 1
+    assert "error:" in capsys.readouterr().err
+    assert main(["capture", "add", "--kind", "fact", "--title", "Missing body", "--body-file", "absent.md", "--no-ingest"]) == 1
+    assert "error:" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+def test_capture_native_session_journey_pins_supersedes_and_undoes_without_inference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mdwiki.state import connect
+
+    init_wiki(tmp_path, profile="initiative")
+    old_page = tmp_path / "wiki" / "concepts" / "old-rule.md"
+    old_page.parent.mkdir(parents=True)
+    old_page.write_text("# Old rule\n\nThe earlier approach is historical.\n")
+    monkeypatch.chdir(tmp_path)
+    mocker.patch("mdwiki.ingest.build_provider_from_config", side_effect=AssertionError("native session must not build a provider"))
+    mocker.patch("mdwiki.ingest.get_default_embedder", side_effect=AssertionError("native session must not embed"))
+    assert (
+        main(
+            [
+                "capture",
+                "add",
+                "--kind",
+                "standing-rule",
+                "--title",
+                "Use verbatim quotes",
+                "--body",
+                "Preserve every source quote verbatim.",
+                "--decided-by",
+                "Ben",
+                "--supersedes",
+                "wiki/concepts/old-rule.md",
+                "--no-ingest",
+            ]
+        )
+        == 0
+    )
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        source = conn.execute("SELECT id, original_path FROM sources").fetchone()
+    envelope_path = tmp_path / ".mdwiki" / "capture-plan.json"
+    assert main(["session-ingest", "prepare", source["id"], "--output", str(envelope_path)]) == 0
+    envelope = json.loads(envelope_path.read_text())
+    envelope["plan"] = {
+        "verdict": "ingest",
+        "rationale": "Record the standing rule.",
+        "updates": [],
+        "cross_refs": [],
+        "new_pages": [
+            {
+                "path": "wiki/decisions/2026-11-02-quotes.md",
+                "kind": "decision",
+                "content": "# Use verbatim quotes\n\nPreserve every source quote verbatim.\n",
+                "claims": [
+                    {"source_section_id": source["original_path"] + "/Conclusion", "quote": "Preserve every source quote verbatim."}
+                ],
+            }
+        ],
+    }
+    envelope_path.write_text(json.dumps(envelope))
+
+    assert main(["session-ingest", "apply", str(envelope_path)]) == 0
+
+    decision = tmp_path / "wiki" / "decisions" / "2026-11-02-quotes.md"
+    assert "pinned: true" in decision.read_text()
+    assert "Superseded" in old_page.read_text()
+    assert "Use verbatim quotes" in (tmp_path / "wiki" / "standing-rules.md").read_text()
+    assert "Standing rules" in (tmp_path / "wiki" / "index.md").read_text()
+    assert main(["capture", "retire", source["id"], "--reason", "Retired by the session."]) == 0
+    assert "pinned: true" not in decision.read_text()
+    assert main(["undo"]) == 0
+    assert "pinned: true" in decision.read_text()
+    assert main(["undo"]) == 0
+    assert not decision.exists()
+    assert "Superseded" not in old_page.read_text()
+    capsys.readouterr()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(("profile", "kind", "folder"), [("initiative", "decision", "decisions"), ("working-dir", "concept", "concepts")])
+def test_capture_add_supports_the_session_provider_and_profile_page_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture, profile: str, kind: str, folder: str
+) -> None:
+    from mdwiki.llm.base import CompleteResult
+    from mdwiki.state import connect
+
+    init_wiki(tmp_path, profile=profile)
+    monkeypatch.chdir(tmp_path)
+    fake_embedder = mocker.Mock()
+    fake_embedder.embed_text.return_value = [1.0, 0.0, 0.0]
+    mocker.patch("mdwiki.ingest.get_default_embedder", return_value=fake_embedder)
+
+    def complete(**kwargs: object) -> CompleteResult:
+        with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+            original_path = conn.execute("SELECT original_path FROM sources").fetchone()["original_path"]
+        return CompleteResult(
+            text=json.dumps(
+                {
+                    "verdict": "ingest",
+                    "rationale": "Record the decision.",
+                    "updates": [],
+                    "cross_refs": [],
+                    "new_pages": [
+                        {
+                            "path": f"wiki/{folder}/2026-11-02-quotes.md",
+                            "kind": kind,
+                            "content": "# Decision\n\nPreserve every source quote verbatim.\n",
+                            "claims": [
+                                {"source_section_id": original_path + "/Conclusion", "quote": "Preserve every source quote verbatim."}
+                            ],
+                        }
+                    ],
+                }
+            ),
+            input_tokens=1,
+            output_tokens=1,
+        )
+
+    complete_mock = mocker.patch("mdwiki.llm.session.SessionProvider.complete", side_effect=complete)
+    assert (
+        main(
+            [
+                "--provider",
+                "session",
+                "capture",
+                "add",
+                "--kind",
+                "decision",
+                "--title",
+                "Decision",
+                "--body",
+                "Preserve every source quote verbatim.",
+                "--decided-by",
+                "Ben",
+                "--yes",
+            ]
+        )
+        == 0
+    )
+    assert complete_mock.call_count == 1
+    assert (tmp_path / "wiki" / folder / "2026-11-02-quotes.md").is_file()
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        assert conn.execute("SELECT status FROM sources").fetchone()["status"] == "ingested"
+
+
+@pytest.mark.unit
+def test_capture_add_ingest_failure_preserves_pending_source_and_prints_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mdwiki.ingest import IngestError
+    from mdwiki.state import connect
+
+    init_wiki(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    mocker.patch("mdwiki.ingest.ingest_source", side_effect=IngestError("Provider unavailable"))
+
+    assert (
+        main(["capture", "add", "--kind", "fact", "--title", "Retained fact", "--body", "Keep this source for a later retry.", "--yes"])
+        == 1
+    )
+
+    err = capsys.readouterr().err
+    assert "Provider unavailable" in err
+    assert "mdwiki ingest --pending" in err
+    with connect(tmp_path / ".mdwiki" / "state.db") as conn:
+        source = conn.execute("SELECT id, status, raw_path FROM sources").fetchone()
+    assert source["status"] == "pending"
+    assert (tmp_path / source["raw_path"]).is_file()
+    assert source["id"] in err
+
+
+@pytest.mark.unit
+def test_capture_add_accepts_full_provenance_no_pin_and_inline_export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    init_wiki(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / "rule.md"
+    assert (
+        main(
+            [
+                "capture",
+                "add",
+                "--kind",
+                "standing-rule",
+                "--title",
+                "Rule",
+                "--body",
+                "Preserve every source quote verbatim.",
+                "--decided-by",
+                "Ben",
+                "--date",
+                "2026-11-02",
+                "--session",
+                "active-session",
+                "--context",
+                "A source review",
+                "--rationale",
+                "Keep citations accurate",
+                "--no-pin",
+                "--no-ingest",
+                "--export",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert main(["capture", "list", "--pinned"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+    assert main(["capture", "list"]) == 0
+    metadata = json.loads(capsys.readouterr().out)[0]["capture"]
+    assert metadata["date"] == "2026-11-02"
+    assert metadata["session"] == "active-session"
+    assert metadata["context"] == "A source review"
+    assert metadata["rationale"] == "Keep citations accurate"
+    assert output.read_text().startswith("<!-- mdwiki-capture:")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("command", [["status"], ["lint"], ["lint", "--fix", "--yes"]])
+def test_capture_aware_commands_report_corrupt_sidecar_without_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], command: list[str]
+) -> None:
+    init_wiki(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "raw/.sources.json").write_text("{invalid")
+
+    assert main(command) == 1
+    assert ".sources.json" in capsys.readouterr().err

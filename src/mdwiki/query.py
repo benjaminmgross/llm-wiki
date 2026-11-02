@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from mdwiki.capture_candidates import active_rule_context, append_pinned_candidates
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.embedder import Embedder, get_default_embedder
 from mdwiki.embeddings import deserialize, find_top_k, serialize
@@ -98,6 +99,7 @@ def query_wiki(
         index_text=index_text,
         candidate_pages=candidate_pages,
         schema_text=schema_text,
+        standing_rules_text=active_rule_context(wiki_root=wiki_root),
     )
 
     provider = provider or build_provider_from_config(wiki_root)
@@ -150,7 +152,8 @@ def _find_candidate_pages_for_query(*, wiki_root: Path, query_vec: list[float]) 
     ranked = find_top_k(query_vec, page_vectors, k=QUERY_CANDIDATES_TOP_K, min_similarity=QUERY_MIN_SIMILARITY)
 
     candidates: list[dict[str, str]] = []
-    for path, _score in ranked:
+    paths = append_pinned_candidates(wiki_root=wiki_root, query_vectors=[query_vec], selected_paths=[path for path, _score in ranked])
+    for path in paths:
         full = wiki_root / path
         if full.is_file():
             candidates.append({"path": path, "content": full.read_text()})
@@ -218,5 +221,3 @@ def _now_ts() -> float:
     import time
 
     return time.time()
-
-

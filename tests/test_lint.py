@@ -386,3 +386,126 @@ def test_lint_findings_grouped_by_kind(wiki: Path) -> None:
     report = lint_wiki(wiki)
     assert report.findings_by_kind.get("orphan", 0) >= 2
     assert report.findings_by_kind.get("broken-ref", 0) >= 1
+
+
+@pytest.mark.unit
+def test_lint_reports_capture_missing_raw_and_retired_page_pin(tmp_path: Path) -> None:
+    from mdwiki.capture import CaptureInput, register_capture
+    from mdwiki.capture_effects import retire_capture
+
+    init_wiki(tmp_path)
+    rule = register_capture(
+        wiki_root=tmp_path,
+        capture=CaptureInput(kind="standing-rule", title="Rule", body="Preserve every source quote verbatim.", decided_by="Ben"),
+    )
+    retire_capture(wiki_root=tmp_path, source_id=rule.source_id, reason="A newer rule replaces it.")
+    page = tmp_path / "wiki/concepts/retired.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(f"---\npinned: true\ncapture_id: {rule.source_id}\n---\n# Retired rule\n")
+    (tmp_path / rule.raw_path).unlink()
+
+    findings = lint_wiki(tmp_path).findings
+    assert any(f.kind == "capture-missing-raw" and rule.source_id in f.message for f in findings)
+    assert any(f.kind == "capture-retired-pin" and f.page_path == "wiki/concepts/retired.md" for f in findings)
+
+
+@pytest.mark.unit
+def test_lint_reports_missing_supersession_callout_from_edge_and_recovered_frontmatter(tmp_path: Path) -> None:
+    from mdwiki.capture import CaptureInput, register_capture
+
+    init_wiki(tmp_path)
+    old = tmp_path / "wiki/concepts/old.md"
+    old.parent.mkdir(parents=True)
+    old.write_text("# Old rule\n\nEarlier guidance.\n")
+    rule = register_capture(
+        wiki_root=tmp_path,
+        capture=CaptureInput(
+            kind="standing-rule",
+            title="Rule",
+            body="Preserve every source quote verbatim.",
+            decided_by="Ben",
+            supersedes=("wiki/concepts/old.md",),
+        ),
+    )
+    with connect(tmp_path / ".mdwiki/state.db") as conn:
+        conn.execute(
+            "INSERT INTO supersessions(new_source_id, target, target_type, created_at) VALUES (?, ?, 'page', '2026-11-02')",
+            (rule.source_id, "wiki/concepts/old.md"),
+        )
+    assert any(f.kind == "capture-missing-supersession" and f.page_path == "wiki/concepts/old.md" for f in lint_wiki(tmp_path).findings)
+
+    old.write_text(
+        f"---\nsuperseded_by: [{rule.source_id}]\n---\n# Old rule\n\n> **Superseded (2026-11-02).** Rule.\n<!-- mdwiki-superseded: {rule.source_id} -->\n"
+    )
+    with connect(tmp_path / ".mdwiki/state.db") as conn:
+        conn.execute("DELETE FROM supersessions")
+    assert not any(f.kind == "capture-missing-supersession" for f in lint_wiki(tmp_path).findings)
+    old.write_text(f"---\nsuperseded_by: [{rule.source_id}]\n---\n# Old rule\n")
+    assert any(f.kind == "capture-missing-supersession" and f.page_path == "wiki/concepts/old.md" for f in lint_wiki(tmp_path).findings)
+
+
+@pytest.mark.unit
+def test_lint_only_requires_source_supersession_on_exclusive_pages(tmp_path: Path) -> None:
+    from mdwiki.capture import CaptureInput, register_capture
+
+    (tmp_path / "old.md").write_text("An older source with historical guidance.")
+    (tmp_path / "live.md").write_text("Another live source supports some pages.")
+    init_wiki(tmp_path)
+    with connect(tmp_path / ".mdwiki/state.db") as conn:
+        sources = {row["original_path"]: row["id"] for row in conn.execute("SELECT id, original_path FROM sources")}
+    rule = register_capture(
+        wiki_root=tmp_path,
+        capture=CaptureInput(
+            kind="correction", title="Correction", body="Preserve every source quote verbatim.", supersedes=(sources["old.md"],)
+        ),
+    )
+    for name in ("exclusive", "shared"):
+        page = tmp_path / f"wiki/concepts/{name}.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(f"# {name}\n\nEarlier guidance.\n")
+        with connect(tmp_path / ".mdwiki/state.db") as conn:
+            conn.execute("INSERT INTO pages(path,kind,last_touched_at) VALUES (?, 'concept', 1)", (f"wiki/concepts/{name}.md",))
+            for source_name in ["old.md"] if name == "exclusive" else ["old.md", "live.md"]:
+                conn.execute("INSERT INTO backrefs(page_path,source_id) VALUES (?, ?)", (f"wiki/concepts/{name}.md", sources[source_name]))
+    with connect(tmp_path / ".mdwiki/state.db") as conn:
+        conn.execute(
+            "INSERT INTO supersessions(new_source_id,target,target_type,created_at) VALUES (?, ?, 'source', '2026-11-02')",
+            (rule.source_id, sources["old.md"]),
+        )
+
+    affected = {f.page_path for f in lint_wiki(tmp_path).findings if f.kind == "capture-missing-supersession"}
+    assert affected == {"wiki/concepts/exclusive.md"}
+
+
+@pytest.mark.unit
+def test_lint_does_not_flag_a_page_pinned_by_another_live_capture(tmp_path: Path) -> None:
+    from mdwiki.capture import CaptureInput, register_capture
+    from mdwiki.capture_effects import retire_capture
+
+    init_wiki(tmp_path)
+    old = register_capture(
+        wiki_root=tmp_path,
+        capture=CaptureInput(kind="standing-rule", title="Old", body="Preserve every source quote verbatim.", decided_by="Ben"),
+    )
+    new = register_capture(
+        wiki_root=tmp_path,
+        capture=CaptureInput(kind="standing-rule", title="New", body="Preserve every source quote verbatim.", decided_by="Ben"),
+    )
+    retire_capture(wiki_root=tmp_path, source_id=old.source_id, reason="Replaced")
+    page = tmp_path / "wiki/concepts/shared.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        f"---\npinned: true\ncapture_id: {old.source_id}\ncapture_ids: [{old.source_id}, {new.source_id}]\n---\n# Shared rule\n"
+    )
+
+    assert not any(f.kind == "capture-retired-pin" for f in lint_wiki(tmp_path).findings)
+
+
+@pytest.mark.unit
+def test_lint_without_captures_does_not_parse_unrelated_frontmatter(tmp_path: Path) -> None:
+    init_wiki(tmp_path)
+    page = tmp_path / "wiki/concepts/manual.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntitle: [unclosed\n---\n# Manual page\n\nA manually maintained page.\n")
+
+    assert not any(f.kind.startswith("capture-") for f in lint_wiki(tmp_path).findings)

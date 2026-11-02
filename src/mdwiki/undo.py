@@ -18,7 +18,7 @@ from pathlib import Path
 
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.state import connect
-from mdwiki.transaction import DELETION_MARKER_DIR
+from mdwiki.transaction import DELETION_MARKER_DIR, _acquire_write_lock, _release_write_lock
 
 
 class UndoError(Exception):
@@ -35,6 +35,19 @@ class UndoResult:
 
 
 def undo_last(wiki_root: Path, n: int = 1) -> UndoResult:
+    """Serialize rollback and sidecar publication with other wiki writers."""
+    if n < 1:
+        raise UndoError(f"n must be ≥ 1, got {n}")
+    if not (wiki_root / WIKI_DIR_NAME / "state.db").is_file():
+        raise UndoError(f"No wiki at {wiki_root}/{WIKI_DIR_NAME}/. Run `mdwiki init` first.")
+    lock = _acquire_write_lock(wiki_root)
+    try:
+        return _undo_last_locked(wiki_root=wiki_root, n=n)
+    finally:
+        _release_write_lock(lock)
+
+
+def _undo_last_locked(*, wiki_root: Path, n: int) -> UndoResult:
     """Undo the most recent ``n`` applied transactions.
 
     Parameters
@@ -74,6 +87,9 @@ def undo_last(wiki_root: Path, n: int = 1) -> UndoResult:
             raise
 
     _sync_source_sidecar_from_db(wiki_root=wiki_root)
+    from mdwiki.capture_effects import mirror_capture_state
+
+    mirror_capture_state(wiki_root=wiki_root, lock_held=True)
     _append_undo_markers(wiki_root=wiki_root, tx_ids=undone_ids)
 
     return UndoResult(

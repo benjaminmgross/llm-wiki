@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from mdwiki.capture import load_captures
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.page_kinds import iter_wiki_page_paths
 from mdwiki.state import connect
@@ -44,6 +46,9 @@ class StatusReport:
     events_total: int = 0
     last_lint_ts: float | None = None
     recent_events: tuple[EventRow, ...] = ()
+    captures_by_kind: dict[str, int] = field(default_factory=dict)
+    captures_pinned: int = 0
+    captures_retired: int = 0
 
 
 def get_status(wiki_root: Path, *, recent_event_limit: int = 5) -> StatusReport:
@@ -85,6 +90,7 @@ def get_status(wiki_root: Path, *, recent_event_limit: int = 5) -> StatusReport:
             (recent_event_limit,),
         ).fetchall()
         recent_events = tuple(EventRow(ts=r["ts"], kind=r["kind"], summary=r["summary"]) for r in recent_rows)
+        superseded_ids = {row["target"] for row in conn.execute("SELECT target FROM supersessions WHERE target_type = 'source'")}
 
     disk_pages_total = len(iter_wiki_page_paths(wiki_root))
     drift_warnings = tuple(
@@ -95,6 +101,7 @@ def get_status(wiki_root: Path, *, recent_event_limit: int = 5) -> StatusReport:
         )
     )
 
+    captures = load_captures(wiki_root=wiki_root)
     return StatusReport(
         pending=pending,
         ingested=ingested,
@@ -108,6 +115,11 @@ def get_status(wiki_root: Path, *, recent_event_limit: int = 5) -> StatusReport:
         events_total=events_total,
         last_lint_ts=last_lint_ts,
         recent_events=recent_events,
+        captures_by_kind=dict(Counter(record.capture.kind for record in captures)),
+        captures_pinned=sum(
+            record.capture.pinned and record.capture.retired is None and record.source_id not in superseded_ids for record in captures
+        ),
+        captures_retired=sum(record.capture.retired is not None for record in captures),
     )
 
 
@@ -116,6 +128,10 @@ def format_status(report: StatusReport, *, wiki_root: Path) -> str:
     lines: list[str] = [f"mdwiki at {wiki_root}", ""]
 
     lines.append(f"Sources:    {report.pending} pending, {report.failed} failed, {report.ingested} ingested")
+    capture_kinds = ", ".join(f"{kind}: {count}" for kind, count in sorted(report.captures_by_kind.items())) or "—"
+    lines.append(
+        f"Captures:   {sum(report.captures_by_kind.values())} ({capture_kinds}); {report.captures_pinned} pinned, {report.captures_retired} retired"
+    )
 
     if report.failed_sources:
         lines.append("Failed sources (retried by `mdwiki ingest --pending`):")

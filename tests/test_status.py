@@ -166,3 +166,54 @@ def test_status_report_is_immutable_dataclass() -> None:
     )
     with pytest.raises(Exception):
         report.pending = 99  # type: ignore[misc]
+
+
+@pytest.mark.unit
+def test_status_counts_internal_captures_by_kind_pin_and_retirement(tmp_path: Path) -> None:
+    from mdwiki.capture import CaptureInput, register_capture
+    from mdwiki.capture_effects import retire_capture
+
+    init_wiki(tmp_path)
+    register_capture(wiki_root=tmp_path, capture=CaptureInput(kind="fact", title="Fact", body="A durable fact from the session."))
+    rule = register_capture(
+        wiki_root=tmp_path,
+        capture=CaptureInput(kind="standing-rule", title="Rule", body="Preserve every source quote verbatim.", decided_by="Ben"),
+    )
+    before = get_status(tmp_path)
+    assert before.captures_by_kind == {"fact": 1, "standing-rule": 1}
+    assert before.captures_pinned == 1
+    assert before.captures_retired == 0
+    retire_capture(wiki_root=tmp_path, source_id=rule.source_id, reason="A replacement rule is planned.")
+
+    after = get_status(tmp_path)
+    assert after.captures_by_kind == {"fact": 1, "standing-rule": 1}
+    assert after.captures_pinned == 0
+    assert after.captures_retired == 1
+    formatted = format_status(after, wiki_root=tmp_path)
+    assert "Captures:" in formatted
+    assert "standing-rule: 1" in formatted
+    assert "1 retired" in formatted
+
+
+@pytest.mark.unit
+def test_status_excludes_superseded_capture_from_pinned_count(tmp_path: Path) -> None:
+    from mdwiki.capture import CaptureInput, register_capture
+
+    init_wiki(tmp_path)
+    old = register_capture(
+        wiki_root=tmp_path,
+        capture=CaptureInput(kind="standing-rule", title="Old", body="Preserve every source quote verbatim.", decided_by="Ben"),
+    )
+    new = register_capture(
+        wiki_root=tmp_path,
+        capture=CaptureInput(
+            kind="standing-rule", title="New", body="Preserve every source quote verbatim.", decided_by="Ben", supersedes=(old.source_id,)
+        ),
+    )
+    with connect(tmp_path / ".mdwiki/state.db") as conn:
+        conn.execute(
+            "INSERT INTO supersessions(new_source_id,target,target_type,created_at) VALUES (?, ?, 'source', '2026-11-02')",
+            (new.source_id, old.source_id),
+        )
+
+    assert get_status(tmp_path).captures_pinned == 1

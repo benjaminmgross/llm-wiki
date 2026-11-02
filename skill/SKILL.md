@@ -334,6 +334,27 @@ guide as the authoritative agent protocol. In summary:
    three times. Per-source transactions preserve failure isolation, resume, and
    undo.
 
+### Capture a conclusion without leaving the active session
+
+Use `mdwiki capture add --kind standing-rule --title "Rule" --body "Conclusion"
+--decided-by "Authority" --session "session-id" --no-ingest` to register an internal
+source without calling a provider or writing a working-folder source file. Decisions
+also require `--decided-by`; facts and corrections may omit it.
+
+Take the printed id through `mdwiki session-ingest prepare <id> -o
+.mdwiki/session-plans/<id>.json`, fill only `plan` from the capture's verbatim
+quotes, and apply with `mdwiki session-ingest apply <envelope.json>`. This path uses
+the active session for reasoning and invokes no mdwiki provider or local embedder.
+Generated standing-rule bodies and the index are included in planning context even
+when page embeddings are absent. A rule-policy change invalidates a stale envelope.
+
+Omit `--no-ingest` to use the configured provider automatically, including the
+subscription-backed session CLI. Deterministic pins, supersession, rules/index,
+citations, and source state share the apply transaction and undo boundary.
+Never edit raw captures or `wiki/standing-rules.md`; add a superseding capture or
+use `capture retire <id> --reason "..."`. Optional exports carry a skip marker so
+refresh cannot register them as duplicate sources.
+
 ### With Claude Code Sessions
 
 Add to your CLAUDE.md:

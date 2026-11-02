@@ -44,6 +44,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "candidate_top_k": 8,
         "max_undo_history": 50,
     },
+    "capture": {
+        "pin_min_similarity": 0.20,
+        "pin_max_candidates": 4,
+    },
     "exclude": {
         "globs": [],
     },
@@ -83,6 +87,18 @@ The LLM appends a footnote-style citation block at the bottom of each page secti
 ```
 [^src1]: <quote>... (raw/<hash>-<slug>.md, original: <original_path>)
 ```
+
+## Captured conclusions
+
+Sources labeled `capture://` are explicit conclusions with provenance. Cite their
+verbatim Conclusion section and preserve the recorded authority and date.
+For `standing-rule` and `decision`, create or update one date-prefixed `decision`
+page when that kind is allowed; otherwise use a date-prefixed `concept` page.
+For `fact`, update existing relevant pages, creating new ones only as needed.
+For `correction`, update every page stating the corrected claim and cite the capture.
+These focused captures override the ordinary touch-breadth target below.
+Pinned pages state standing rules and override conflicting historical pages.
+Treat superseded pages as history. Never edit generated `wiki/standing-rules.md`.
 
 ## When to update, create entity pages, or refuse
 
@@ -321,7 +337,9 @@ def vision_provider_for(wiki_root: Path, config: Mapping[str, Any]) -> Provider 
     try:
         return build_provider_from_config(wiki_root)
     except (MissingAPIKeyError, ValueError) as exc:  # missing credentials or invalid provider config
-        print(f"warning: vision loaders are enabled but the provider could not be built ({exc}); continuing without vision.", file=sys.stderr)
+        print(
+            f"warning: vision loaders are enabled but the provider could not be built ({exc}); continuing without vision.", file=sys.stderr
+        )
         return None
 
 
@@ -412,6 +430,9 @@ def _register_sources(
                 # derived; if a loader changes (bug fix, format tweak), the same
                 # source still resolves to the same id.
                 content_bytes = source_path.read_bytes()
+                if content_bytes.splitlines() and re.fullmatch(rb"<!-- mdwiki-capture: [0-9a-f]{12} -->", content_bytes.splitlines()[0]):
+                    skipped += 1
+                    continue
                 content_hash = hashlib.sha256(content_bytes).hexdigest()
                 short_hash = content_hash[:12]
 
@@ -483,7 +504,7 @@ def _register_sources(
     return registered, skipped, dedup_skipped, empty_load_skipped
 
 
-def _write_registration_sidecar(path: Path, sidecar: dict[str, dict[str, str | float]]) -> None:
+def _write_registration_sidecar(path: Path, sidecar: dict[str, dict[str, Any]]) -> None:
     """Publish complete metadata with the repository's temp-and-replace contract."""
     handle = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=f"{path.name}.tmp-", delete=False)
     temporary_path = Path(handle.name)

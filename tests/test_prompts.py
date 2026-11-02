@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
+
+if TYPE_CHECKING:
+    from mdwiki.capture import CaptureKind
 
 from mdwiki.prompts import (
     INGEST_SYSTEM_PROMPT,
@@ -105,9 +110,7 @@ def test_user_prompt_includes_candidate_pages_when_present() -> None:
     prompt = build_ingest_user_prompt(
         source_path="ai/foo.md",
         sections=[{"section_id": "foo.md/Intro", "heading": "Intro", "content": "x"}],
-        candidate_pages=[
-            {"path": "wiki/concepts/attention.md", "content": "## Existing\n\nattention discussion"}
-        ],
+        candidate_pages=[{"path": "wiki/concepts/attention.md", "content": "## Existing\n\nattention discussion"}],
         schema_text="schema",
         recent_log_entries=[],
     )
@@ -150,3 +153,55 @@ def test_user_prompt_handles_empty_sections_list() -> None:
         recent_log_entries=[],
     )
     assert "ai/notes.md" in prompt
+
+
+def test_dynamic_system_prompt_names_profile_kinds() -> None:
+    from mdwiki.prompts import build_ingest_system_prompt
+
+    prompt = build_ingest_system_prompt(allowed_kinds=frozenset({"entity", "concept", "synthesis", "decision"}), use_tool=False)
+    assert '"concept"|"decision"|"entity"|"synthesis"' in prompt
+    tool_prompt = build_ingest_system_prompt(allowed_kinds=frozenset({"concept", "decision"}), use_tool=True)
+    assert "Allowed page kinds: concept, decision." in tool_prompt
+    assert "submit_plan" in tool_prompt
+
+
+def test_ingest_prompt_includes_unembedded_standing_rule_context() -> None:
+    prompt = build_ingest_user_prompt(
+        source_path="capture://2026-11-02/rule",
+        sections=[],
+        candidate_pages=[],
+        schema_text="schema",
+        recent_log_entries=[],
+        standing_rules_text="# Standing rules\n\nNever claim ownership without evidence.",
+    )
+    assert "Never claim ownership without evidence" in prompt
+
+
+@pytest.mark.parametrize("use_tool", [False, True])
+def test_captured_correction_prompt_allows_all_affected_pages(use_tool: bool) -> None:
+    from mdwiki.prompts import build_ingest_system_prompt
+
+    system = build_ingest_system_prompt(allowed_kinds=frozenset({"concept"}), use_tool=use_tool, capture_kind="correction")
+    user = build_ingest_user_prompt(
+        source_path="capture://2026-11-02/correction",
+        sections=[],
+        candidate_pages=[],
+        schema_text="schema",
+        recent_log_entries=[],
+        capture_kind="correction",
+    )
+    assert "at most 1 update" not in system
+    assert "at most 1 update" not in user
+    assert "every affected page" in system
+    assert "every affected page" in user
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"), [("fact", "Update existing relevant pages"), ("decision", "YYYY-MM-DD"), ("standing-rule", "standing rule")]
+)
+def test_capture_system_prompt_supplies_guidance_without_schema(kind: CaptureKind, expected: str) -> None:
+    from mdwiki.prompts import build_ingest_system_prompt
+
+    prompt = build_ingest_system_prompt(allowed_kinds=frozenset({"concept"}), use_tool=False, capture_kind=kind)
+    assert expected in prompt
+    assert "captured conclusion" in prompt

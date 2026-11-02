@@ -78,9 +78,7 @@ def test_skill_guide_defines_safe_native_session_multi_agent_protocol(tmp_path: 
 
 
 @pytest.mark.unit
-def test_skill_emits_initiative_schema_when_initiative_profile_used(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
+def test_skill_emits_initiative_schema_when_initiative_profile_used(tmp_path: Path, monkeypatch, capsys) -> None:
     """When the wiki was init'd with --profile=initiative, skill prints THAT schema."""
     init_wiki(tmp_path, profile="initiative")
     monkeypatch.chdir(tmp_path)
@@ -120,3 +118,17 @@ def test_skill_guide_tells_agents_how_to_run_without_a_paid_api(tmp_path: Path, 
     assert "--provider session" in out
     assert "--session-cli codex" in out
     assert "MDWIKI_PROVIDER" in out
+
+
+def test_skill_explains_capture_from_current_session_without_inference(tmp_path: Path, monkeypatch, capsys) -> None:
+    init_wiki(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["skill"]) == 0
+
+    text = capsys.readouterr().out
+    assert "capture add" in text
+    assert "--no-ingest" in text
+    assert "session-ingest prepare" in text
+    assert "standing-rules.md" in text
+    assert "capture retire" in text

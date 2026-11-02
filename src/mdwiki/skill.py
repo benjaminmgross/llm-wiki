@@ -99,6 +99,33 @@ sub-agents and a corpus has multiple pending sources:
 6. Resume an interrupted run from ``session-ingest pending``. Already-ingested
    sources are absent, while pending or failed sources remain eligible.
 
+## Capture conclusions from the current session
+
+Record an explicit conclusion with ``mdwiki capture add --kind standing-rule
+--title "Rule title" --body "The conclusion, verbatim." --decided-by "Authority"
+--session "session identifier" --no-ingest``. Other kinds are ``decision``,
+``fact``, and ``correction``; decisions also require ``--decided-by``.
+The command prints a source id. Captures live in ``raw/`` and its sidecar,
+so no working-folder source file is needed.
+
+For the current active session, run ``mdwiki session-ingest prepare <id>
+-o .mdwiki/session-plans/<id>.json``, fill only ``plan`` using the source's
+verbatim quotes, then run ``mdwiki session-ingest apply <envelope.json>``.
+Registration and native prepare/apply call no provider or embedder. Without
+``--no-ingest``, capture add uses the configured provider, including
+``--provider session`` for the subscription-backed agent CLI.
+
+Pinning, supersession, generated ``wiki/standing-rules.md``, and the index are
+deterministic and undoable with the source's apply. Standing rules remain
+visible in query, ingest, and native-session context even without embeddings.
+``mdwiki rebuild --pages`` optionally enables cosine retrieval for these pages.
+Never hand-edit capture raw records or the generated rules page. Add another
+capture with ``--supersedes <old-id-or-page>`` to change a conclusion;
+``capture retire <id> --reason "..."`` withdraws it while preserving history.
+Use ``capture list``, ``capture show <id>``, and ``capture export <id> <path>``
+to inspect or export a human-readable copy. Export markers prevent duplicate
+source registration during refresh.
+
 ## Page version chain
 
 When you (or any tool) overwrite a page in ``wiki/``, mdwiki automatically
@@ -135,8 +162,6 @@ def run_skill(wiki_root: Path) -> str:
     """
     schema_path = wiki_root / WIKI_DIR_NAME / "schema.md"
     if not schema_path.is_file():
-        raise WikiNotFoundForSkill(
-            f"No schema at {schema_path}; not a wiki folder. Run `mdwiki init` first."
-        )
+        raise WikiNotFoundForSkill(f"No schema at {schema_path}; not a wiki folder. Run `mdwiki init` first.")
     schema_text = schema_path.read_text()
     return f"{schema_text.rstrip()}\n\n---\n\n{AGENT_GUIDE}"

@@ -19,6 +19,8 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         "embeddings",
         "transactions",
         "transaction_inverses",
+        "supersessions",
+        "capture_state",
         # Phase 5 — Q1 quality compounding.
         "rejections",
         "cost_ledger",
@@ -143,6 +145,21 @@ def init_db(db_path: Path) -> None:
         _apply_inline_migrations(conn)
 
 
+CAPTURE_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS supersessions (
+    new_source_id TEXT NOT NULL,
+    target TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(new_source_id, target)
+);
+CREATE TABLE IF NOT EXISTS capture_state (
+    source_id TEXT PRIMARY KEY,
+    retired_json TEXT
+);
+"""
+
+
 def _apply_inline_migrations(conn) -> None:
     """Add columns that newer code requires but older wikis don't yet have.
 
@@ -155,6 +172,9 @@ def _apply_inline_migrations(conn) -> None:
     ``OperationalError: duplicate column name`` — we swallow exactly that
     case, since it means another connection already applied the migration.
     """
+    for statement in CAPTURE_SCHEMA_SQL.split(";"):
+        if statement.strip():
+            conn.execute(statement)
     source_cols_rows = conn.execute("PRAGMA table_info(sources)").fetchall()
     source_cols = {row[1] for row in source_cols_rows}
     if source_cols_rows and "failure_reason" not in source_cols:
@@ -165,10 +185,8 @@ def _apply_inline_migrations(conn) -> None:
                 raise
 
     inverse_cols_rows = conn.execute("PRAGMA table_info(transaction_inverses)").fetchall()
-    if not inverse_cols_rows:
-        return  # table doesn't exist yet; init_db will create it with the right schema
     inverse_cols = {row[1] for row in inverse_cols_rows}
-    if "params_json" not in inverse_cols:
+    if inverse_cols_rows and "params_json" not in inverse_cols:
         try:
             conn.execute("ALTER TABLE transaction_inverses ADD COLUMN params_json TEXT NOT NULL DEFAULT '[]'")
         except sqlite3.OperationalError as exc:
@@ -220,6 +238,14 @@ def _apply_inline_migrations(conn) -> None:
             )
         finally:
             conn.execute("PRAGMA foreign_keys = ON")
+
+    page_cols = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
+    if page_cols and "pinned" not in page_cols:
+        try:
+            conn.execute("ALTER TABLE pages ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
