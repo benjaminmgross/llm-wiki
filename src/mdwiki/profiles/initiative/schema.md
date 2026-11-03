@@ -38,6 +38,17 @@ Format:
 [^src1]: <quote>... (raw/<hash>-<slug>.md, original: <original_path>)
 ```
 
+## Captured conclusions
+
+Sources labeled `capture://` record explicit conclusions with provenance.
+For `standing-rule` and `decision`, create or update one date-prefixed `decision`
+page. For `fact`, update existing relevant pages, creating new ones only as needed.
+For `correction`, update every page stating the corrected claim and cite the capture.
+Quote the capture's Conclusion section verbatim and preserve its authority/date.
+These focused captures override the ordinary touch-breadth target below.
+Pinned pages state standing rules and override conflicting historical pages;
+superseded pages are history. Never edit generated `wiki/standing-rules.md`.
+
 ## Touch breadth target
 
 **5–15 wiki pages per source ingest** — typically:

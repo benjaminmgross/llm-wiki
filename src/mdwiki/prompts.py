@@ -8,7 +8,10 @@ the primary defense against wiki sprawl.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from mdwiki.capture import CaptureKind
 
 MAX_QUOTE_BANK_LINES: int = 120
 
@@ -130,6 +133,53 @@ INGEST_SYSTEM_PROMPT: str = INGEST_SYSTEM_PROMPT_HEAD + INGEST_SYSTEM_PROMPT_JSO
 INGEST_SYSTEM_PROMPT_TOOL_USE: str = INGEST_SYSTEM_PROMPT_HEAD + INGEST_SYSTEM_PROMPT_TOOL_TAIL
 
 
+def capture_authoring_guidance(*, capture_kind: CaptureKind, allowed_kinds: frozenset[str]) -> str:
+    """Supply capture policy even when a wiki retains its original schema."""
+    common = (
+        "This source is an explicit captured conclusion. Cite its Conclusion section verbatim and preserve its date and authority. "
+        "Pinned pages state standing rules and override conflicting historical pages. Superseded pages are history. "
+        "Never edit the generated wiki/standing-rules.md page. "
+    )
+    if capture_kind in {"standing-rule", "decision"}:
+        page_kind = "decision" if "decision" in allowed_kinds else "concept"
+        folder = "decisions" if page_kind == "decision" else "concepts"
+        return common + (
+            f"Create or update one {page_kind} page for this {'standing rule' if capture_kind == 'standing-rule' else 'decision'}, "
+            f"using the capture date as a filename prefix: wiki/{folder}/YYYY-MM-DD-title.md. "
+            "The ordinary touch-breadth target does not apply."
+        )
+    actions = {
+        "fact": "Update existing relevant pages; create new pages only if necessary.",
+        "correction": "Update every affected page stating the corrected claim and cite this capture; the ordinary page-count cap does not apply.",
+    }
+    return common + actions[capture_kind]
+
+
+def build_ingest_system_prompt(*, allowed_kinds: frozenset[str], use_tool: bool, capture_kind: CaptureKind | None = None) -> str:
+    """Build the output contract from the active wiki's allowed page kinds."""
+    if use_tool:
+        prompt = INGEST_SYSTEM_PROMPT_TOOL_USE
+    else:
+        kinds = "|".join(f'"{kind}"' for kind in sorted(allowed_kinds))
+        prompt = INGEST_SYSTEM_PROMPT_HEAD + INGEST_SYSTEM_PROMPT_JSON_SPEC.replace('"entity"|"concept"|"synthesis"', kinds)
+    if capture_kind == "correction":
+        ordinary_cap = (
+            "When working from a long source, cap yourself at:\n"
+            "- at most 1 update\n"
+            "- at most 2 new_pages\n"
+            "- at most 1 claim per touched page\n"
+            "This cap is mandatory unless the user explicitly asks for exhaustive ingest."
+        )
+        prompt = prompt.replace(
+            ordinary_cap,
+            "This source is a captured correction. Update every affected page stating the corrected claim; "
+            "the ordinary page-count cap does not apply. Keep every quote verified.",
+        )
+    if capture_kind is not None:
+        prompt += "\n\n" + capture_authoring_guidance(capture_kind=capture_kind, allowed_kinds=allowed_kinds)
+    return prompt + "\nAllowed page kinds: " + ", ".join(sorted(allowed_kinds)) + ".\n"
+
+
 def build_ingest_user_prompt(
     *,
     source_path: str,
@@ -137,6 +187,8 @@ def build_ingest_user_prompt(
     candidate_pages: list[dict[str, str]],
     schema_text: str,
     recent_log_entries: list[str],
+    standing_rules_text: str = "",
+    capture_kind: CaptureKind | None = None,
 ) -> str:
     """Assemble the user prompt for one ingest call.
 
@@ -158,6 +210,11 @@ def build_ingest_user_prompt(
     parts.append("# Wiki schema (the conventions you must follow)")
     parts.append(schema_text.strip())
     parts.append("")
+
+    if standing_rules_text.strip():
+        parts.append("# Standing rules (authoritative, including rules without embeddings)")
+        parts.append(standing_rules_text.strip())
+        parts.append("")
 
     parts.append("# Recent log (what has been ingested into this wiki recently)")
     if recent_log_entries:
@@ -194,14 +251,22 @@ def build_ingest_user_prompt(
             parts.append(section["content"].strip())
             parts.append("")
     else:
-        parts.append("(this source has no H2-bounded sections; treat the entire file body as one section with section_id matching the path)")
+        parts.append(
+            "(this source has no H2-bounded sections; treat the entire file body as one section with section_id matching the path)"
+        )
     parts.append("")
 
-    parts.append(
-        "Build the JSON plan now. Keep it small: at most 1 update, at most 2 new_pages, "
-        "and at most 1 claim per touched page. Every quote must be copied from one exact "
-        "source line, table cell, or bullet phrase; do not combine source spans."
-    )
+    if capture_kind == "correction":
+        parts.append(
+            "Build the JSON plan now. Update every affected page stating the corrected claim and cite this capture. "
+            "Every quote must be copied from one exact source span; do not combine source spans."
+        )
+    else:
+        parts.append(
+            "Build the JSON plan now. Keep it small: at most 1 update, at most 2 new_pages, "
+            "and at most 1 claim per touched page. Every quote must be copied from one exact "
+            "source line, table cell, or bullet phrase; do not combine source spans."
+        )
 
     return "\n".join(parts)
 
@@ -244,6 +309,7 @@ Be skeptical and grounded:
 - Push back if the question is malformed or unanswerable from the available pages
 - Prefer concise, structured answers over expansive ones
 - An honest "the wiki doesn't substantively cover this" is a valid answer
+- Pinned pages state standing rules and override conflicting pages; superseded pages are historical.
 
 Format your answer as well-structured markdown:
 - Use level-2 headings to organize multi-part answers
@@ -264,6 +330,7 @@ def build_query_user_prompt(
     index_text: str,
     candidate_pages: list[dict[str, str]],
     schema_text: str,
+    standing_rules_text: str = "",
 ) -> str:
     """Assemble the user prompt for one ``mdwiki query`` call.
 
@@ -290,6 +357,11 @@ def build_query_user_prompt(
     else:
         parts.append("(this wiki has no pages yet)")
     parts.append("")
+
+    if standing_rules_text.strip():
+        parts.append("# Standing rules (authoritative, including rules without embeddings)")
+        parts.append(standing_rules_text.strip())
+        parts.append("")
 
     parts.append("# Candidate pages (top-k by embedding similarity to the question)")
     if candidate_pages:

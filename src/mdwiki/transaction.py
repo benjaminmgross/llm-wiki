@@ -77,6 +77,13 @@ class IngestTransaction:
     def tx_id(self) -> str:
         return self._tx_id
 
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Return the active connection for undo-aware domain operations."""
+        if self._conn is None:
+            raise RuntimeError("Transaction must be entered before accessing its connection.")
+        return self._conn
+
     def __enter__(self) -> Self:
         self._write_lock_conn = _acquire_write_lock(self._wiki_root)
         try:
@@ -133,7 +140,7 @@ class IngestTransaction:
         rel = path.relative_to(self._wiki_root.resolve())
 
         prev_body: str | None = None
-        if path.exists():
+        if path not in self._touched_files and path.exists():
             snapshot_target = self._undo_dir / rel
             snapshot_target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, snapshot_target)
@@ -145,10 +152,16 @@ class IngestTransaction:
                         prev_body = previous_file.read()
                 except OSError:
                     prev_body = None
-        else:
+        elif path not in self._touched_files:
             marker = self._undo_dir / DELETION_MARKER_DIR / rel
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text("")
+
+        if path in self._touched_files and _is_wiki_page(rel):
+            snapshot = self._undo_dir / rel
+            if snapshot.is_file():
+                with snapshot.open(encoding="utf-8", newline="") as snapshot_file:
+                    prev_body = snapshot_file.read()
 
         # Embed previous_hash for wiki/ pages. New pages get a "genesis"
         # marker (no previous_hash key) — a missing key is itself meaningful
@@ -174,7 +187,8 @@ class IngestTransaction:
                 except OSError:
                     pass
             raise
-        self._touched_files.append(path)
+        if path not in self._touched_files:
+            self._touched_files.append(path)
         return content
 
     def add_inverse(self, sql: str, params: tuple[object, ...]) -> None:
@@ -346,7 +360,7 @@ def _is_wiki_page(rel: Path) -> bool:
     if rel.suffix.lower() != ".md":
         return False
     name = rel.name.lower()
-    if name in {"log.md", "index.md"}:
+    if name in {"log.md", "index.md", "standing-rules.md"}:
         return False
     return True
 

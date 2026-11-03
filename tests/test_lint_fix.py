@@ -274,8 +274,13 @@ def test_lint_fix_returns_zero_when_no_findings(tmp_path: Path) -> None:
 @pytest.mark.parametrize("kind", ["timeout", "failed"])
 @pytest.mark.parametrize("bound,success_at,expected_calls,expected_failed", [(2, None, 2, 2), (2, 1, 4, 3), (None, None, 7, 7)])
 def test_session_failures_share_the_lint_circuit_breaker(
-    tmp_path: Path, mocker: MockerFixture, kind: SessionErrorKind,
-    bound: int | None, success_at: int | None, expected_calls: int, expected_failed: int
+    tmp_path: Path,
+    mocker: MockerFixture,
+    kind: SessionErrorKind,
+    bound: int | None,
+    success_at: int | None,
+    expected_calls: int,
+    expected_failed: int,
 ) -> None:
     findings = [LintFinding(kind="stale", page_path=f"wiki/concepts/{index}.md", message="stale", severity="warning") for index in range(7)]
     mocker.patch("mdwiki.lint_fix.lint_wiki").return_value.findings = findings
@@ -305,3 +310,38 @@ def test_systemic_session_failure_stops_lint_immediately(tmp_path: Path, mocker:
 
     assert excinfo.value is error
     dispatch.assert_called_once()
+
+
+@pytest.mark.unit
+def test_lint_fix_resolves_internal_capture_coverage_gap_by_source_id(tmp_path: Path, mocker: MockerFixture) -> None:
+    from mdwiki.capture import CaptureInput, register_capture
+    from mdwiki.ingest import IngestResult
+
+    init_wiki(tmp_path)
+    capture = register_capture(wiki_root=tmp_path, capture=CaptureInput(kind="fact", title="Fact", body="A durable fact from the session."))
+    with connect(tmp_path / ".mdwiki/state.db") as conn:
+        conn.execute("UPDATE sources SET status = 'ingested' WHERE id = ?", (capture.source_id,))
+    reingest = mocker.patch(
+        "mdwiki.lint_fix.ingest_source", return_value=IngestResult(source_id=capture.source_id, applied=True, message="ok")
+    )
+
+    result = lint_fix(tmp_path, mode="full", yes=True)
+
+    assert result.fixed_count == 1
+    reingest.assert_called_once_with(tmp_path, capture.source_id, yes=True, force=True)
+
+
+@pytest.mark.unit
+def test_lint_fix_default_skips_capture_missing_raw_without_provider_calls(tmp_path: Path, mocker: MockerFixture) -> None:
+    from mdwiki.capture import CaptureInput, register_capture
+
+    init_wiki(tmp_path)
+    capture = register_capture(wiki_root=tmp_path, capture=CaptureInput(kind="fact", title="Fact", body="A durable fact from the session."))
+    (tmp_path / capture.raw_path).unlink()
+    reingest = mocker.patch("mdwiki.lint_fix.ingest_source", side_effect=AssertionError("no provider"))
+
+    result = lint_fix(tmp_path, mode="default", yes=True)
+
+    assert result.fixed_count == 0
+    assert result.skipped_count == 1
+    reingest.assert_not_called()

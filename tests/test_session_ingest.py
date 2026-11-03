@@ -328,6 +328,77 @@ def test_same_source_envelope_cannot_be_applied_twice(session_wiki: Path) -> Non
         apply_session_plan(session_wiki, payload)
 
 
+def test_session_envelope_includes_rules_and_allowed_kinds_without_inference(session_wiki: Path, mocker: MockerFixture) -> None:
+    mocker.patch("mdwiki.ingest.get_default_embedder", side_effect=AssertionError("no embedding inference"))
+    mocker.patch("mdwiki.ingest.build_provider_from_config", side_effect=AssertionError("no provider"))
+    (session_wiki / "wiki/index.md").write_text("# Wiki Index\n\n## Standing rules\nRule link.")
+    (session_wiki / "wiki/standing-rules.md").write_text("# Standing rules\n\nNo unsupported ownership claims.")
+
+    envelope = prepare_session_plan(session_wiki, "a.md").to_dict()
+
+    context = envelope["wiki"]
+    snapshot = envelope["snapshot"]
+    assert isinstance(context, dict)
+    assert isinstance(snapshot, dict)
+    assert "Standing rules" in context["index"]
+    assert "No unsupported ownership claims" in context["standing_rules"]
+    assert context["allowed_kinds"] == ["concept", "entity", "synthesis"]
+    assert "wiki/standing-rules.md" not in snapshot["pages"]
+
+
+def test_session_apply_invalidates_if_standing_rules_changed(session_wiki: Path) -> None:
+    rules = session_wiki / "wiki/standing-rules.md"
+    rules.write_text("# Standing rules\n\nOriginal rule.")
+    envelope = prepare_session_plan(session_wiki, "a.md").to_dict()
+    rules.write_text("# Standing rules\n\nRetired the original rule.")
+    payload = _with_plan(
+        envelope,
+        {
+            "verdict": "low-quality",
+            "rationale": "No new evidence.",
+            "updates": [],
+            "new_pages": [],
+            "cross_refs": [],
+        },
+    )
+
+    with pytest.raises(PlanInvalidatedError, match="Standing rules changed"):
+        apply_session_plan(session_wiki, payload)
+
+
+def test_native_session_manifest_and_prepare_exclude_retired_captures(session_wiki: Path) -> None:
+    from mdwiki.capture import CaptureInput, register_capture
+    from mdwiki.capture_effects import retire_capture
+    from mdwiki.session_ingest import SessionPlanError
+
+    record = register_capture(
+        wiki_root=session_wiki, capture=CaptureInput(kind="fact", title="Old fact", body="The old fact was once considered true.")
+    )
+    retire_capture(wiki_root=session_wiki, source_id=record.source_id, reason="Withdrawn")
+    assert record.source_id not in {source.source_id for source in list_session_sources(session_wiki)}
+    with pytest.raises(SessionPlanError, match="retired"):
+        prepare_session_plan(session_wiki, record.source_id)
+
+
+@pytest.mark.parametrize(("profile", "folder"), [("working-dir", "concepts"), ("initiative", "decisions")])
+def test_capture_envelope_guides_old_schema_with_profile_fallback(tmp_path: Path, profile: str, folder: str) -> None:
+    from mdwiki.capture import CaptureInput, register_capture
+
+    init_wiki(tmp_path, profile=profile)
+    (tmp_path / ".mdwiki/schema.md").write_text("# Legacy wiki schema\n")
+    record = register_capture(
+        wiki_root=tmp_path,
+        capture=CaptureInput(kind="decision", title="Decision", body="The team agreed to retain this evidence.", decided_by="Owner"),
+    )
+
+    envelope = prepare_session_plan(tmp_path, record.source_id).to_dict()
+
+    instructions = envelope["agent_instructions"]
+    assert isinstance(instructions, str)
+    assert f"wiki/{folder}/YYYY-MM-DD" in instructions
+    assert "captured conclusion" in instructions
+
+
 @pytest.mark.unit
 def test_session_cross_ref_materializes_link_visible_to_lint(session_wiki: Path) -> None:
     target = session_wiki / "wiki" / "concepts" / "target.md"

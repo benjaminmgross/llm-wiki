@@ -283,3 +283,34 @@ def test_successful_tx_clears_prior_failure_reason_in_db_and_sidecar(wiki: Path)
     assert row["failure_reason"] is None
     assert mirrored["status"] == "ingested"
     assert mirrored["failure_reason"] is None
+
+
+@pytest.mark.parametrize("existing", [True, False])
+def test_multiple_writes_preserve_first_snapshot_for_undo(wiki: Path, existing: bool) -> None:
+    from mdwiki.undo import undo_last
+
+    page = wiki / "wiki" / "concepts" / "twice.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    if existing:
+        page.write_text("# Original\n\nBefore transaction.\n")
+    with IngestTransaction(wiki_root=wiki, source_id=None, summary="two writes") as tx:
+        tx.write_file(page, "# Intermediate\n")
+        tx.write_file(page, "# Final\n")
+    undo_last(wiki)
+    if existing:
+        assert page.read_text() == "# Original\n\nBefore transaction.\n"
+    else:
+        assert not page.exists()
+
+
+def test_repeated_write_chain_hash_preserves_original_crlf_bytes(wiki: Path) -> None:
+    from mdwiki.version_chain import compute_body_hash, extract_previous_hash
+
+    page = wiki / "wiki/concepts/windows.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    original = "# Original\r\n\r\nWindows line endings.\r\n"
+    page.write_bytes(original.encode())
+    with IngestTransaction(wiki_root=wiki, source_id=None, summary="two writes") as tx:
+        tx.write_file(page, "# Intermediate\n")
+        tx.write_file(page, "# Final\n")
+    assert extract_previous_hash(page.read_text()) == compute_body_hash(original)

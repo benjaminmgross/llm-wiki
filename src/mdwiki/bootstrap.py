@@ -12,18 +12,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from mdwiki.capture import capture_kind_for_source
+from mdwiki.capture_candidates import active_rule_context
 from mdwiki.chunker import MarkdownChunker
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.embedder import Embedder, get_default_embedder
-from mdwiki.embeddings import serialize
-from mdwiki.index import build_index
 from mdwiki.ingest import (
     IngestError,
-    _apply_pages_and_backrefs,
     _chunk_or_whole,
     _find_candidate_pages,
     _recent_log_entries,
     _reject_existing_new_page_paths,
+    apply_ingest_plan,
     ingest_many,
 )
 from mdwiki.ingest_tool import INGEST_TOOL_CHOICE, INGEST_TOOL_DEFINITION
@@ -35,11 +35,10 @@ from mdwiki.llm.base import (
     Provider,
 )
 from mdwiki.plan import PlanValidationError, allowed_kinds_for_wiki, parse_plan, parse_plan_dict
-from mdwiki.prompts import INGEST_SYSTEM_PROMPT, INGEST_SYSTEM_PROMPT_TOOL_USE, build_ingest_user_prompt
+from mdwiki.prompts import build_ingest_system_prompt, build_ingest_user_prompt
 from mdwiki.quote import min_quote_words_for_wiki, quote_normalize_mode_for_wiki, verify_plan
 from mdwiki.source_state import mark_source_failed
 from mdwiki.state import connect
-from mdwiki.transaction import IngestTransaction
 
 
 @dataclass(frozen=True)
@@ -123,10 +122,9 @@ def bootstrap_batch(
     on_status, on_progress : callable
         Progress callbacks for the CLI to surface polling + per-source application.
     """
+    pending = _load_pending(wiki_root)
     provider = provider or build_provider_from_config(wiki_root)
     embedder = embedder or get_default_embedder()
-
-    pending = _load_pending(wiki_root)
     if not pending:
         return BootstrapResult(
             submitted=0,
@@ -334,8 +332,7 @@ def _load_pending(wiki_root: Path) -> list[dict[str, Any]]:
     db_path = wiki_root / WIKI_DIR_NAME / "state.db"
     with connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT id, original_path, raw_path, status FROM sources "
-            "WHERE status IN ('pending', 'failed') ORDER BY original_path"
+            "SELECT id, original_path, raw_path, status FROM sources WHERE status IN ('pending', 'failed') ORDER BY original_path"
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -353,6 +350,7 @@ def _prepare_request(
     ingest ``tool_use`` schema so each batch entry returns a structurally
     valid plan in ``BatchResult.tool_input``.
     """
+    capture_kind = capture_kind_for_source(wiki_root=wiki_root, source_id=source_row["id"])
     raw_path = wiki_root / source_row["raw_path"]
     chunker = MarkdownChunker(min_section_words=1)
     sections = _chunk_or_whole(raw_path, source_path=source_row["original_path"], chunker=chunker)
@@ -370,10 +368,12 @@ def _prepare_request(
         candidate_pages=candidate_pages,
         schema_text=schema_text,
         recent_log_entries=recent_log,
+        standing_rules_text=active_rule_context(wiki_root=wiki_root),
+        capture_kind=capture_kind,
     )
     request = BatchRequest(
         custom_id=source_row["id"],
-        system=INGEST_SYSTEM_PROMPT_TOOL_USE if use_tool else INGEST_SYSTEM_PROMPT,
+        system=build_ingest_system_prompt(allowed_kinds=allowed_kinds_for_wiki(wiki_root), use_tool=use_tool, capture_kind=capture_kind),
         messages=[Message(role="user", content=user_prompt)],
         max_tokens=16000,
         tools=[INGEST_TOOL_DEFINITION] if use_tool else None,
@@ -423,29 +423,8 @@ def _apply_one_result(
         return "failed", f"quote verification failed: {details}"
 
     source_row = context.source_row
-    if plan.is_empty():
-        with IngestTransaction(
-            wiki_root=wiki_root,
-            source_id=source_row["id"],
-            summary=f"{plan.verdict}: {source_row['original_path']} — {plan.rationale}",
-        ):
-            pass
-        return "skipped", ""
-
-    summary = f"ingest {source_row['original_path']} → {len(plan.updates)} update(s), {len(plan.new_pages)} new page(s) [batch]"
-    with IngestTransaction(wiki_root=wiki_root, source_id=source_row["id"], summary=summary) as tx:
-        page_embeddings: dict[str, bytes] = {}
-        for new_page in plan.new_pages:
-            tx.write_file(wiki_root / new_page.path, new_page.content)
-            page_embeddings[new_page.path] = serialize(embedder.embed_text(new_page.content))
-        for update in plan.updates:
-            full_target = wiki_root / update.page
-            tx.write_file(full_target, update.content)
-            page_embeddings[update.page] = serialize(embedder.embed_text(update.content))
-        _apply_pages_and_backrefs(tx=tx, plan=plan, embeddings=page_embeddings, source_id=source_row["id"])
-        tx.write_file(wiki_root / "wiki" / "index.md", build_index(wiki_root))
-
-    return "applied", ""
+    apply_ingest_plan(wiki_root, source_id=source_row["id"], original_path=source_row["original_path"], plan=plan, embedder=embedder)
+    return ("skipped" if plan.is_empty() else "applied"), ""
 
 
 def _terminal_confirm_estimate(estimate: BatchCostEstimate) -> bool:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import PurePosixPath
 
-INFRASTRUCTURE_PAGE_PATHS: frozenset[str] = frozenset({"wiki/index.md", "wiki/log.md"})
+INFRASTRUCTURE_PAGE_PATHS: frozenset[str] = frozenset({"wiki/index.md", "wiki/log.md", "wiki/standing-rules.md"})
 
 
 def is_semantic_page_path(path: str | PurePosixPath) -> bool:

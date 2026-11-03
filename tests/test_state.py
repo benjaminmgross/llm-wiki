@@ -235,3 +235,13 @@ def test_connect_migrates_legacy_sources_with_failure_reason_column(tmp_path: Pa
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(sources)")}
 
     assert "failure_reason" in columns
+
+
+def test_capture_schema_and_pin_migration(tmp_path: Path) -> None:
+    path = tmp_path / "state.db"
+    init_db(path)
+    with connect(path) as conn:
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(pages)")}
+        assert "pinned" in cols
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'supersessions'").fetchone()
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'capture_state'").fetchone()

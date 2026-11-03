@@ -255,6 +255,73 @@ flowchart LR
 - `IngestTransaction` reserves `.mdwiki/write.lock` before any file operation and holds it through DB commit, source-sidecar mirroring, and log append. This protects shared files even though SQLite WAL alone only serializes database writers.
 - Plan validation rejects duplicate or colliding write targets before apply, so one transaction snapshots each page at most once. Every successful source retains its existing transaction, inverse SQL, file snapshot, event, source state, resume, and undo semantics.
 
+## Captured conclusions
+
+`mdwiki capture add` registers an explicit `standing-rule`, `decision`, `fact`,
+or `correction` as an internal immutable source. Deterministic Markdown contains
+the verbatim conclusion and quotable provenance sections, including authority,
+date, session, rationale, capture timestamp, and unique UUID. Its byte hash forms
+the source id; `capture://<date>/<slug>-<id>` labels its origin. Source bytes live
+only in `raw/<id>-<slug>.md`; `raw/.sources.json` preserves capture metadata and
+lifecycle state for rebuild. Registration holds the wiki-wide write lock and
+requires no provider or embedding inference.
+
+The two ingest paths share deterministic apply behavior:
+
+```mermaid
+flowchart LR
+    C[capture add] --> R[Locked internal source registration]
+    R --> P[Configured provider ingest]
+    R -->|--no-ingest| N[Native session prepare / fill plan / apply]
+    P --> T[Per-source transaction]
+    N --> T
+    T --> E[Page edits, citations, pins, supersession, rules, index]
+```
+
+For native operation, `capture add --no-ingest` prints the id used by the
+existing `session-ingest prepare` and `session-ingest apply` commands. The active
+session fills only `plan`; mdwiki performs no provider, model endpoint, or local
+embedding calls. Automatic capture ingest uses the configured provider and also
+supports the subscription-backed session CLI. A failed ingest leaves the source
+registered for retry. Captures use normal quote verification and allowed page
+kinds: standing rules/decisions use a dated decision page where supported and a
+dated concept page otherwise.
+Capture-specific authoring guidance is supplied by both provider prompts and
+native envelopes, so existing wikis also work with schemas created before capture
+support. Captured corrections override the ordinary page-count cap and must
+update every affected page. Retired captures are excluded from pending queues
+and rejected by direct native preparation. A pinned capture without a cited page
+cannot complete an empty plan; it stays pending for a revised plan.
+
+Apply derives pins and supersession deterministically, sharing the source's
+transaction and undo boundary. Pinned active captures generate
+`wiki/standing-rules.md` and a leading index section. The generated rules page is
+infrastructure, excluded from LLM-maintained semantic pages. Replacing a capture
+requires a new one with `--supersedes`; retiring one records a date/reason and
+removes its current pin while retaining raw records and historical pages.
+Page supersession inserts an idempotent callout beneath H1. Source supersession
+marks only pages with no other live supporting source; mixed-source pages are
+reported for review. Supersession edges are derived in SQLite and retained in
+the sidecar for recovery.
+
+Native page rows may retain NULL embeddings. Full standing-rule bodies and the
+index are included in session envelopes, and full rule bodies are supplied to
+provider ingest/query independently of cosine ranking. Prepared envelopes include
+allowed page kinds and a standing-rule body hash; changes to rule policy invalidate
+an old plan under the write lock, requiring fresh preparation. This hash excludes
+version-chain frontmatter so metadata churn does not invalidate disjoint work.
+Older envelopes missing this field must be prepared again.
+For embedded pages, both query and ingest append relevant pins after normal
+candidates using `[capture].pin_min_similarity` (default 0.20) and
+`pin_max_candidates` (default 4). `rebuild --pages` restores pin metadata from
+frontmatter while optionally supplying embeddings for cosine retrieval.
+
+Optional `capture export` writes the raw rendering preceded by an
+`mdwiki-capture` HTML marker. Refresh skips files carrying this first-line marker,
+preventing duplicate sources. `capture show` detects missing or changed exports.
+Status summarizes capture kinds/pins/retirements; lint checks missing raw capture
+files, missing supersession callouts, and pins tied to retired captures.
+
 ## The LLM call
 
 ### Provider

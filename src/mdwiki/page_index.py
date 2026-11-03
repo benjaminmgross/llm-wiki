@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from mdwiki.capture_effects import page_metadata
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.embedder import Embedder, get_default_embedder
 from mdwiki.embeddings import serialize
@@ -40,7 +41,7 @@ def rebuild_page_index(
     allowed_kinds = allowed_kinds_for_wiki(wiki_root)
     db_path = wiki_root / WIKI_DIR_NAME / "state.db"
 
-    discovered: dict[str, tuple[str, bytes]] = {}
+    discovered: dict[str, tuple[str, bytes, int]] = {}
     skipped = 0
     embedded = 0
     for page_path in iter_wiki_page_paths(wiki_root):
@@ -50,7 +51,7 @@ def rebuild_page_index(
             skipped += 1
             continue
         content = page_path.read_text()
-        discovered[rel] = (kind, serialize(embedder.embed_text(content)))
+        discovered[rel] = (kind, serialize(embedder.embed_text(content)), int(page_metadata(content=content).get("pinned") is True))
         embedded += 1
 
     now = time.time()
@@ -59,18 +60,18 @@ def rebuild_page_index(
     pruned = 0
     with connect(db_path) as conn:
         existing_paths = {row["path"] for row in conn.execute("SELECT path FROM pages").fetchall()}
-        for rel, (kind, embedding) in discovered.items():
+        for rel, (kind, embedding, pinned) in discovered.items():
             if rel in existing_paths:
                 updated += 1
             else:
                 added += 1
             conn.execute(
-                "INSERT INTO pages (path, kind, embedding, last_touched_at) VALUES (?, ?, ?, ?) "
+                "INSERT INTO pages (path, kind, embedding, last_touched_at, pinned) VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(path) DO UPDATE SET "
                 "kind = excluded.kind, "
                 "embedding = excluded.embedding, "
-                "last_touched_at = excluded.last_touched_at",
-                (rel, kind, embedding, now),
+                "last_touched_at = excluded.last_touched_at, pinned = excluded.pinned",
+                (rel, kind, embedding, now, pinned),
             )
 
         if prune_missing:

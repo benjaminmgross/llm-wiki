@@ -254,6 +254,8 @@ def _validate_page_path(path: str, *, field: str) -> None:
     # past the split-on-/ check below ("wiki/\x00../etc/passwd" splits to
     # ["wiki", "\x00..", "etc", "passwd"] — no ".." segment). Reject any
     # control byte up front; legitimate page paths never contain them.
+    if path in INFRASTRUCTURE_PAGE_PATHS:
+        raise PlanValidationError(f"{field}={path!r} is a generated infrastructure page.")
     if any(ch < " " for ch in path):
         raise PlanValidationError(f"{field}={path!r} contains a control character; page paths must be plain ASCII/UTF-8 text.")
     if not path.startswith(_REQUIRED_PAGE_PREFIX):

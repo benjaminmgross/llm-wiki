@@ -10,9 +10,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import asdict
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
@@ -110,6 +113,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             # Safety net for handlers with no API-error guard of their own
             # (e.g. ``lint --fix=full``, which re-ingests through the provider).
             print(_fatal_api_error_message(exc), file=sys.stderr)
+            return 1
+        except SidecarCorruptError as exc:
+            print(f"error: {exc}", file=sys.stderr)
             return 1
     return exit_code
 
@@ -290,6 +296,49 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     session_apply_p.add_argument("envelope", type=Path, help="JSON envelope whose plan field was filled by a session sub-agent.")
     session_apply_p.set_defaults(_handler=_cmd_session_ingest)
+
+    capture_p = subparsers.add_parser("capture", help="Record session conclusions as immutable internal sources.")
+    capture_actions = capture_p.add_subparsers(dest="capture_action", required=True, metavar="<action>")
+    capture_add_p = capture_actions.add_parser("add", help="Register and optionally ingest a captured conclusion.")
+    capture_add_p.add_argument("--kind", required=True, choices=("standing-rule", "decision", "fact", "correction"))
+    capture_add_p.add_argument("--title", required=True)
+    capture_body = capture_add_p.add_mutually_exclusive_group()
+    capture_body.add_argument("--body", help="Conclusion text, or - to read stdin.")
+    capture_body.add_argument("--body-file", type=Path, help="Read conclusion text from this file.")
+    capture_add_p.add_argument("stdin_body", nargs="?", choices=("-",), help="Read conclusion text from stdin.")
+    capture_add_p.add_argument("--decided-by", default="", help="Authority responsible; required for standing rules and decisions.")
+    capture_add_p.add_argument("--date", default=None, help="Decision date (YYYY-MM-DD; defaults to today).")
+    capture_add_p.add_argument("--session", default="", help="Session id or transcript path recorded as provenance.")
+    capture_add_p.add_argument("--context", default="")
+    capture_add_p.add_argument("--rationale", default="")
+    capture_add_p.add_argument(
+        "--supersedes", action="append", default=[], metavar="TARGET", help="Page path or source id/prefix; repeatable."
+    )
+    capture_add_p.add_argument(
+        "--pin", action=argparse.BooleanOptionalAction, default=None, help="Pin this capture; standing rules default to pinned."
+    )
+    capture_add_p.add_argument("--export", type=Path, dest="export_path", help="Also write an optional human-readable copy.")
+    capture_add_p.add_argument(
+        "--no-ingest", action="store_true", help="Register only; then use ingest --pending or native session-ingest prepare/apply."
+    )
+    capture_add_p.add_argument("--yes", "-y", action="store_true", help="Apply the provider-produced ingest plan without confirmation.")
+    capture_add_p.set_defaults(_handler=_cmd_capture)
+    capture_list_p = capture_actions.add_parser("list", help="List capture metadata as JSON.")
+    capture_list_p.add_argument("--kind", choices=("standing-rule", "decision", "fact", "correction"))
+    capture_list_p.add_argument("--pinned", action="store_true")
+    capture_list_p.add_argument("--include-retired", action="store_true")
+    capture_list_p.set_defaults(_handler=_cmd_capture)
+    capture_show_p = capture_actions.add_parser("show", help="Show a capture and its export state as JSON.")
+    capture_show_p.add_argument("source_id", help="Capture source id or unique prefix.")
+    capture_show_p.set_defaults(_handler=_cmd_capture)
+    capture_retire_p = capture_actions.add_parser("retire", help="Retire a capture while preserving its history.")
+    capture_retire_p.add_argument("source_id", help="Capture source id or unique prefix.")
+    capture_retire_p.add_argument("--reason", required=True)
+    capture_retire_p.set_defaults(_handler=_cmd_capture)
+    capture_export_p = capture_actions.add_parser("export", help="Write a marked human-readable copy of a capture.")
+    capture_export_p.add_argument("source_id", help="Capture source id or unique prefix.")
+    capture_export_p.add_argument("path", type=Path)
+    capture_export_p.set_defaults(_handler=_cmd_capture)
 
     query_p = subparsers.add_parser("query", help="Ask a question; get a cited answer drawn from existing wiki pages.")
     query_p.add_argument("question", help="The natural-language question to answer.")
@@ -630,7 +679,7 @@ def _cmd_session_ingest(args: argparse.Namespace) -> int:
     if args.session_action == "prepare":
         try:
             encoded = prepare_session_plan(wiki_root, args.source).to_json()
-        except (IngestError, OSError, UnicodeError) as exc:
+        except (IngestError, OSError, UnicodeError, SessionPlanError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         if args.output is None:
@@ -656,6 +705,82 @@ def _cmd_session_ingest(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(result.message)
+    return 0
+
+
+def _cmd_capture(args: argparse.Namespace) -> int:
+    """Map capture CLI arguments to deterministic domain operations."""
+    from mdwiki.capture import CaptureInput, capture_export_state, export_capture, get_capture, load_captures
+    from mdwiki.capture_commands import add_capture
+
+    if args.capture_action == "add":
+        body_inputs = (args.body is not None, args.body_file is not None, args.stdin_body is not None)
+        if sum(body_inputs) != 1:
+            print("error: provide exactly one of --body TEXT, --body-file PATH, or - for stdin.", file=sys.stderr)
+            return 2
+    try:
+        wiki_root = find_wiki()
+        if args.capture_action == "add":
+            if args.body_file is not None:
+                body = args.body_file.read_text()
+            elif args.body == "-" or args.stdin_body == "-":
+                body = sys.stdin.read()
+            else:
+                body = args.body
+            result = add_capture(
+                wiki_root=wiki_root,
+                capture=CaptureInput(
+                    kind=args.kind,
+                    title=args.title,
+                    body=body,
+                    decided_by=args.decided_by,
+                    date=args.date or date.today().isoformat(),
+                    session=args.session,
+                    context=args.context,
+                    rationale=args.rationale,
+                    supersedes=tuple(args.supersedes),
+                    pinned=args.pin,
+                ),
+                no_ingest=args.no_ingest,
+                export_path=args.export_path,
+                yes=args.yes,
+            )
+            print(f"Captured {result.record.source_id}: {result.record.original_path}")
+            if result.ingest_result is not None:
+                print(result.ingest_result.message)
+            else:
+                print(
+                    f"Pending. Run `mdwiki ingest {result.record.source_id}` or `mdwiki session-ingest prepare {result.record.source_id}`."
+                )
+        elif args.capture_action == "list":
+            records = [
+                asdict(record)
+                for record in load_captures(wiki_root=wiki_root)
+                if (args.kind is None or record.capture.kind == args.kind)
+                and (not args.pinned or record.capture.pinned)
+                and (args.include_retired or record.capture.retired is None)
+            ]
+            print(json.dumps(records, indent=2, sort_keys=True))
+        elif args.capture_action == "show":
+            record = get_capture(wiki_root=wiki_root, source_id=args.source_id)
+            print(
+                json.dumps(
+                    {**asdict(record), "export_state": capture_export_state(wiki_root=wiki_root, record=record)}, indent=2, sort_keys=True
+                )
+            )
+        elif args.capture_action == "retire":
+            from mdwiki.capture_effects import retire_capture
+
+            print(retire_capture(wiki_root=wiki_root, source_id=args.source_id, reason=args.reason))
+        else:
+            export_capture(wiki_root=wiki_root, source_id=args.source_id, path=args.path)
+            print(f"Exported {args.source_id} to {args.path}")
+    except _FATAL_API_ERRORS as exc:
+        print(_fatal_api_error_message(exc), file=sys.stderr)
+        return 1
+    except (WikiNotFound, SidecarCorruptError, IngestError, MissingAPIKeyError, OSError, UnicodeError, ValueError, sqlite3.Error) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

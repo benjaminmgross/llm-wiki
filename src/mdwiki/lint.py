@@ -13,11 +13,14 @@ remediation) are deferred to v1.1.
 
 from __future__ import annotations
 
+import re
 import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from mdwiki.capture import load_captures
+from mdwiki.capture_effects import page_metadata
 from mdwiki.cross_refs import resolve_page_link_target
 from mdwiki.discover import WIKI_DIR_NAME
 from mdwiki.markdown import markdown_inline_links, markdown_links
@@ -72,6 +75,7 @@ def lint_wiki(wiki_root: Path) -> LintReport:
     findings.extend(_check_stale_pages(wiki_root))
     findings.extend(_check_coverage_gaps(wiki_root))
     findings.extend(_check_unverified_quotes(wiki_root))
+    findings.extend(_check_captures(wiki_root))
 
     _record_lint_event(wiki_root, findings_count=len(findings))
 
@@ -294,3 +298,77 @@ def _record_lint_event(wiki_root: Path, *, findings_count: int) -> None:
             (time.time(), "lint", summary),
         )
         conn.commit()
+
+
+def _check_captures(wiki_root: Path) -> list[LintFinding]:
+    """Check durable capture sources and their deterministic page projections."""
+    records = load_captures(wiki_root=wiki_root)
+    if not records:
+        return []
+    findings: list[LintFinding] = [
+        LintFinding(
+            kind="capture-missing-raw",
+            page_path=record.original_path,
+            message=f"capture {record.source_id} raw source is missing: {record.raw_path}",
+            severity="warn",
+        )
+        for record in records
+        if not (wiki_root / record.raw_path).is_file()
+    ]
+    retired = {record.source_id for record in records if record.capture.retired is not None}
+    contents: dict[str, str] = {}
+    expected: dict[str, set[str]] = {}
+    page_owners: dict[str, set[str]] = {}
+    for page in _iter_wiki_pages(wiki_root):
+        path = page.relative_to(wiki_root).as_posix()
+        content = page.read_text()
+        contents[path] = content
+        metadata = page_metadata(content=content)
+        capture_ids = metadata.get("capture_ids", [])
+        owners = {item for item in capture_ids if isinstance(item, str)} if isinstance(capture_ids, list) else set()
+        capture_id = metadata.get("capture_id")
+        if isinstance(capture_id, str):
+            owners.add(capture_id)
+        page_owners[path] = owners
+        if metadata.get("pinned") is True and owners and owners <= retired:
+            findings.append(
+                LintFinding(
+                    kind="capture-retired-pin", page_path=path, message="pinned page belongs only to retired captures", severity="warn"
+                )
+            )
+        superseded_by = metadata.get("superseded_by", [])
+        if isinstance(superseded_by, list):
+            expected.setdefault(path, set()).update(item for item in superseded_by if isinstance(item, str))
+    with connect(wiki_root / WIKI_DIR_NAME / "state.db") as conn:
+        edges = conn.execute("SELECT new_source_id, target, target_type FROM supersessions").fetchall()
+        refs: dict[str, set[str]] = {}
+        for row in conn.execute("SELECT page_path, source_id FROM backrefs"):
+            refs.setdefault(row["page_path"], set()).add(row["source_id"])
+    superseded = {edge["target"] for edge in edges if edge["target_type"] == "source"}
+    for edge in edges:
+        source_id = edge["new_source_id"]
+        if edge["target_type"] == "page":
+            targets = [edge["target"]]
+        else:
+            targets = [
+                path
+                for path, source_ids in refs.items()
+                if edge["target"] in source_ids and not (source_ids - {edge["target"], source_id} - superseded - retired)
+            ]
+        for target in targets:
+            if source_id in refs.get(target, set()) or source_id in page_owners.get(target, set()):
+                continue
+            expected.setdefault(target, set()).add(source_id)
+    for path, source_ids in sorted(expected.items()):
+        for source_id in sorted(source_ids):
+            pattern = r"> \*\*Superseded[^\n]*\n<!-- mdwiki-superseded: " + re.escape(source_id) + r" -->"
+            if re.search(pattern, contents.get(path, "")) is None:
+                findings.append(
+                    LintFinding(
+                        kind="capture-missing-supersession",
+                        page_path=path,
+                        message=f"supersession callout for capture {source_id} is missing",
+                        severity="warn",
+                    )
+                )
+    return findings

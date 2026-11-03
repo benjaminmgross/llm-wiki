@@ -108,6 +108,19 @@ def rebuild_wiki(start: Path | None = None) -> RebuildResult:
                     failure_reason,
                 ),
             )
+            if meta.get("origin") == "capture":
+                capture = meta["capture"]
+                conn.execute(
+                    "INSERT INTO capture_state(source_id, retired_json) VALUES (?, ?) ON CONFLICT(source_id) DO UPDATE SET retired_json=excluded.retired_json",
+                    (short_hash, json.dumps(capture["retired"]) if capture.get("retired") else None),
+                )
+                conn.execute("DELETE FROM supersessions WHERE new_source_id = ?", (short_hash,))
+                if status == "ingested":
+                    for target in capture.get("supersedes", []):
+                        conn.execute(
+                            "INSERT OR IGNORE INTO supersessions(new_source_id, target, target_type, created_at) VALUES (?, ?, ?, ?)",
+                            (short_hash, target, "page" if target.startswith("wiki/") else "source", capture["captured_at"]),
+                        )
         conn.commit()
 
     return RebuildResult(
